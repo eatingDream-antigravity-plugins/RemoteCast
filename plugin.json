@@ -1,0 +1,18 @@
+{
+  "name": "chrome-stream-mcp",
+  "displayName": "Chrome Stream MCP",
+  "version": "0.1.0",
+  "description": "Low-bandwidth native Rust Chrome DevTools screencast relay, interactive tab controller, and MCP App viewer.",
+  "author": {
+    "name": "eatingDream",
+    "url": "https://github.com/eatingDream"
+  },
+  "homepage": "https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp",
+  "repository": "https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open Chrome Stream to view and control local Chrome tabs",
+    "Check Chrome Stream remote debugging connection status",
+    "Disconnect Chrome Stream to stop screencasting and save battery"
+  ]
+}

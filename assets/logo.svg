@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="cs-bg" x1="14" y1="12" x2="114" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#221F1B"/>
+      <stop offset="100%" stop-color="#141311"/>
+    </linearGradient>
+    <linearGradient id="cs-rim" x1="14" y1="12" x2="114" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E5896B" stop-opacity="0.72"/>
+      <stop offset="48%" stop-color="#F4F1EA" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#D97757" stop-opacity="0.45"/>
+    </linearGradient>
+    <linearGradient id="cs-terracotta" x1="30" y1="30" x2="96" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E5896B"/>
+      <stop offset="100%" stop-color="#D97757"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="104" height="104" rx="28" fill="url(#cs-bg)" stroke="url(#cs-rim)" stroke-width="2.6"/>
+  <path d="M28 43 C28 36.4 33.4 31 40 31 H57 C61.5 31 63.6 34.4 66.2 38 H88 C94.6 38 100 43.4 100 50 V84 C100 90.6 94.6 96 88 96 H40 C33.4 96 28 90.6 28 84 Z" fill="#181614" stroke="#F4F1EA" stroke-opacity="0.88" stroke-width="2.6"/>
+  <rect x="35" y="36.5" width="23" height="6" rx="3" fill="url(#cs-terracotta)"/>
+  <path d="M29.5 48.5 H98.5" stroke="#F4F1EA" stroke-opacity="0.18" stroke-width="2"/>
+  <circle cx="44" cy="82" r="4" fill="#4E9F72"/>
+  <path d="M44 69.5 A12.5 12.5 0 0 1 56.5 82" stroke="#E5896B" stroke-width="3.1" stroke-linecap="round"/>
+  <path d="M44 59 A23 23 0 0 1 67 82" stroke="#D97757" stroke-width="3.1" stroke-linecap="round"/>
+  <path d="M72 58.5 L90 67.5 L80.5 70.8 L77.2 80.2 Z" fill="#F4F1EA" stroke="#D97757" stroke-width="2" stroke-linejoin="round"/>
+</svg>

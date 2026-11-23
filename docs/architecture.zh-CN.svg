@@ -1,0 +1,203 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 620" width="1120" height="620" role="img" aria-labelledby="t d" font-family="-apple-system,'PingFang SC','Noto Sans CJK SC','Microsoft YaHei',BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <title id="t">Chrome Stream MCP 架构图</title>
+  <desc id="d">四层本地架构：零闪烁 SEP-1865 MCP App 面板经由 stdio JSON-RPC 与 chrome-stream-mcp serve 通信，通过 0600 Unix 套接字多路复用至常驻 chrome-stream-mcp relay 守护进程，再经由本地回环 RFC 6455 WebSocket 连接 Google Chrome CDP。</desc>
+  <defs>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1120" y2="620" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#181614"/>
+      <stop offset="100%" stop-color="#141311"/>
+    </linearGradient>
+    <marker id="arr-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#D97757"/>
+    </marker>
+    <marker id="arr-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#4E9F72"/>
+    </marker>
+    <filter id="card-shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Canvas -->
+  <rect x="0.5" y="0.5" width="1119" height="619" rx="18" fill="url(#bg-grad)" stroke="#2E2B26"/>
+
+  <!-- Header -->
+  <text x="560" y="38" text-anchor="middle" font-size="18" font-weight="700" fill="#F4F1EA">Chrome Stream MCP · 本地回环 CDP 中继与零闪烁 MCP App 架构</text>
+  <text x="560" y="57" text-anchor="middle" font-size="12" fill="#9E978B">单一原生 Rust 二进制 · 0600 持久化 Unix 套接字 · 四档弱网自适应投屏</text>
+
+  <!-- Column 1: MCP App Stage -->
+  <rect x="24" y="78" width="242" height="328" rx="14" fill="#1C1B18" stroke="#D97757" stroke-opacity="0.45"/>
+  <text x="145" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E5896B">1 · MCP App 舞台界面</text>
+  <text x="145" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">SEP-1865 iframe · panel/dist/panel.html</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="36" y="134" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="36" y="134" width="4" height="54" rx="2" fill="#D97757"/>
+  </g>
+  <text x="50" y="156" font-size="13" font-weight="650" fill="#F4F1EA">暗色优先零闪烁面板</text>
+  <text x="50" y="174" font-size="11" fill="#A9A296">&lt; 42 KiB · CSP default-src 'none'</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="36" y="198" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="36" y="198" width="4" height="54" rx="2" fill="#D97757"/>
+  </g>
+  <text x="50" y="220" font-size="13" font-weight="650" fill="#F4F1EA">透明背景与主题防护</text>
+  <text x="50" y="238" font-size="11" fill="#A9A296">拦截 alpha &lt; 0.9 的宿主背景变量</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="36" y="262" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="36" y="262" width="4" height="54" rx="2" fill="#D97757"/>
+  </g>
+  <text x="50" y="284" font-size="13" font-weight="650" fill="#F4F1EA">显式会话生命周期控制</text>
+  <text x="50" y="302" font-size="11" fill="#A9A296">连接 · 暂停/恢复 · 一键断开</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="36" y="326" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="36" y="326" width="4" height="54" rx="2" fill="#D97757"/>
+  </g>
+  <text x="50" y="348" font-size="13" font-weight="650" fill="#F4F1EA">双缓冲离屏渲染</text>
+  <text x="50" y="366" font-size="11" fill="#A9A296">createImageBitmap · 输入事件合并</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="270" y1="242" x2="296" y2="242" stroke="#D97757" stroke-width="2.2" marker-end="url(#arr-accent)"/>
+  <text x="283" y="230" text-anchor="middle" font-size="9.5" fill="#B8B2A6">stdio</text>
+
+  <!-- Column 2: MCP Stdio Server -->
+  <rect x="300" y="78" width="242" height="328" rx="14" fill="#1C1B18" stroke="#E0A458" stroke-opacity="0.45"/>
+  <text x="421" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E6B472">2 · MCP Stdio 服务</text>
+  <text x="421" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">chrome-stream-mcp serve</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="312" y="134" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="312" y="134" width="4" height="54" rx="2" fill="#E0A458"/>
+  </g>
+  <text x="326" y="156" font-size="13" font-weight="650" fill="#F4F1EA">启动预热与 SWR 缓存</text>
+  <text x="326" y="174" font-size="11" fill="#A9A296">&lt; 0.5 ms 响应首屏 SSR 快照</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="312" y="198" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="312" y="198" width="4" height="54" rx="2" fill="#E0A458"/>
+  </g>
+  <text x="326" y="220" font-size="13" font-weight="650" fill="#F4F1EA">工具可见性分层</text>
+  <text x="326" y="238" font-size="11" fill="#A9A296">3 个公开工具 · 4 个仅面板可见</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="312" y="262" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="312" y="262" width="4" height="54" rx="2" fill="#E0A458"/>
+  </g>
+  <text x="326" y="284" font-size="13" font-weight="650" fill="#F4F1EA">并发 JSON-RPC 调度</text>
+  <text x="326" y="302" font-size="11" fill="#A9A296">键鼠输入绝不被帧长轮询阻塞</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="312" y="326" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="312" y="326" width="4" height="54" rx="2" fill="#E0A458"/>
+  </g>
+  <text x="326" y="348" font-size="13" font-weight="650" fill="#F4F1EA">响应载荷自动脱敏</text>
+  <text x="326" y="366" font-size="11" fill="#A9A296">剥离本机路径、WS 令牌与主机名</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="546" y1="242" x2="572" y2="242" stroke="#D97757" stroke-width="2.2" marker-end="url(#arr-accent)"/>
+  <text x="559" y="230" text-anchor="middle" font-size="9.5" fill="#B8B2A6">0600</text>
+
+  <!-- Column 3: Persistent Relay Daemon -->
+  <rect x="576" y="78" width="242" height="328" rx="14" fill="#1C1B18" stroke="#4E9F72" stroke-opacity="0.5"/>
+  <text x="697" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#63B888">3 · 常驻 CDP 中继守护进程</text>
+  <text x="697" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">chrome-stream-mcp relay（独立驻留）</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="588" y="134" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="588" y="134" width="4" height="54" rx="2" fill="#4E9F72"/>
+  </g>
+  <text x="602" y="156" font-size="13" font-weight="650" fill="#F4F1EA">一次授权持久复用</text>
+  <text x="602" y="174" font-size="11" fill="#A9A296">MCP 重载免重复弹窗 · relay.sock</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="588" y="198" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="588" y="198" width="4" height="54" rx="2" fill="#4E9F72"/>
+  </g>
+  <text x="602" y="220" font-size="13" font-weight="650" fill="#F4F1EA">四档 RTT 自适应画质</text>
+  <text x="602" y="238" font-size="11" fill="#A9A296">ultra · low · medium · high + auto</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="588" y="262" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="588" y="262" width="4" height="54" rx="2" fill="#4E9F72"/>
+  </g>
+  <text x="602" y="284" font-size="13" font-weight="650" fill="#F4F1EA">SHA-1 帧内容去重</text>
+  <text x="602" y="302" font-size="11" fill="#A9A296">unchanged:true 零字节 · tabsHash 省略</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="588" y="326" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="588" y="326" width="4" height="54" rx="2" fill="#4E9F72"/>
+  </g>
+  <text x="602" y="348" font-size="13" font-weight="650" fill="#F4F1EA">12 秒空闲自动休眠</text>
+  <text x="602" y="366" font-size="11" fill="#A9A296">无人观看或暂停时停止 GPU 采帧</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="822" y1="242" x2="848" y2="242" stroke="#D97757" stroke-width="2.2" marker-end="url(#arr-accent)"/>
+  <text x="835" y="230" text-anchor="middle" font-size="9.5" fill="#B8B2A6">WS</text>
+
+  <!-- Column 4: Local Google Chrome -->
+  <rect x="852" y="78" width="244" height="328" rx="14" fill="#1C1B18" stroke="#8C9EFF" stroke-opacity="0.4"/>
+  <text x="974" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#AAB7FF">4 · 本机 Google Chrome</text>
+  <text x="974" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">127.0.0.1 / ::1 · 仅本地回环 CDP</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="864" y="134" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="864" y="134" width="4" height="54" rx="2" fill="#8C9EFF"/>
+  </g>
+  <text x="878" y="156" font-size="13" font-weight="650" fill="#F4F1EA">纯 Rust RFC 6455 客户端</text>
+  <text x="878" y="174" font-size="11" fill="#A9A296">严格回环 SSRF 地址校验</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="864" y="198" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="864" y="198" width="4" height="54" rx="2" fill="#8C9EFF"/>
+  </g>
+  <text x="878" y="220" font-size="13" font-weight="650" fill="#F4F1EA">调试端点自动发现</text>
+  <text x="878" y="238" font-size="11" fill="#A9A296">DevToolsActivePort 或 :9222</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="864" y="262" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="864" y="262" width="4" height="54" rx="2" fill="#8C9EFF"/>
+  </g>
+  <text x="878" y="284" font-size="13" font-weight="650" fill="#F4F1EA">尊重零标签页状态</text>
+  <text x="878" y="302" font-size="11" fill="#A9A296">无标签页时绝不强建 about:blank</text>
+
+  <g filter="url(#card-shadow)">
+    <rect x="864" y="326" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
+    <rect x="864" y="326" width="4" height="54" rx="2" fill="#8C9EFF"/>
+  </g>
+  <text x="878" y="348" font-size="13" font-weight="650" fill="#F4F1EA">原子关闭与异常自愈</text>
+  <text x="878" y="366" font-size="11" fill="#A9A296">安全关页 · -32000 透明恢复</text>
+
+  <!-- Bottom Strip 1: Agent Skill & Security Boundary -->
+  <rect x="24" y="424" width="1072" height="80" rx="12" fill="#1C1B18" stroke="#4E9F72" stroke-opacity="0.35" stroke-dasharray="5 4"/>
+  <text x="40" y="446" font-size="12.5" font-weight="700" fill="#63B888">安全边界与零侵入插件封装</text>
+
+  <rect x="40" y="456" width="248" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
+  <text x="52" y="479" font-size="11.5" fill="#F4F1EA">按需 <tspan fill="#E5896B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">SKILL.md</tspan> · 无 AGENTS.md</text>
+
+  <rect x="302" y="456" width="256" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
+  <text x="314" y="479" font-size="11.5" fill="#F4F1EA">独立 <tspan fill="#63B888" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">${PLUGIN_DATA}</tspan> · 0600 权限</text>
+
+  <rect x="572" y="456" width="252" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
+  <text x="584" y="479" font-size="11.5" fill="#F4F1EA">仅限回环 CDP · 面板零外部链接</text>
+
+  <rect x="838" y="456" width="242" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
+  <text x="850" y="479" font-size="11.5" fill="#F4F1EA">内置自检：<tspan fill="#E6B472" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">doctor --json</tspan></text>
+
+  <!-- Connector up to relay/server -->
+  <line x1="421" y1="423" x2="421" y2="410" stroke="#4E9F72" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arr-emerald)"/>
+  <line x1="697" y1="423" x2="697" y2="410" stroke="#4E9F72" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arr-emerald)"/>
+
+  <!-- Bottom Strip 2: CI / Release Pipeline -->
+  <rect x="24" y="518" width="1072" height="80" rx="12" fill="#1C1B18" stroke="#3A3630"/>
+  <text x="40" y="540" font-size="12.5" font-weight="700" fill="#B8B2A6">自动化发布与供应链卫生（GitHub Actions · 全 SHA 固定）</text>
+
+  <rect x="40" y="550" width="332" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
+  <text x="52" y="573" font-size="11.5" fill="#F4F1EA"><tspan fill="#E5896B" font-weight="650">ci.yml</tspan> · cargo test · 面板测试 · gitleaks · 脱敏校验</text>
+
+  <rect x="386" y="550" width="340" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
+  <text x="398" y="573" font-size="11.5" fill="#F4F1EA"><tspan fill="#E6B472" font-weight="650">release-please.yml</tspan> · Rust 与 plugin.json 自动同步</text>
+
+  <rect x="740" y="550" width="340" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
+  <text x="752" y="573" font-size="11.5" fill="#F4F1EA"><tspan fill="#63B888" font-weight="650">release.yml</tspan> · macOS arm64/x64 + Linux x64 · SHA256</text>
+</svg>

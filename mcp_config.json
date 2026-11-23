@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "chrome-stream-mcp": {
+      "command": "/usr/bin/env",
+      "args": [
+        "${PLUGIN_ROOT}/bin/chrome-stream-mcp",
+        "serve",
+        "--data-dir",
+        "${PLUGIN_DATA}",
+        "--panel-html",
+        "${PLUGIN_ROOT}/panel/dist/panel.html"
+      ]
+    }
+  }
+}

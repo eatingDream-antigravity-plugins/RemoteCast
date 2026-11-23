@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to build and attach release assets for (e.g. v0.1.0)"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: "Git tag to build and attach release assets for"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  ensure-release:
+    name: Validate tag & ensure GitHub Release
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Validate tag format
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "error: invalid release tag '$TAG' (expected vX.Y.Z)" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - name: Ensure GitHub Release exists
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; will attach/update plugin archives."
+          else
+            ver="${TAG#v}"
+            awk -v v="$ver" '/^###? / { p = index($0, "[" v "]") > 0 || index($0, " " v " ") > 0; next } /^\[[^]]*\]: / { next } p' CHANGELOG.md > release-notes.md
+            if [ -s release-notes.md ]; then notes=(--notes-file release-notes.md); else notes=(--generate-notes); fi
+            extra=()
+            if [[ "$TAG" == *-* ]]; then extra=(--prerelease); fi
+            gh release create "$TAG" \
+              --title "$TAG" \
+              "${extra[@]}" \
+              "${notes[@]}"
+          fi
+
+  build-and-publish:
+    name: Build plugin (${{ matrix.target }})
+    needs: ensure-release
+    runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      TARGET: ${{ matrix.target }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            run_tests: true
+            cross: false
+          - os: macos-14
+            target: x86_64-apple-darwin
+            run_tests: false
+            cross: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            run_tests: true
+            cross: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+      - name: Install Rust target
+        if: ${{ matrix.cross }}
+        run: rustup target add "${TARGET}"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build and verify panel bundle
+        run: |
+          node panel/build.mjs
+          node --test panel/net-policy.test.mjs
+      - name: Run Rust test suite
+        if: ${{ matrix.run_tests }}
+        run: cargo test --locked
+      - name: Build release binary (path-remapped)
+        run: |
+          RUSTFLAGS="--remap-path-prefix=${HOME}=/build" \
+            cargo build --release --locked --target "${TARGET}"
+      - name: Verify binary path hygiene
+        run: |
+          bin="target/${TARGET}/release/chrome-stream-mcp"
+          if strings "$bin" | grep -F "${HOME}" >/dev/null 2>&1; then
+            echo "error: runner HOME path leaked into release binary" >&2
+            exit 1
+          fi
+      - name: Package Antigravity plugin tarball and SHA256
+        run: |
+          archive="chrome-stream-mcp-${TAG}-${TARGET}.tar.gz"
+          stage="$(mktemp -d)"
+          trap 'rm -rf "$stage"' EXIT
+
+          mkdir -p "$stage/bin" "$stage/panel/dist" "$stage/skills/chrome-stream" "$stage/assets"
+          install -m 0755 "target/${TARGET}/release/chrome-stream-mcp" "$stage/bin/chrome-stream-mcp"
+          cp panel/dist/panel.html "$stage/panel/dist/panel.html"
+          cp plugin.json mcp_config.json LICENSE README.md "$stage/"
+          cp skills/chrome-stream/SKILL.md "$stage/skills/chrome-stream/SKILL.md"
+          cp assets/logo.svg "$stage/assets/logo.svg"
+
+          COPYFILE_DISABLE=1 tar -C "$stage" -czf "$archive" \
+            bin/chrome-stream-mcp \
+            panel/dist/panel.html \
+            plugin.json \
+            mcp_config.json \
+            skills/chrome-stream/SKILL.md \
+            assets/logo.svg \
+            LICENSE \
+            README.md
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "${archive}.sha256"
+          else
+            shasum -a 256 "$archive" > "${archive}.sha256"
+          fi
+          cat "${archive}.sha256"
+      - name: Upload release assets
+        run: |
+          archive="chrome-stream-mcp-${TAG}-${TARGET}.tar.gz"
+          gh release upload "$TAG" "$archive" "${archive}.sha256" --clobber
