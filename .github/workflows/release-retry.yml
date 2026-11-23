@@ -1,0 +1,37 @@
+name: Release Retry (Runner Capacity)
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  retry-runner-timeout:
+    name: Retry failed jobs caused by runner acquisition timeout
+    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt < 3 }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Rerun failed jobs if runner was never acquired
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          no_step_failures=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+            --jq '[.jobs[] | select(.conclusion == "failure" and ((.steps // []) | length == 0))] | length')
+          total_failures=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+            --jq '[.jobs[] | select(.conclusion == "failure")] | length')
+          echo "Failed jobs: total=${total_failures}, unacquired=${no_step_failures}"
+          if [ "$total_failures" -gt 0 ] && [ "$no_step_failures" -eq "$total_failures" ]; then
+            echo "All failed jobs timed out waiting for a hosted runner. Waiting 180s before retrying..."
+            sleep 180
+            gh run rerun "$RUN_ID" --failed -R "$REPO"
+          else
+            echo "At least one job failed inside a build/test step; skipping automatic retry."
+          fi

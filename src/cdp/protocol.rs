@@ -64,7 +64,7 @@ impl WsTransport {
         let _ = stream.set_read_timeout(Some(handshake_timeout));
 
         let mut key_bytes = [0u8; 16];
-        getrandom::getrandom(&mut key_bytes)
+        getrandom::fill(&mut key_bytes)
             .map_err(|e| format!("Failed generating WebSocket key: {e}"))?;
         let sec_key = base64_encode(&key_bytes);
 
@@ -211,7 +211,7 @@ pub fn expected_ws_accept(sec_key: &str) -> String {
 
 fn write_client_frame<W: Write>(writer: &mut W, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut mask = [0u8; 4];
-    getrandom::getrandom(&mut mask)
+    getrandom::fill(&mut mask)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("CSPRNG failed: {e}")))?;
 
     let len = payload.len();
