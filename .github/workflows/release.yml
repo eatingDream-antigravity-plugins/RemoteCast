@@ -68,11 +68,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             run_tests: true
             cross: false
-          - os: macos-14
+          - os: macos-latest
             target: x86_64-apple-darwin
             run_tests: false
             cross: true

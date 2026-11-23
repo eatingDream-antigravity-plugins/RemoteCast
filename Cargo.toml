@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Low-bandwidth native Rust Chrome DevTools screencast relay, interactive browser controller, and MCP App server."
-homepage = "https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp"
 repository = "https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp"
 keywords = ["chrome", "cdp", "screencast", "mcp", "browser"]
 categories = ["command-line-utilities", "network-programming", "web-programming"]
