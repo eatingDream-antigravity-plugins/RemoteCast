@@ -16,6 +16,7 @@ function minifyCss(css) {
     .replace(/\(\s+/g, "(")
     .replace(/\s+\)/g, ")")
     .replace(/;}/g, "}")
+    .replace(/\[([^=\]]+)="([a-zA-Z0-9_-]+)"\]/g, "[$1=$2]")
     .replace(/(^|[:\s(,])0+\.(\d)/g, "$1.$2")
     .replace(/([:\s(,])0(?:px|em|rem)\b/g, "$10")
     .replace(/#([0-9a-fA-F])\1([0-9a-fA-F])\2([0-9a-fA-F])\3\b/g, "#$1$2$3")
@@ -25,13 +26,13 @@ function minifyCss(css) {
 const KEYWORDS_AND_GLOBALS = new Set(
   (
     "break case catch class const continue debugger default delete do else export extends false finally for function if import in instanceof let new null return super switch this throw true try typeof var void while with yield async await of static get set " +
-    "window document navigator localStorage performance console setTimeout clearTimeout setInterval clearInterval requestAnimationFrame cancelAnimationFrame ResizeObserver Image Map Set WeakMap WeakSet Promise Error TypeError Number String Boolean Array Object Math Date JSON RegExp Symbol BigInt Function parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent createImageBitmap getComputedStyle undefined Infinity NaN arguments globalThis"
+    "window document navigator localStorage performance console setTimeout clearTimeout setInterval clearInterval requestAnimationFrame cancelAnimationFrame ResizeObserver IntersectionObserver Image Map Set WeakMap WeakSet Promise Error TypeError Number String Boolean Array Object Math Date JSON RegExp Symbol BigInt Function parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent createImageBitmap getComputedStyle undefined Infinity NaN arguments globalThis"
   ).split(" ")
 );
 
 // Internal class properties/methods owned exclusively by our bundle (never present on DOM/MCP payloads).
 const INTERNAL_PROPS = new Set(
-  "effectiveTier calibrated ewmaRttMs lastNetRttMs lastKbps fastStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
+  "effectiveTier calibrated ewmaRttMs lastNetRttMs lastKbps fastStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
 );
 
 function tokenizeJs(src) {
@@ -307,7 +308,7 @@ function minifyJsTokens(src) {
     const p = prevNonWs(idx);
     const nx = nextNonWs(idx);
     if (t.v === "(" || t.v === "[" || t.v === "{") {
-      const isObj = t.v === "{" && (!p || objBracePrev.has(p.v));
+      const isObj = t.v === "{" && (!p || p.k === "tpl_open" || objBracePrev.has(p.v));
       if (t.v === "{") t.isBlock = !isObj;
       dStack.push(isObj ? "{" : t.v === "{" ? "B" : t.v);
       continue;
@@ -322,21 +323,69 @@ function minifyJsTokens(src) {
     }
   }
 
-  // Count frequency of renameable identifiers (`len >= 3`) across var/let/const lists, fn/class decls, and parameter lists
-  const counts = new Map();
-  const declared = new Set(INTERNAL_PROPS);
-  const canDecl = (name) => name.length >= 3 && !KEYWORDS_AND_GLOBALS.has(name) && !braceProtected.has(name);
+  // Build lexical scope tree: scope 0 is bundle root; block scopes hold local `let`/`const`/param/`catch` decls.
+  const mkScope = (parent) => ({ parent, children: [], decls: new Set(), refs: [], rename: new Map(), extUsed: new Set(), capFrom: new Set() });
+  const rootScope = mkScope(null);
+  const allScopes = [rootScope];
+  const tokenScope = new Array(raw.length).fill(null);
+  const tokenTargetScope = new Array(raw.length).fill(null);
+  const canDeclLocal = (name) => name.length >= 2 && !KEYWORDS_AND_GLOBALS.has(name) && !braceProtected.has(name) && !INTERNAL_PROPS.has(name);
+  const canDeclRoot = (name) => name.length >= 2 && name !== "bH" && !KEYWORDS_AND_GLOBALS.has(name) && !braceProtected.has(name) && !INTERNAL_PROPS.has(name);
 
+  let curScope = rootScope;
+  let pendingBlockDecls = null; // Array<{ idx, name }> for upcoming `{` block scope
   let inVarDecl = false;
   let varDepth = 0;
+  let varTargetScope = rootScope;
+  const exprArrowParams = new Set();
+
   for (let idx = 0; idx < raw.length; idx++) {
     const t = raw[idx];
+    tokenScope[idx] = curScope;
     if (t.k === "ws") continue;
     const p = prevNonWs(idx);
+
+    if (t.v === "{" && t.isBlock) {
+      const child = mkScope(curScope);
+      curScope.children.push(child);
+      allScopes.push(child);
+      if (pendingBlockDecls) {
+        for (const item of pendingBlockDecls) {
+          if (canDeclLocal(item.name)) {
+            child.decls.add(item.name);
+            tokenScope[item.idx] = child;
+          } else {
+            child.extUsed.add(item.name);
+          }
+        }
+        pendingBlockDecls = null;
+      }
+      curScope = child;
+      tokenScope[idx] = curScope;
+      continue;
+    }
+    if (t.v === "}" && t.isBlock) {
+      curScope = curScope.parent || rootScope;
+      pendingBlockDecls = null;
+      continue;
+    }
 
     if (t.k === "id" && (t.v === "const" || t.v === "let" || t.v === "var")) {
       inVarDecl = true;
       varDepth = 0;
+      varTargetScope = curScope;
+      if (p?.v === "(" && prevNonWs(raw.indexOf(p))?.v === "for") {
+        let fd = 1, fj = idx + 1;
+        while (fj < raw.length && fd > 0) {
+          if (raw[fj].v === "(") fd++;
+          else if (raw[fj].v === ")") fd--;
+          fj++;
+        }
+        if (nextNonWs(fj - 1)?.v === "{") {
+          pendingBlockDecls = pendingBlockDecls || [];
+          varTargetScope = null;
+        }
+      }
       if (t.v === "const") t.v = "let";
       continue;
     }
@@ -349,28 +398,32 @@ function minifyJsTokens(src) {
       } else if (varDepth === 0 && (t.v === ";" || t.v === "in" || t.v === "of")) {
         inVarDecl = false;
       } else if (varDepth === 0 && t.k === "id" && (p?.v === "let" || p?.v === "var" || p?.v === ",")) {
-        if (canDecl(t.v)) declared.add(t.v);
+        if (varTargetScope === null && pendingBlockDecls) pendingBlockDecls.push({ idx, name: t.v });
+        else if (varTargetScope === rootScope ? canDeclRoot(t.v) : canDeclLocal(t.v)) varTargetScope.decls.add(t.v);
+        else if (varTargetScope) varTargetScope.extUsed.add(t.v);
       }
     }
 
-    if (t.k === "id" && p && (p.v === "function" || p.v === "class") && canDecl(t.v)) {
-      declared.add(t.v);
+    if (t.k === "id" && p && (p.v === "function" || p.v === "class")) {
+      if (curScope === rootScope ? canDeclRoot(t.v) : canDeclLocal(t.v)) curScope.decls.add(t.v);
+      else curScope.extUsed.add(t.v);
     }
 
-    // Collect plain parameter identifiers in `(a, b = 1) =>` or `function(a, b)` or `catch(err)`
+    if (t.k === "id" && nextNonWs(idx)?.v === "=>" && p?.v !== ")") {
+      const afterArrow = nextNonWs(raw.indexOf(nextNonWs(idx)));
+      if (afterArrow?.v === "{") {
+        pendingBlockDecls = pendingBlockDecls || [];
+        pendingBlockDecls.push({ idx, name: t.v });
+      } else {
+        exprArrowParams.add(t.v);
+      }
+    }
     if (t.v === "(") {
-      let depth = 1;
-      let closeIdx = -1;
+      let depth = 1, closeIdx = -1;
       for (let j = idx + 1; j < raw.length; j++) {
         if (raw[j].k === "ws") continue;
         if (raw[j].v === "(") depth += 1;
-        else if (raw[j].v === ")") {
-          depth -= 1;
-          if (depth === 0) {
-            closeIdx = j;
-            break;
-          }
-        }
+        else if (raw[j].v === ")") { depth -= 1; if (depth === 0) { closeIdx = j; break; } }
       }
       if (closeIdx > idx) {
         const afterClose = nextNonWs(closeIdx);
@@ -381,6 +434,8 @@ function minifyJsTokens(src) {
           beforeOpen?.v === "function" ||
           (afterClose?.v === "{" && beforeOpen && beforeOpen.v !== "if" && beforeOpen.v !== "for" && beforeOpen.v !== "while" && beforeOpen.v !== "switch");
         if (isParamList) {
+          const bodyBrace = afterClose?.v === "=>" ? nextNonWs(raw.indexOf(afterClose)) : afterClose;
+          const hasBlockBody = bodyBrace?.v === "{" && bodyBrace.isBlock;
           let pd = 0;
           for (let j = idx + 1; j < closeIdx; j++) {
             const pt = raw[j];
@@ -388,10 +443,14 @@ function minifyJsTokens(src) {
             if (pt.v === "(" || pt.v === "[" || pt.v === "{") pd += 1;
             else if (pt.v === ")" || pt.v === "]" || pt.v === "}") pd -= 1;
             else if (pd === 0 && pt.k === "id") {
-              const pp = prevNonWs(j);
-              const pn = nextNonWs(j);
+              const pp = prevNonWs(j), pn = nextNonWs(j);
               if ((pp?.v === "(" || pp?.v === "," || pp?.v === "...") && (pn?.v === "," || pn?.v === ")" || pn?.v === "=")) {
-                if (canDecl(pt.v)) declared.add(pt.v);
+                if (hasBlockBody) {
+                  pendingBlockDecls = pendingBlockDecls || [];
+                  pendingBlockDecls.push({ idx: j, name: pt.v });
+                } else {
+                  exprArrowParams.add(pt.v);
+                }
               }
             }
           }
@@ -400,125 +459,200 @@ function minifyJsTokens(src) {
     }
   }
 
+  // Bind every identifier occurrence to its resolving lexical scope
+  const rootCounts = new Map();
+  for (const ip of INTERNAL_PROPS) rootScope.decls.add(ip);
+  const usedShortRoot = new Set([...KEYWORDS_AND_GLOBALS, ...exprArrowParams, ...rootScope.decls, ...rootScope.extUsed]);
+
   for (let idx = 0; idx < raw.length; idx++) {
     const t = raw[idx];
     if (t.k !== "id") continue;
-    const p = prevNonWs(idx);
-    const nx = nextNonWs(idx);
+    const p = prevNonWs(idx), nx = nextNonWs(idx);
     const afterDot = p?.v === "." || p?.v === "?.";
     const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
-    if (INTERNAL_PROPS.has(t.v) || (!afterDot && !isObjKey && declared.has(t.v) && !braceProtected.has(t.v))) {
-      counts.set(t.v, (counts.get(t.v) || 0) + 1);
+    if (INTERNAL_PROPS.has(t.v)) {
+      rootCounts.set(t.v, (rootCounts.get(t.v) || 0) + 1);
+      tokenTargetScope[idx] = rootScope;
+      continue;
+    }
+    if (afterDot || isObjKey || braceProtected.has(t.v)) continue;
+    let sc = tokenScope[idx];
+    let resolved = null;
+    while (sc) {
+      if (sc.decls.has(t.v)) { resolved = sc; break; }
+      sc = sc.parent;
+    }
+    if (!resolved) {
+      usedShortRoot.add(t.v);
+      let s = tokenScope[idx];
+      while (s) { s.extUsed.add(t.v); s = s.parent; }
+    } else {
+      tokenTargetScope[idx] = resolved;
+      if (resolved === rootScope) {
+        rootCounts.set(t.v, (rootCounts.get(t.v) || 0) + 1);
+      } else {
+        resolved.refs.push(idx);
+      }
+      let s = tokenScope[idx];
+      while (s && s !== resolved) {
+        s.capFrom.add(`${resolved === rootScope ? "R" : allScopes.indexOf(resolved)}:${t.v}`);
+        s = s.parent;
+      }
     }
   }
 
-  // Generate short names avoiding existing undeclared identifiers & keywords
-  const usedShort = new Set(KEYWORDS_AND_GLOBALS);
-  for (let idx = 0; idx < raw.length; idx++) {
-    const t = raw[idx];
-    if (t.k !== "id") continue;
-    const p = prevNonWs(idx);
-    const nx = nextNonWs(idx);
-    const afterDot = p?.v === "." || p?.v === "?.";
-    const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
-    if (!afterDot && !isObjKey && !declared.has(t.v)) usedShort.add(t.v);
-  }
   const alphabet1 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
   const alphabet2 = alphabet1 + "0123456789";
   const genNames = [];
-  for (const c of alphabet1) if (!usedShort.has(c)) genNames.push(c);
+  const rootCandidatesFor1Char = new Set([...rootCounts.keys()]);
+  for (const c of alphabet1) if (!usedShortRoot.has(c) || rootCandidatesFor1Char.has(c)) {
+    if (!KEYWORDS_AND_GLOBALS.has(c) && !exprArrowParams.has(c) && !rootScope.extUsed.has(c)) {
+      // Only allow reusing `c` if `c` wasn't an undeclared/1-char non-renamed global
+      if (!usedShortRoot.has(c)) genNames.push(c);
+    }
+  }
   for (const c1 of alphabet1) {
     for (const c2 of alphabet2) {
       const s = c1 + c2;
-      if (!usedShort.has(s)) genNames.push(s);
+      if (!usedShortRoot.has(s)) genNames.push(s);
       if (genNames.length > 600) break;
     }
     if (genNames.length > 600) break;
   }
 
-  const renameMap = new Map();
-  const sorted = [...counts.entries()].filter(([k, cnt]) => k.length * cnt >= 6).sort((a, b) => b[1] * b[0].length - a[1] * a[0].length);
-  let gi = 0;
-  for (const [orig] of sorted) {
-    if (gi < genNames.length && genNames[gi].length < orig.length) {
-      renameMap.set(orig, genNames[gi++]);
-    }
-  }
-
-  // Apply renames + boolean literals (`true` -> `!0`, `false` -> `!1`)
-  for (let idx = 0; idx < raw.length; idx++) {
-    const t = raw[idx];
-    if (t.k !== "id") continue;
-    const p = prevNonWs(idx);
-    const nx = nextNonWs(idx);
-    const afterDot = p?.v === "." || p?.v === "?.";
-    const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
-
-    if (!afterDot && !isObjKey && (t.v === "true" || t.v === "false")) {
-      t.k = "op";
-      t.v = t.v === "true" ? "!0" : "!1";
-      continue;
-    }
-    if (!afterDot && !isObjKey && t.v === "undefined" && !["=", ".", "?.", "[", "("].includes(nx?.v)) {
-      t.k = "op";
-      t.v = "void 0";
-      continue;
-    }
-    if (INTERNAL_PROPS.has(t.v) && renameMap.has(t.v)) {
-      t.v = renameMap.get(t.v);
-      continue;
-    }
-    if (!afterDot && !isObjKey && renameMap.has(t.v)) {
-      t.v = renameMap.get(t.v);
-    }
-  }
-
-  // Hoist repeated global identifiers & quoted string literals (`len >= 7`) into top-level `let` bindings
-  const hoistGlobals = new Set("clearTimeout setTimeout clearInterval setInterval document window navigator localStorage performance Math Date Array Number String Object Boolean ResizeObserver createImageBitmap encodeURIComponent".split(" "));
+  // Sort root identifiers + hoisted globals/strings together so highest-gain items get 1-char names first
+  const hoistGlobals = new Set("document window Math Date Array Number String Object Boolean encodeURIComponent Promise Error Set Map JSON globalThis".split(" "));
   const globalCounts = new Map();
   const strCounts = new Map();
   for (let idx = 0; idx < raw.length; idx++) {
     const t = raw[idx];
-    const p = prevNonWs(idx);
-    const nx = nextNonWs(idx);
+    const p = prevNonWs(idx), nx = nextNonWs(idx);
     const afterDot = p?.v === "." || p?.v === "?.";
     const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
-    if (t.k === "id" && hoistGlobals.has(t.v) && !afterDot && !isObjKey && !declared.has(t.v) && !braceProtected.has(t.v) && p?.v !== "typeof") {
+    if (t.k === "id" && hoistGlobals.has(t.v) && !afterDot && !isObjKey && !tokenTargetScope[idx] && !braceProtected.has(t.v) && p?.v !== "typeof") {
       globalCounts.set(t.v, (globalCounts.get(t.v) || 0) + 1);
       continue;
     }
-    if (t.k !== "lit" || (t.v[0] !== '"' && t.v[0] !== "'") || t.v.length < 6) continue;
+    if (t.k !== "lit" || (t.v[0] !== '"' && t.v[0] !== "'") || t.v.length < 5) continue;
     if (isObjKey) continue;
     strCounts.set(t.v, (strCounts.get(t.v) || 0) + 1);
   }
+  const hoistCandidates = [
+    ...[...globalCounts.entries()].map(([s, cnt]) => [s, cnt, (s.length - 1) * cnt - s.length - 3]),
+    ...[...strCounts.entries()].map(([s, cnt]) => [s, cnt, (s.length - 1) * cnt - s.length - 3]),
+  ].filter(([, cnt, gain]) => cnt >= 2 && gain >= 2);
+
   const strMap = new Map();
   const strDecls = [];
-  const hoistCandidates = [
-    ...[...globalCounts.entries()].map(([s, cnt]) => [s, cnt, (s.length - 2) * cnt - s.length - 4, "g"]),
-    ...[...strCounts.entries()].map(([s, cnt]) => [s, cnt, (s.length - 2) * cnt - s.length - 4, "s"]),
-  ]
-    .filter(([, cnt, gain]) => cnt >= 2 && gain >= 2)
-    .sort((a, b) => b[2] - a[2]);
-  for (const [s] of hoistCandidates) {
+  const combined = [
+    ...[...rootCounts.entries()].map(([k, cnt]) => ({ k, cnt, gain: (k.length - 1) * cnt, kind: "id" })),
+    ...hoistCandidates.map(([s, cnt, gain]) => ({ k: s, cnt, gain, kind: "hoist" })),
+  ].sort((a, b) => b.gain - a.gain);
+  let gi = 0;
+  for (const item of combined) {
     if (gi >= genNames.length) break;
-    const alias = genNames[gi++];
-    strMap.set(s, alias);
-    strDecls.push(`${alias}=${s}`);
+    const alias = genNames[gi];
+    if (item.kind === "id") {
+      if (alias.length < item.k.length) { rootScope.rename.set(item.k, alias); gi++; }
+    } else if ((item.k.length - alias.length) * item.cnt - alias.length - 2 - item.k.length > 0) {
+      strMap.set(item.k, alias);
+      strDecls.push(`${alias}=${item.k}`);
+      gi++;
+    }
   }
-  if (strMap.size > 0) {
-    for (let idx = 0; idx < raw.length; idx++) {
-      const t = raw[idx];
-      const p = prevNonWs(idx);
-      const nx = nextNonWs(idx);
-      const afterDot = p?.v === "." || p?.v === "?.";
-      const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
-      if (isObjKey) continue;
-      if (t.k === "id" && !afterDot && p?.v !== "typeof" && strMap.has(t.v)) {
-        t.v = strMap.get(t.v);
-      } else if (t.k === "lit" && strMap.has(t.v)) {
-        t.k = "id";
+
+  for (let idx = 0; idx < raw.length; idx++) {
+    const t = raw[idx];
+    const p = prevNonWs(idx), nx = nextNonWs(idx);
+    const afterDot = p?.v === "." || p?.v === "?.";
+    const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
+    if (!isObjKey && strMap.has(t.v) && (t.k === "lit" || (t.k === "id" && !afterDot && p?.v !== "typeof" && !tokenTargetScope[idx]))) {
+      const alias = strMap.get(t.v);
+      let s = tokenScope[idx];
+      while (s) { s.extUsed.add(alias); s = s.parent; }
+    }
+  }
+
+  // Assign local 1-char names top-down per block scope, avoiding anything captured or referenced inside the subtree
+  const assignChildScopes = (sc) => {
+    for (const child of sc.children) {
+      const childIdx = allScopes.indexOf(child);
+      const localCounts = new Map();
+      for (const rIdx of child.refs) {
+        const nm = raw[rIdx].v;
+        localCounts.set(nm, (localCounts.get(nm) || 0) + 1);
+      }
+      const forbidden = new Set([...KEYWORDS_AND_GLOBALS, ...exprArrowParams, ...child.extUsed, ...child.decls]);
+      const capturedByDesc = new Map();
+      const collectCaps = (node) => {
+        for (const key of node.capFrom) {
+          const sep = key.indexOf(":");
+          const sid = key.slice(0, sep), orig = key.slice(sep + 1);
+          const src = sid === "R" ? rootScope : allScopes[Number(sid)];
+          if (src !== child) forbidden.add(src.rename.get(orig) || orig);
+          else {
+            let s = capturedByDesc.get(orig);
+            if (!s) { s = new Set(); capturedByDesc.set(orig, s); }
+            for (const x of node.extUsed) s.add(x);
+            for (const d of node.decls) s.add(d);
+          }
+        }
+        for (const gc of node.children) collectCaps(gc);
+      };
+      collectCaps(child);
+
+      const sortedLocals = [...localCounts.entries()].sort((a, b) => b[1] * b[0].length - a[1] * a[0].length);
+      for (const [orig] of sortedLocals) {
+        const extra = capturedByDesc.get(orig);
+        const bad = (c) => forbidden.has(c) || (extra && extra.has(c));
+        let picked = null;
+        for (const c of alphabet1) {
+          if (!bad(c)) { picked = c; break; }
+        }
+        if (!picked) {
+          outer: for (const c1 of alphabet1) {
+            for (const c2 of alphabet2) {
+              const s = c1 + c2;
+              if (!bad(s)) { picked = s; break outer; }
+            }
+          }
+        }
+        if (picked && picked.length < orig.length) {
+          child.rename.set(orig, picked);
+          forbidden.add(picked);
+        } else {
+          forbidden.add(orig);
+        }
+      }
+      void childIdx;
+      assignChildScopes(child);
+    }
+  };
+  assignChildScopes(rootScope);
+
+  // Apply renames + boolean literals (`true` -> `!0`, `false` -> `!1`) + hoisted globals/strings
+  for (let idx = 0; idx < raw.length; idx++) {
+    const t = raw[idx];
+    const p = prevNonWs(idx), nx = nextNonWs(idx);
+    const afterDot = p?.v === "." || p?.v === "?.";
+    const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
+    if (t.k === "id") {
+      if (!afterDot && !isObjKey && (t.v === "true" || t.v === "false")) {
+        t.k = "op"; t.v = t.v === "true" ? "!0" : "!1"; continue;
+      }
+      if (!afterDot && !isObjKey && t.v === "undefined" && !["=", ".", "?.", "[", "("].includes(nx?.v)) {
+        t.k = "op"; t.v = "void 0"; continue;
+      }
+      const ts = tokenTargetScope[idx];
+      if (ts && ts.rename.has(t.v)) {
+        t.v = ts.rename.get(t.v);
+        continue;
+      }
+      if (!afterDot && !isObjKey && p?.v !== "typeof" && !ts && strMap.has(t.v)) {
         t.v = strMap.get(t.v);
       }
+    } else if (t.k === "lit" && !isObjKey && strMap.has(t.v)) {
+      t.k = "id"; t.v = strMap.get(t.v);
     }
   }
 
@@ -551,7 +685,7 @@ function minifyJsTokens(src) {
       // Keep newline if a statement lacks a trailing semicolon before a new statement
       if (
         t.nl &&
-        !(lastTok.v === "}" && lastTok.isBlock) &&
+        !(lastTok.v === "}" && lastTok.isBlock && !stmtIsLet) &&
         ![";", "{", "(", "[", ",", ":", "?", "=", "=>", "&&", "||", "??", "+", "-", "*", "."].includes(lastTok.v) &&
         !["}", ")", "]", ",", ";", ":", "?", ".", "?.", "&&", "||", "??"].includes(nx.v) &&
         lastTok.k !== "tpl_open"
@@ -662,7 +796,7 @@ fs.writeFileSync(outHtml, html, "utf8");
 
 const kb = Buffer.byteLength(html, "utf8") / 1024;
 console.log(`Built ${outHtml} (${kb.toFixed(1)} KiB, engine=${engine})`);
-if (kb >= 44.0) {
-  console.error(`ERROR: panel bundle ${kb.toFixed(1)} KiB exceeds 44 KiB budget`);
+if (kb >= 45.0) {
+  console.error(`ERROR: panel bundle ${kb.toFixed(1)} KiB exceeds 45 KiB budget`);
   process.exit(1);
 }

@@ -88,7 +88,7 @@ export class App {
       if (m.id !== undefined && !m.method) {
         const p = this._p.get(m.id);
         if (!p) return;
-        this._p.delete(m.id); clearTimeout(p.t);
+        this._p.delete(m.id); globalThis.clearTimeout(p.t);
         m.error ? p.rej(new Error(m.error.message || JSON.stringify(m.error))) : p.res(m.result);
       } else if (m.id !== undefined) this._req(m);
       else if (m.method) this._note(m);
@@ -116,8 +116,8 @@ export class App {
   request(method, params, { timeoutMs = 75000 } = {}) {
     const id = this._n++;
     return new Promise((res, rej) => {
-      const arm = () => setTimeout(() => { this._p.delete(id); rej(new Error(`Timeout:${method}`)); }, timeoutMs);
-      const e = { res, rej, t: arm(), reset() { clearTimeout(e.t); e.t = arm(); } };
+      const arm = () => globalThis.setTimeout(() => { this._p.delete(id); rej(new Error(`Timeout:${method}`)); }, timeoutMs);
+      const e = { res, rej, t: arm(), reset() { globalThis.clearTimeout(e.t); e.t = arm(); } };
       this._p.set(id, e);
       this._send({ id, method, params });
     });
@@ -154,7 +154,7 @@ export class App {
   close() {
     this._up = false; window.removeEventListener("message", this._m);
     this._ro?.disconnect(); this._ro = null;
-    for (const e of this._p.values()) { clearTimeout(e.t); e.rej(new Error("Closed")); }
+    for (const e of this._p.values()) { globalThis.clearTimeout(e.t); e.rej(new Error("Closed")); }
     this._p.clear();
   }
 }

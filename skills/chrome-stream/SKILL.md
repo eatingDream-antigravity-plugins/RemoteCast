@@ -28,8 +28,9 @@ Only invoke the public tools listed below. App-only tools (`chrome_stream_tabs`,
 - Chrome Stream respects zero open tabs and **never** forcibly creates an `about:blank` tab when the last tab is closed or when Chrome has no open pages.
 - When `connected: true` and `tabs` is empty (`activeTargetId: null`), inform the user that Chrome is connected with zero open tabs and they can click **New Tab (`+`)** in the stage toolbar or open a page in Chrome.
 
-### 3. Pausing vs. disconnecting
+### 3. Pausing vs. disconnecting & background/reveal refresh
 - **Pause / Resume** (inside the stage toolbar): pauses frame polling and stops GPU screencasting while keeping the authorized CDP relay WebSocket alive, so resuming requires no new Chrome permission prompt. The relay also stops GPU screencasting automatically after 12 seconds of inactivity.
+- **Background & reveal refresh**: While unpaused (`paused: false`), the panel continues lightweight RTT-adaptive background refreshes (2s–12s connected, 3s–10s staged) using hash deduplication (`unchanged: true`, zero redundant image bytes/repaints), and immediately force-refreshes (`forceRefresh: true`) when a kept-alive side/global pane is revealed (`ResizeObserver`, `IntersectionObserver`, `hostContext`, `visibilitychange`, `focus`, `pageshow`, stale `pointerenter`), without ever overriding explicit **Pause**.
 - **Disconnect** (`chrome_stream_disconnect` or the stage **Disconnect** button): terminates the CDP WebSocket completely to minimize power usage. Use `chrome_stream_disconnect` whenever the user finishes their session or asks to free battery/resources.
 
 ### 4. Weak-network quality tuning
