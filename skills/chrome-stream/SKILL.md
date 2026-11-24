@@ -41,9 +41,9 @@ Only invoke the public tools listed below. App-only tools (`chrome_stream_tabs`,
 If `chrome_stream_stage` reports that Chrome debugging is not reachable (`portFile.valid: false`), guide the user through these local-only steps:
 
 1. Ensure Google Chrome is running locally.
-2. Open `chrome://inspect/#remote-debugging` in Chrome and enable remote debugging (or launch Chrome with `--remote-debugging-port=9222` bound to localhost).
+2. Open `chrome://inspect/#remote-debugging` in Chrome and enable remote debugging (recommended for your default profile on Chrome 136+), or launch a separate Chrome profile with `--remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug`.
 3. Trigger **Connect** (or `chrome_stream_connect`) and click **Allow** once in Chrome's permission prompt. The persistent `0600` Unix-socket relay (`chrome-stream-mcp relay`) retains the authorized WebSocket across MCP server restarts.
-4. For troubleshooting, the user can run `chrome-stream-mcp doctor --json` locally to inspect `DevToolsActivePort` validity, port `9222` fallback, relay socket mode (`0600`), and panel bundle health.
+4. For troubleshooting, the user can run `chrome-stream-mcp doctor --json` locally to inspect `DevToolsActivePort` TCP liveness, port `9222` fallback, relay socket mode (`0600`), and panel bundle health.
 
 ## Security & Privacy Guardrails
 

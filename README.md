@@ -50,7 +50,7 @@ CHROME_STREAM_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/eating
 ### 2. Turn on Chrome remote debugging (one-time)
 
 1. Keep Google Chrome open on your computer.
-2. Open `chrome://inspect/#remote-debugging` in Chrome and enable remote debugging (or launch Chrome locally with `--remote-debugging-port=9222`).
+2. Open `chrome://inspect/#remote-debugging` in Chrome and enable remote debugging (recommended on **Chrome 136+**, which blocks `--remote-debugging-port` on the default profile directory). If you prefer launching a separate debug instance from the terminal, pass `--remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug`.
 3. Open **Chrome Stream** in Antigravity, click **Connect**, and click **Allow** once when Chrome asks.
 
 If Chrome doesn't connect, run `chrome-stream-mcp doctor` in a terminal to see what's missing.
@@ -75,13 +75,19 @@ Chrome Stream ships an on-demand skill (with zero always-on prompt overhead), so
 | `chrome_stream_connect` | Connects to your local Chrome session and starts streaming the active tab. |
 | `chrome_stream_disconnect` | Stops streaming and closes the Chrome debugging connection. |
 
-### Custom Chrome port or profile (optional)
+### Custom Chrome port, profile, or language (optional)
 
-By default, Chrome Stream finds your running Chrome automatically (with localhost port `9222` as fallback). If you run a custom setup, you can set `CHROME_STREAM_CHROME_DEBUG_PORT` or `CHROME_STREAM_CHROME_PORT_FILE`.
+By default, Chrome Stream scans standard macOS and Linux Chrome/Chromium profile directories (checking that `DevToolsActivePort` is actually listening, and falling back to localhost port `9222`). If you run a custom setup, you can set `CHROME_STREAM_DEBUG_PORT`, `CHROME_STREAM_PORT_FILE`, `CHROME_STREAM_USER_DATA_DIR`, or `CHROME_STREAM_LANG` (`en` / `zh-CN`).
 
-## Privacy & Security
+## How It Works & Safety Principles
 
-Chrome Stream only connects to Google Chrome on `localhost` (`127.0.0.1` / `::1`) and refuses non-local addresses. Never expose Chrome's remote debugging port to the public network. Local file paths and internal WebSocket tokens are stripped before anything is returned to the agent, and the plugin makes no outbound network requests.
+Chrome Stream is designed to behave like a quiet, strictly local companion to your browser without surprising system changes or background resource drain:
+
+- **Loopback-only (`127.0.0.1` / `::1`)**: Chrome Stream only connects to Chrome on your local loopback interface and refuses any remote or non-loopback address. Never expose Chrome's remote debugging port to the public network.
+- **Private local `0600` relay socket**: A small background relay keeps your authorized session over a user-only (`0600`) Unix domain socket in `~/.gemini/antigravity/plugin_data/chrome-stream-mcp/`, so Antigravity doesn't re-trigger Chrome's permission prompt on every restart.
+- **Single-approval flow & explicit connect**: Opening the panel never dials Chrome behind your back. You click **Connect** once, approve **Allow** once in Chrome, and can **Pause** or **Disconnect** from the header at any time.
+- **12-second idle GPU stop**: If you leave the panel open without interacting for 12 seconds, screen capture pauses automatically so Chrome's GPU rests, then wakes immediately on your next click, scroll, keystroke, or wake tap.
+- **Privacy redaction & zero outbound traffic**: Local filesystem paths and internal WebSocket tokens are stripped before anything reaches the agent, and the plugin makes zero outbound network requests.
 
 ## Build from source
 

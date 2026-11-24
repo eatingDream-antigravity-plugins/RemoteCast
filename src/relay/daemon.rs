@@ -44,7 +44,7 @@ pub fn run_relay_daemon(cfg: &Config) -> Result<(), String> {
         let _ = fs::remove_file(&cfg.relay_sock);
     }
 
-    let cdp = CdpClient::new(cfg.port_file.clone(), cfg.debug_port);
+    let cdp = CdpClient::new_with_candidates(cfg.port_files.clone(), cfg.debug_port);
     let cdp_warm = Arc::clone(&cdp);
     let _ = thread::Builder::new()
         .name("chrome-stream-probe".to_string())
@@ -281,9 +281,12 @@ pub fn dispatch_rpc(
                 "ok": true,
                 "connected": cdp.is_connected(),
                 "paused": false,
+                "screencastPausedIdle": false,
                 "noTabs": active_tid.is_none(),
                 "hostname": "localhost",
+                "locale": crate::i18n::current_lang().as_str(),
                 "activeTargetId": active_tid,
+                "dialog": cdp.active_dialog(),
                 "epoch": cdp.tab_epoch(),
                 "tabs": tabs,
                 "tabsHash": hash_tabs(&tabs),
@@ -311,17 +314,7 @@ pub fn dispatch_rpc(
                         events: vec![InputEvent {
                             action: "switch_tab".into(),
                             target_id,
-                            x: None,
-                            y: None,
-                            button: None,
-                            click_count: None,
-                            delta_x: None,
-                            delta_y: None,
-                            text: None,
-                            press_enter: None,
-                            key: None,
-                            repeat: None,
-                            url: None,
+                            ..Default::default()
                         }],
                     })
                     .map_err(|e| e.message),
@@ -330,23 +323,22 @@ pub fn dispatch_rpc(
                         target_id: None,
                         events: vec![InputEvent {
                             action: "new_tab".into(),
-                            target_id: None,
-                            x: None,
-                            y: None,
-                            button: None,
-                            click_count: None,
-                            delta_x: None,
-                            delta_y: None,
-                            text: None,
-                            press_enter: None,
-                            key: None,
-                            repeat: None,
                             url: url.or_else(|| Some("about:blank".into())),
+                            ..Default::default()
                         }],
                     })
                     .map_err(|e| e.message),
                 _ => {
-                    cdp.ensure_connected().map_err(|e| e.message)?;
+                    if !cdp.is_connected() {
+                        return Ok(json!({
+                            "ok": false,
+                            "connected": false,
+                            "activeTargetId": Value::Null,
+                            "epoch": cdp.tab_epoch(),
+                            "tabs": [],
+                            "tabsHash": "empty",
+                        }));
+                    }
                     let tabs = cdp.list_tabs(true).map_err(|e| e.message)?;
                     Ok(json!({
                         "ok": true,
@@ -390,17 +382,8 @@ pub fn dispatch_rpc(
                 events: vec![InputEvent {
                     action: mapped.into(),
                     target_id,
-                    x: None,
-                    y: None,
-                    button: None,
-                    click_count: None,
-                    delta_x: None,
-                    delta_y: None,
-                    text: None,
-                    press_enter: None,
-                    key: None,
-                    repeat: None,
                     url,
+                    ..Default::default()
                 }],
             })
             .map_err(|e| e.message)
@@ -529,6 +512,24 @@ mod tests {
         let client = RelayClient::connect_only(sock.clone());
         let ping = client.call("ping", json!({}), Duration::from_secs(2)).unwrap();
         assert_eq!(ping["ok"], true);
+
+        let pre_frame = client
+            .call(
+                "poll_frame",
+                json!({ "qualityPreset": "low", "waitMs": 0 }),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(pre_frame["connected"], false);
+
+        let conn_res = client
+            .call(
+                "connect",
+                json!({ "qualityPreset": "low" }),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+        assert_eq!(conn_res["connected"], true);
 
         let frame = client
             .call(
