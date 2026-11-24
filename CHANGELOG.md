@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.2.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.1.0...v0.2.0) (2026-11-24)
+
+
+### Features
+
+* complete interactive controls, idle/dialog/disconnect fixes, discovery, bilingual UI, and safety docs ([#6](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/6)) ([e49290a](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/e49290ab5a94a4ffabe9f709c458cc0edf4bfb70))
+
+
+### Documentation
+
+* **readme:** rewrite bilingual READMEs for human readability and usage focus ([#3](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/3)) ([7448dfc](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/7448dfc72e35c5555b4dac94863026aa2ed0e69c))
+
 ## [0.1.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases/tag/v0.1.0) - 2026-11-24
 
 Initial open-source release.
