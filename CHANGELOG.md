@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.3.1](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.0...v0.3.1) (2026-11-24)
+
+
+### Code Refactoring
+
+* trim redundant tests and tighten documentation ([#12](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/12)) ([44b304c](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/44b304cdf94655d252d2df46377957790416f54b))
+
 ## [0.3.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.2.0...v0.3.0) (2026-11-24)
 
 
