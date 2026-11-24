@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const MAX_PORT_FILE_BYTES: u64 = 4096;
@@ -14,6 +14,8 @@ const MAX_PORT_FILE_BYTES: u64 = 4096;
 pub struct PortFileStatus {
     pub exists: bool,
     pub valid: bool,
+    #[serde(default)]
+    pub stale: bool,
     pub port: Option<u16>,
     pub ws_url: Option<String>,
     pub updated_at: Option<String>,
@@ -27,10 +29,26 @@ impl PortFileStatus {
         json!({
             "exists": self.exists,
             "valid": self.valid,
+            "stale": self.stale,
             "port": self.port,
             "updatedAt": self.updated_at,
         })
     }
+}
+
+/// Fast loopback TCP liveness check (`127.0.0.1:<port>` then `[::1]:<port>`).
+/// Prevents stale `DevToolsActivePort` files left behind after Chrome exits from
+/// reporting false readiness or blocking fallback to `127.0.0.1:9222`.
+pub fn is_loopback_port_alive(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    if TcpStream::connect_timeout(&v4, Duration::from_millis(120)).is_ok() {
+        return true;
+    }
+    let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
+    TcpStream::connect_timeout(&v6, Duration::from_millis(80)).is_ok()
 }
 
 pub fn read_port_file(path: &Path) -> PortFileStatus {
@@ -39,6 +57,7 @@ pub fn read_port_file(path: &Path) -> PortFileStatus {
         return PortFileStatus {
             exists: false,
             valid: false,
+            stale: false,
             port: None,
             ws_url: None,
             updated_at: None,
@@ -55,6 +74,7 @@ pub fn read_port_file(path: &Path) -> PortFileStatus {
         return PortFileStatus {
             exists: true,
             valid: false,
+            stale: false,
             port: None,
             ws_url: None,
             updated_at,
@@ -66,6 +86,7 @@ pub fn read_port_file(path: &Path) -> PortFileStatus {
         return PortFileStatus {
             exists: true,
             valid: false,
+            stale: false,
             port: None,
             ws_url: None,
             updated_at,
@@ -81,20 +102,48 @@ pub fn read_port_file(path: &Path) -> PortFileStatus {
     let port = lines.first().and_then(|s| s.parse::<u16>().ok()).filter(|&p| p > 0);
     let ws_path = lines.get(1).copied().unwrap_or("");
     let candidate = port.map(|p| format!("ws://127.0.0.1:{p}{ws_path}"));
-    let valid = ws_path.starts_with('/')
+    let syntax_valid = ws_path.starts_with('/')
         && candidate
             .as_deref()
             .map(|u| validate_loopback_ws_url(u).is_ok())
             .unwrap_or(false);
 
+    let alive = syntax_valid && port.map(is_loopback_port_alive).unwrap_or(false);
+    let stale = syntax_valid && !alive;
+
     PortFileStatus {
         exists: true,
-        valid,
-        port: if valid { port } else { None },
-        ws_url: if valid { candidate } else { None },
+        valid: alive,
+        stale,
+        port: if syntax_valid { port } else { None },
+        ws_url: if alive { candidate } else { None },
         updated_at,
         path: path_str,
     }
+}
+
+/// Scans candidate `DevToolsActivePort` locations in priority order and returns the first live
+/// Chrome instance (or the first existing/stale status if none is listening).
+pub fn discover_port_file(candidates: &[PathBuf]) -> PortFileStatus {
+    let mut first_existing: Option<PortFileStatus> = None;
+    let mut first_status: Option<PortFileStatus> = None;
+
+    for path in candidates {
+        let st = read_port_file(path);
+        if st.valid {
+            return st;
+        }
+        if st.exists && first_existing.is_none() {
+            first_existing = Some(st.clone());
+        }
+        if first_status.is_none() {
+            first_status = Some(st);
+        }
+    }
+
+    first_existing
+        .or(first_status)
+        .unwrap_or_else(|| read_port_file(Path::new("DevToolsActivePort")))
 }
 
 /// Strictly validates that a CDP WebSocket URL targets loopback only (SSRF guard).
@@ -199,8 +248,8 @@ pub fn probe_debug_port_ws_url(port: u16) -> Option<String> {
     None
 }
 
-pub fn resolve_ws_url(port_file: &Path, debug_port: u16) -> Option<String> {
-    let status = read_port_file(port_file);
+pub fn resolve_ws_url_candidates(candidates: &[PathBuf], debug_port: u16) -> Option<String> {
+    let status = discover_port_file(candidates);
     if status.exists && status.valid {
         if let Some(url) = status.ws_url {
             return Some(url);
@@ -210,8 +259,15 @@ pub fn resolve_ws_url(port_file: &Path, debug_port: u16) -> Option<String> {
 }
 
 #[cfg(test)]
+pub fn resolve_ws_url(port_file: &Path, debug_port: u16) -> Option<String> {
+    resolve_ws_url_candidates(&[port_file.to_path_buf()], debug_port)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn validates_only_loopback_ws_urls() {
@@ -238,24 +294,71 @@ mod tests {
     }
 
     #[test]
-    fn parses_port_file_safely_and_redacts_public_summary() {
+    fn parses_port_file_probes_liveness_and_falls_back_when_stale() {
         let dir = std::env::temp_dir().join(format!("chrome-stream-port-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let p = dir.join("DevToolsActivePort");
-        fs::write(&p, "9222\n/devtools/browser/test-id\n").unwrap();
-        let st = read_port_file(&p);
-        assert!(st.exists && st.valid);
-        assert_eq!(st.port, Some(9222));
+        let live_pf = dir.join("DevToolsActivePort");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live_port = listener.local_addr().unwrap().port();
+        fs::write(&live_pf, format!("{live_port}\n/devtools/browser/test-id\n")).unwrap();
+
+        let st = read_port_file(&live_pf);
+        assert!(st.exists && st.valid && !st.stale);
+        assert_eq!(st.port, Some(live_port));
         assert_eq!(
             st.ws_url.as_deref(),
-            Some("ws://127.0.0.1:9222/devtools/browser/test-id")
+            Some(format!("ws://127.0.0.1:{live_port}/devtools/browser/test-id").as_str())
         );
         let summary = st.public_summary();
         assert_eq!(summary["exists"], true);
         assert_eq!(summary["valid"], true);
-        assert_eq!(summary["port"], 9222);
+        assert_eq!(summary["stale"], false);
+        assert_eq!(summary["port"], live_port);
         assert!(summary.get("path").is_none());
         assert!(summary.get("wsUrl").is_none());
+
+        // Drop listener -> port becomes dead/stale!
+        drop(listener);
+        let stale_st = read_port_file(&live_pf);
+        assert!(stale_st.exists);
+        assert!(!stale_st.valid, "stale DevToolsActivePort must NOT report valid=true");
+        assert!(stale_st.stale);
+        assert!(stale_st.ws_url.is_none());
+
+        // Spin up a mock :debug_port `/json/version` server and verify stale port file falls back!
+        let fb_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fb_port = fb_listener.local_addr().unwrap().port();
+        let expected_fb_ws = format!("ws://127.0.0.1:{fb_port}/devtools/browser/fallback-ok");
+        let expected_clone = expected_fb_ws.clone();
+        let srv = thread::spawn(move || {
+            if let Ok((mut conn, _)) = fb_listener.accept() {
+                let mut buf = [0u8; 512];
+                let _ = conn.read(&mut buf);
+                let body = format!(r#"{{"webSocketDebuggerUrl":"{expected_clone}"}}"#);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = conn.write_all(resp.as_bytes());
+            }
+        });
+
+        let resolved = resolve_ws_url(&live_pf, fb_port);
+        assert_eq!(resolved.as_deref(), Some(expected_fb_ws.as_str()));
+        let _ = srv.join();
+
+        // Multi-path scan skips stale first candidate and picks live second candidate!
+        let live2_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live2_port = live2_listener.local_addr().unwrap().port();
+        let snap_pf = dir.join("SnapDevToolsActivePort");
+        fs::write(&snap_pf, format!("{live2_port}\n/devtools/browser/snap-id\n")).unwrap();
+        let multi = discover_port_file(&[live_pf.clone(), snap_pf]);
+        assert!(multi.valid && !multi.stale);
+        assert_eq!(multi.port, Some(live2_port));
+        drop(live2_listener);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

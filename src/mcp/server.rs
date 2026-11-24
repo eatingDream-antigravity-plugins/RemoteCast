@@ -323,7 +323,9 @@ impl SwrBootCache {
         if tool_name == "chrome_stream_disconnect" || connected == Some(false) {
             snap["connected"] = json!(false);
             snap["paused"] = json!(false);
+            snap["screencastPausedIdle"] = json!(false);
             snap["noTabs"] = json!(false);
+            snap["dialog"] = Value::Null;
             snap["tabs"] = json!([]);
             snap["tabsHash"] = json!("empty");
             snap["activeTargetId"] = Value::Null;
@@ -336,6 +338,15 @@ impl SwrBootCache {
         } else {
             if let Some(p) = sc.get("paused").and_then(|v| v.as_bool()) {
                 snap["paused"] = json!(p);
+            }
+            if let Some(idle) = sc.get("screencastPausedIdle").and_then(|v| v.as_bool()) {
+                snap["screencastPausedIdle"] = json!(idle);
+            }
+            if let Some(dlg) = sc.get("dialog") {
+                snap["dialog"] = dlg.clone();
+            }
+            if let Some(loc) = sc.get("locale").and_then(|v| v.as_str()) {
+                snap["locale"] = json!(loc);
             }
             let no_tabs = sc.get("noTabs").and_then(|v| v.as_bool()).unwrap_or(false)
                 || sc
@@ -748,7 +759,7 @@ mod tests {
         assert!(!html.contains("secret-uuid"));
 
         let r4 = responses.iter().find(|r| r["id"] == 4).unwrap();
-        assert_eq!(r4["result"]["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(r4["result"]["tools"].as_array().unwrap().len(), 5);
 
         let r5 = responses.iter().find(|r| r["id"] == 5).unwrap();
         assert_eq!(r5["result"]["structuredContent"]["connected"], true);
