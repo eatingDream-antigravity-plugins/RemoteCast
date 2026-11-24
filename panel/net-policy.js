@@ -57,13 +57,30 @@ export class AdaptiveBandwidthController {
     return { netRttMs: net, ewmaRttMs: r, effectiveTier, tierChanged: prev !== effectiveTier };
   }
   getNetworkGrade() { return !this.calibrated ? "good" : this.ewmaRttMs >= 350 ? "weak" : this.ewmaRttMs >= 140 ? "mid" : "good"; }
-  computePollTiming({ idleMs = 0, inputBusy = false, screencastIdle = false } = {}) {
-    if (screencastIdle && !inputBusy) return { waitMs: 0, nextDelayMs: 4000 };
+  computePollTiming({ idleMs = 0, inputBusy = false, screencastIdle = false, hidden = false, errCount = 0 } = {}) {
     const r = this.ewmaRttMs;
+    const mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1;
+    if (hidden) {
+      const base = r >= 750 ? 12000 : r >= 350 ? 8000 : r >= 140 ? 4000 : 2000;
+      return { waitMs: 0, nextDelayMs: Math.min(30000, base * mult) };
+    }
+    if (screencastIdle && !inputBusy) return { waitMs: 0, nextDelayMs: Math.min(20000, 4000 * mult) };
     if (inputBusy) return { waitMs: r > 350 ? 220 : 140, nextDelayMs: Math.min(240, Math.max(90, Math.round(r * 0.35))) };
+    if (errCount > 0) {
+      const base = idleMs < 3500 ? 1000 : idleMs < 12000 ? 1500 : 2000;
+      return { waitMs: 0, nextDelayMs: Math.min(16000, base * mult) };
+    }
     if (idleMs < 3500) return { waitMs: r > 350 ? 280 : 180, nextDelayMs: r > 700 ? 320 : r > 350 ? 180 : 60 };
     if (idleMs < 12000) return { waitMs: r > 350 ? 750 : 520, nextDelayMs: r > 700 ? 900 : r > 350 ? 500 : 280 };
     return { waitMs: 400, nextDelayMs: r > 700 ? 2800 : r > 350 ? 2000 : 1400 };
+  }
+  computeOfflinePollDelay({ hidden = false, errCount = 0 } = {}) {
+    const r = this.ewmaRttMs;
+    const base = hidden
+      ? (r >= 750 ? 10000 : r >= 350 ? 7500 : r >= 140 ? 5000 : 3000)
+      : (r >= 750 ? 8000 : r >= 350 ? 6000 : r >= 140 ? 4500 : 3000);
+    const mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1;
+    return Math.min(30000, base * mult);
   }
   getWheelCoalesceMs() { return this.ewmaRttMs > 350 ? 140 : 80; }
   getTypeBatchMs() { return this.ewmaRttMs > 350 ? 60 : this.ewmaRttMs > 180 ? 30 : 0; }
@@ -116,4 +133,76 @@ export function applyOptimisticTabClose(tabs, aid, cid) {
   const nt = ls.filter((t) => t.targetId !== cid), wa = aid === cid;
   const na = wa || !nt.some((t) => t.targetId === aid) ? (nt.length ? nt[i >= 0 ? Math.min(i, nt.length - 1) : 0].targetId : null) : aid;
   return { tabs: nt, activeTargetId: na, wasActive: wa };
+}
+
+export const isNoTabsPayload = (d) => !!(d?.noTabs || (Array.isArray(d?.tabs) && d.tabs.length === 0 && !d?.activeTargetId));
+export const isSafeImageUrl = (u) => typeof u === "string" && u.startsWith("data:image/");
+
+export function applyFramePayloadState(S, d, reqEpoch = S.ep, totalMs = 0) {
+  if (!shouldApplyFrameResponse({ reqEpoch, currentEpoch: S.ep, currentTargetId: S.aid, payload: d }).apply) return null;
+  S.on = true;
+  if (typeof d.paused === "boolean" && !totalMs) { S.pa = d.paused; S.st = !d.paused; }
+  S.id = !S.pa && !!d.screencastPausedIdle;
+  S.dlg = d.dialog || null;
+  const nt = isNoTabsPayload(d);
+  S.nt = nt;
+  if (nt) { S.aid = null; S.tabs = []; S.pg = {}; S.dlg = null; S.seq = 0; S.fh = ""; }
+  if (d.popupSwitched) { S.seq = 0; S.fh = ""; }
+  S.nv = false;
+  if (d.tabsHash) S.th = d.tabsHash;
+  if (!nt) {
+    if (Array.isArray(d.tabs)) S.tabs = d.tabs;
+    if (d.activeTargetId) S.aid = d.activeTargetId;
+    if (d.page) S.pg = d.page;
+  }
+  const sp = !nt && !!d.changed && isSafeImageUrl(d.imageDataUrl);
+  if (sp) { S.seq = d.seq || S.seq + 1; S.fh = d.frameHash || S.fh; S.by = d.imageBytes || S.by; S.uc = false; }
+  else {
+    S.uc = !!(d.unchanged || !d.changed);
+    if (d.seq) S.seq = Math.max(S.seq, d.seq);
+    if (d.frameHash) S.fh = d.frameHash;
+  }
+  return sp;
+}
+
+export function setupRevealObservers(o = {}) {
+  const g = globalThis;
+  const dc = o.rootDoc ?? g.document;
+  const wn = o.rootWin ?? g.window;
+  const ap = o.bridgeApp;
+  const getLF = o.getLastFetchAt || (() => 0);
+  const nw = o.clock || (() => Date.now());
+  const sm = o.staleMs ?? 900;
+  const tm = o.throttleMs ?? 250;
+  const RO = o.ResizeObs ?? g.ResizeObserver;
+  const IO = o.IntersectionObs ?? g.IntersectionObserver;
+  const offs = [];
+  let lt = -1e15;
+  const trig = () => { const t = nw(); if (t - lt < tm) return false; lt = t; o.onReveal?.(); return true; };
+  const rt = dc?.documentElement;
+  const add = (tg, ev, fn, op) => { if (tg?.addEventListener) { tg.addEventListener(ev, fn, op); offs.push(() => tg.removeEventListener?.(ev, fn, op)); } };
+  if (RO && rt) {
+    let wc = !(rt.clientWidth > 0 && rt.clientHeight > 0);
+    const ro = new RO((es) => {
+      const r = es?.[0]?.contentRect, v = (r ? r.width : rt.clientWidth || 0) > 0 && (r ? r.height : rt.clientHeight || 0) > 0;
+      if (wc && v) trig();
+      wc = !v;
+    });
+    ro.observe(rt); offs.push(() => ro.disconnect?.());
+  }
+  if (IO && rt) {
+    let wv = false;
+    const io = new IO((es) => { for (const e of es || []) { const v = !!e?.isIntersecting; if (!wv && v) trig(); wv = v; } }, { threshold: 0 });
+    io.observe(rt); offs.push(() => io.disconnect?.());
+  }
+  add(dc, "visibilitychange", () => { const vs = dc?.visibilityState; if (vs === "hidden") o.onHide?.(); else if (vs === "visible") trig(); });
+  add(wn, "focus", trig);
+  add(wn, "pageshow", trig);
+  add(rt, "pointerenter", () => { if (nw() - getLF() > sm) trig(); }, { passive: true });
+  if (ap) {
+    const pv = ap.onhostcontextchanged || null;
+    ap.onhostcontextchanged = (c) => { pv?.(c); if (c?.containerDimensions || c?.displayMode) trig(); };
+    offs.push(() => { ap.onhostcontextchanged = pv; });
+  }
+  return () => { while (offs.length) try { offs.pop()(); } catch {} };
 }

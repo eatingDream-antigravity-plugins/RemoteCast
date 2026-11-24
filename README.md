@@ -29,6 +29,7 @@ Chrome Stream MCP streams your local Chrome tabs into an interactive Antigravity
 - **Click "Allow" once per browser session**: Keeps a background local relay connected so Chrome doesn't keep popping up the debugging approval prompt whenever the plugin reloads.
 - **You control when it connects**: Opening the panel never connects to Chrome behind your back. Use **Connect**, **Pause / Resume**, and **Disconnect** right in the header, and screen capture automatically rests when idle to save battery.
 - **Built for slow connections**: Automatically adapts image quality across four presets based on your connection latency, and skips sending frames when nothing on the page changed.
+- **Quiet background & instant reveal refresh**: Keeps tabs, readiness, and frames gently synced in the background using frame/tab deduplication (never overriding explicit **Pause**), and wakes with an immediate refresh the moment you reopen a kept-alive side or global pane.
 - **Normal tab behavior**: Closing the last tab shows a clean empty state instead of forcing an unwanted `about:blank` tab back open.
 
 ## Install & Setup

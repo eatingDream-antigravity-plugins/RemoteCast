@@ -1,20 +1,24 @@
 import { App, applyHostContext } from "./bridge.js";
 import {
   AdaptiveBandwidthController,
+  applyFramePayloadState,
   applyOptimisticTabClose,
   coalesceInputEvents,
+  isNoTabsPayload,
+  isSafeImageUrl,
   isTargetErrorText,
   resolvePanelLang,
-  shouldApplyFrameResponse,
+  setupRevealObservers,
 } from "./net-policy.js";
 
-const doc = document, boot = typeof window !== "undefined" && window.__CHROME_STREAM_BOOT__ ? window.__CHROME_STREAM_BOOT__ : null;
+const doc = document, boot = globalThis.__CHROME_STREAM_BOOT__ || null;
 const $ = (i) => doc.getElementById(i), on = (el, ev, fn, o) => el?.addEventListener(ev, fn, o), ck = (el, fn) => on(el, "click", fn);
 const sa = (el, k, v) => el?.setAttribute(k, String(v)), qa = (p, s) => p.querySelectorAll(s), pd = (e) => e.preventDefault();
 const tx = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
 const hd = (el, v) => { if (el) el.hidden = !!v; };
 const mk = (t, c) => { const e = doc.createElement(t); if (c) e.className = c; return e; };
-const rnd = Math.round, now = () => performance.now(), nowMs = () => Date.now(), cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), isA = Array.isArray;
+const rnd = Math.round, pNow = () => performance.now(), nowMs = () => Date.now(), cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), isA = Array.isArray;
+const sTm = (f, m) => globalThis.setTimeout(f, m), cTm = (i) => globalThis.clearTimeout(i);
 const root = $("app"), app = new App({ name: "Chrome Stream", version: "0.1.0" }, {}), net = new AdaptiveBandwidthController("auto");
 const KEYS = new Set("Enter Backspace Delete Tab Escape ArrowUp ArrowDown ArrowLeft ArrowRight PageUp PageDown Home End".split(" "));
 const QK = "auto ultra low medium high".split(" "), IK = "Enter Escape Tab Backspace Undo Copy Paste SelectAll".split(" ");
@@ -52,9 +56,8 @@ const I18N = {
   ),
 };
 
-const isNT = (d) => !!(d?.noTabs || (isA(d?.tabs) && d.tabs.length === 0 && !d?.activeTargetId));
 const S = {
-  lg: resolvePanelLang({ saved: lsG("chrome_stream_lang"), navLang: typeof navigator !== "undefined" ? navigator.language : "", bootLocale: boot?.locale || "" }),
+  lg: resolvePanelLang({ saved: lsG("chrome_stream_lang"), navLang: globalThis.navigator?.language || "", bootLocale: boot?.locale || "" }),
   on: !!boot?.connected, pf: boot?.portFile || null,
   tabs: isA(boot?.tabs) ? boot.tabs : [], ts: "", th: boot?.tabsHash || "",
   aid: boot?.activeTargetId || null, ep: Number(boot?.epoch) || 1, pg: boot?.page || {},
@@ -62,36 +65,39 @@ const S = {
   uc: false, qa: boot?.qualityApplied || "low", er: null,
   cn: false, sw: false, nv: false, qm: "auto", st: !boot?.paused, pa: !!boot?.paused,
   id: !!boot?.screencastPausedIdle, dlg: boot?.dialog || null, dKey: "",
-  nt: !!(boot?.connected && isNT(boot)),
+  nt: !!(boot?.connected && isNoTabsPayload(boot)),
   im: false, po: false,
 };
 const L = () => I18N[S.lg] || I18N.en;
 
 let qIn = [], inB = 0, inT = 0, pB = 0, pT = 0, oT = 0, oB = 0, urg = 0, act = nowMs(), tT = 0;
+let pErr = 0, offErr = 0, offUrg = 0, lastFetchAt = boot ? nowMs() : 0, lastForceAt = 0, stopReveal = null;
 let pGen = 0, painted = 0, started = 0, synced = 0, ready = 0, tSig = "";
 const closing = new Set(), tMap = new Map(), D = {};
 
 const kb = (b) => (!b ? "0 KB" : b < 1024 ? `${b} B` : `${(b / 1024).toFixed(b < 10240 ? 1 : 0)} KB`);
 const vp = () => [Number(S.pg.viewportWidth) || 1280, Number(S.pg.viewportHeight) || 800];
 const qLbl = () => { const t = L(), e = t[`q_${S.qa || net.getEffectiveQuality()}`] || t.q_medium; return S.qm === "auto" ? t.aDot(e) : e; };
-const safeImg = (u) => typeof u === "string" && u.startsWith("data:image/");
+const isHidden = () => doc.visibilityState === "hidden";
 const sigOf = (d) => `${!!d?.connected}|${!!d?.portFile?.valid}|${Number(d?.portFile?.port) || 0}|${d?.activeTargetId || ""}|${d?.tabsHash || ""}|${d?.error || ""}`;
 const canCall = () => { const c = app.getHostCapabilities(); return !c || c.serverTools !== false; };
 const rpcSc = (name, a) => app.callServerTool({ name, arguments: a }).then((r) => r?.structuredContent);
 const sendIn = (events, targetId) => rpcSc("chrome_stream_input", { targetId, events });
-const bH = (id, c, tk, ak = "", x = "", raw = "") => `<button type=button class="${c ? `b ${c}` : "b"}" id=${id}${tk ? ` data-t=${tk}` : ""}${ak ? ` data-a=${ak}` : ""}${x}>${raw}</button>`;
+const bt = (x, r = "") => `<button type=button ${x}>${r}</button>`;
+const bH = (id, c, tk, ak = "", x = "", raw = "") => bt(`class="${c ? `b ${c}` : "b"}" id=${id}${tk ? ` data-t=${tk}` : ""}${ak ? ` data-a=${ak}` : ""}${x}`, raw);
 const evIn = (a, o, imm = true) => pushIn({ action: a, ...o }, imm);
 const keyIn = (key, modifiers, imm = false) => evIn("key", { key, modifiers }, imm);
 const txtIn = (text, pressEnter = false, imm = true) => evIn("type", { text, pressEnter }, imm);
 const modsOf = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 const focusSt = () => (D.si || D.st)?.focus({ preventScroll: true });
-const toast = (m) => { if (!D.ts || !m) return; tx(D.ts, m); sa(D.ts, "data-show", true); clearTimeout(tT); tT = setTimeout(() => sa(D.ts, "data-show", false), 1600); };
+const errMsg = (e) => e?.message || String(e);
+const toast = (m) => { if (!D.ts || !m) return; tx(D.ts, m); sa(D.ts, "data-show", true); cTm(tT); tT = sTm(() => sa(D.ts, "data-show", false), 1600); };
 const toastK = (k) => toast(L()[k]);
 const setPf = (d) => { if (d?.portFile) S.pf = d.portFile; };
-const ripple = (px, py) => { if (!D.vw) return; const d = mk("div", "rip"); d.style.left = `${px}%`; d.style.top = `${py}%`; D.vw.appendChild(d); setTimeout(() => d.remove(), 420); };
+const ripple = (px, py) => { if (!D.vw) return; const d = mk("div", "rip"); d.style.left = `${px}%`; d.style.top = `${py}%`; D.vw.appendChild(d); sTm(() => d.remove(), 420); };
 
-function paint(url) {
-  if (!safeImg(url) || !D.vc) return;
+const paint = (url) => {
+  if (!isSafeImageUrl(url) || !D.vc) return;
   const gen = ++pGen, im = new Image(), [vw, vh] = vp();
   im.decoding = "async";
   const blit = (src, nw, nh) => {
@@ -109,7 +115,7 @@ function paint(url) {
   };
   im.src = url;
   im.decode ? im.decode().then(go, () => { if (im.complete && im.naturalWidth) go(); }) : (im.onload = go);
-}
+};
 
 const setErr = (m) => { S.er = m || null; tx(D.em, S.er || ""); hd(D.eb, !S.er); tx(D.om, S.er || ""); hd(D.oe, !S.er); };
 const sLoad = () => sa(D.lb, "data-on", !!(S.nv || S.sw));
@@ -121,18 +127,18 @@ const setMeta = (m) => { if (m) { S.pg = { ...S.pg, title: m.title || "", url: m
 const rstF = (th) => { S.seq = 0; S.fh = ""; if (th) S.th = ""; };
 const clrTabs = (th = "") => { S.aid = null; S.tabs = []; S.th = th; S.pg = {}; S.dlg = null; sUrl(""); rstF(); };
 
-function syncDlg() {
+const syncDlg = () => {
   if (!D.db) return;
   const g = S.on ? S.dlg : null;
   if (!g || typeof g !== "object") { hd(D.db, 1); S.dKey = ""; return; }
   const t = L(), tp = g.type || "alert", key = `${g.targetId || ""}:${tp}:${g.message || ""}`;
   tx(D.dtp, t[`d_${tp}`] || t.d_alert); tx(D.dm, g.message || g.url || "");
   hd(D.di, tp !== "prompt"); hd(D.dk, tp === "alert");
-  if (key !== S.dKey) { S.dKey = key; if (tp === "prompt") { D.di.value = g.defaultPrompt || ""; setTimeout(() => D.di.focus(), 0); } }
+  if (key !== S.dKey) { S.dKey = key; if (tp === "prompt") { D.di.value = g.defaultPrompt || ""; sTm(() => D.di.focus(), 0); } }
   hd(D.db, 0);
-}
+};
 
-function syncPh() {
+const syncPh = () => {
   if (!D.ph || !D.pm) return;
   const t = L();
   if (S.nt) {
@@ -146,57 +152,69 @@ function syncPh() {
     hd(D.vc, 0); D.vc.classList.toggle("pa", dim);
     tx(D.pb, S.pa ? t.paB : t.idB); hd(D.pb, !dim);
   } else { tx(D.pm, S.pa ? t.paP : t.ldP); hd(D.ph, 0); hd(D.pb, 1); }
-}
+};
 
-function syncPauseUi() {
+const syncPauseUi = () => {
   if (!D.bp) return;
   const t = L();
   sa(D.bp, "data-active", S.pa); sa(D.bp, "aria-pressed", S.pa);
   tx(D.bp, S.pa ? t.rs : t.pa);
   sa(D.sd, "data-paused", !!(S.pa || S.id)); D.sd.classList.toggle("live", !S.pa && !S.id && !S.nt);
   syncPh(); uSt();
-}
-
-const stopOffP = () => { clearTimeout(oT); oT = 0; };
-const schedOffP = (ms = 5000) => { stopOffP(); if (!S.on && !S.cn && ready) oT = setTimeout(() => { oT = 0; probeOff(); }, ms); };
-
-async function probeOff() {
-  if (S.on || S.cn || oB || !ready || !canCall()) return;
-  if (doc.visibilityState === "hidden") return schedOffP(6000);
-  oB = 1;
-  try {
-    const d = await rpcSc("chrome_stream_frame", { sinceSeq: 0, waitMs: 0, qualityPreset: net.getEffectiveQuality() });
-    if (S.cn) return;
-    if (d?.portFile) { setPf(d); if (!S.on) uOff(); }
-    if (d?.connected) { act = nowMs(); onPoll(d, 0, S.ep); if (S.on && S.st && !S.pa) sched(S.nt ? 1200 : timing(0).nextDelayMs, false); return; }
-  } catch {} finally { oB = 0; if (!S.on && !S.cn) schedOffP(5000); }
-}
-
-const goOff = (err, pf) => {
-  S.on = false; S.pa = false; S.id = false; S.dlg = null; S.st = true; S.nt = false; S.er = err || null;
-  if (pf) S.pf = pf;
-  stopP(); sView(); schedOffP(5000);
 };
 
-function sView() {
-  hd(D.vo, S.on); hd(D.vn, !S.on);
-  if (!S.on) {
-    setPop(false); painted = 0; syncDlg();
-    hd(D.vc, 1); D.vc.classList.remove("sw", "pa");
-    hd(D.ph, 0); hd(D.pb, 1); uOff();
-  } else { stopOffP(); syncDlg(); syncPauseUi(); }
-}
+const offDelay = () => net.computeOfflinePollDelay({ hidden: isHidden(), errCount: offErr });
+const stopOffP = () => { cTm(oT); oT = 0; };
+const schedOffP = (ms = offDelay()) => { stopOffP(); if (!S.on && !S.cn && ready) oT = sTm(() => { oT = 0; probeOff(); }, ms); };
 
-function uOff() {
+const probeOff = async () => {
+  if (S.on || S.cn || oB || !ready || !canCall()) return;
+  oB = 1;
+  const t0 = pNow();
+  try {
+    const d = await reqFrame(false, 0, false);
+    lastFetchAt = nowMs();
+    offErr = d?.error ? Math.min(4, offErr + 1) : 0;
+    if (!d?.screencastPausedIdle) net.recordSample({ totalMs: rnd(pNow() - t0), serverMs: d?.serverMs || 0, imageBytes: 0 });
+    if (S.cn) return;
+    if (d?.portFile) { setPf(d); if (!S.on) uOff(); }
+    if (d?.connected) {
+      act = nowMs(); onPoll(d, 0, S.ep);
+      if (S.on && S.st && !S.pa) sched(nextMs(0), false);
+      return;
+    }
+  } catch { offErr = Math.min(4, offErr + 1); } finally {
+    oB = 0;
+    if (!S.on && !S.cn) { if (offUrg) { offUrg = 0; schedOffP(20); } else schedOffP(); }
+    else offUrg = 0;
+  }
+};
+
+const goOff = (err, pf) => {
+  S.on = false; S.pa = false; S.id = false; S.dlg = null; S.st = true; S.nt = false; S.th = ""; S.er = err || null;
+  if (pf) S.pf = pf;
+  stopP(); sView(); schedOffP();
+};
+
+const uOff = () => {
   const t = L(), ok = !!S.pf?.valid, port = Number(S.pf?.port) || 9222;
   sa(D.od, "data-on", ok); D.od.classList.toggle("live", ok);
   tx(D.op, ok ? t.rdy(port) : t.off);
   tx(D.om, S.er || ""); hd(D.oe, !S.er); D.ob.disabled = !!S.cn;
   tx(D.ob, S.cn ? t.wait : t.con);
   if (!ok && !D.dt.dataset.u) D.dt.open = true;
-}
+};
 
-function applyLangUi() {
+const sView = () => {
+  hd(D.vo, S.on); hd(D.vn, !S.on);
+  if (!S.on) {
+    setPop(false); painted = 0; syncDlg();
+    hd(D.vc, 1); D.vc.classList.remove("sw", "pa");
+    hd(D.ph, 0); hd(D.pb, 1); uOff();
+  } else { stopOffP(); syncDlg(); syncPauseUi(); }
+};
+
+const applyLangUi = () => {
   const t = L();
   doc.documentElement.lang = S.lg;
   qa(root, "[data-t]").forEach((e) => { const v = t[e.dataset.t]; if (v) tx(e, v); });
@@ -205,15 +223,15 @@ function applyLangUi() {
   qa(root, "[data-p]").forEach((e) => { const v = t[e.dataset.p]; if (v) e.placeholder = v; });
   for (const [, n] of tMap) { const x = n.querySelector(".tc"); if (x) sa(x, "aria-label", t.cls); }
   uOff(); syncDlg(); syncPauseUi();
-}
+};
 
-function toggleLang() { S.lg = S.lg === "zh-CN" ? "en" : "zh-CN"; lsS("chrome_stream_lang", S.lg); applyLangUi(); }
+const toggleLang = () => { S.lg = S.lg === "zh-CN" ? "en" : "zh-CN"; lsS("chrome_stream_lang", S.lg); applyLangUi(); };
 
-function mount() {
+const mount = () => {
   const ok = !!S.pf?.valid, li = (n, k) => `<li><span class=n>${n}</span><span data-h=${k}></span></li>`;
   const pr = (k, i) => `<div class=pr><span data-t=${k}></span><span class=num id=${i}>-</span></div>`;
-  const qb = QK.map((v) => `<button type=button role=radio data-q=${v} data-t=q_${v} aria-checked=${v === S.qm}></button>`).join("");
-  const ik = IK.map((k) => `<button type=button class=ch data-k=${k} data-t=k_${k}></button>`).join("");
+  const qb = QK.map((v) => bt(`role=radio data-q=${v} data-t=q_${v} aria-checked=${v === S.qm}`)).join("");
+  const ik = IK.map((k) => bt(`class=ch data-k=${k} data-t=k_${k}`)).join("");
   root.innerHTML =
     `<div class=shell id=sh><div class=v id=vo${S.on ? " hidden" : ""}><section class=sh><div class=sh-h><div class=sh-t><span class=bd></span><h1>Chrome Stream</h1></div>` +
     `<div class=sh-r><span class="tag num"><span class=dot id=od></span><span id=op></span></span>${bH("lg0", "bg", "lg", "lgA")}</div></div>` +
@@ -236,7 +254,7 @@ function mount() {
     `<button type=button class=pbg id=pb hidden></button>` +
     `<div class=vw id=vw><canvas class=vc id=vc width=960 height=600 data-a=vcA hidden></canvas></div><div class=tst id=ts role=status aria-live=polite></div></div>` +
     `<div class=ime id=im hidden><div class=row><input class=inp id=ti type=text data-p=imP />${bH("ty", "", "tyB")}${bH("te", "bp", "seB")}</div>` +
-    `<div class=ik>${ik}<button type=button class=ch data-sc=-360 data-a=sU>↑</button><button type=button class=ch data-sc=360 data-a=sD>↓</button></div></div></div></div>`;
+    `<div class=ik>${ik}${bt("class=ch data-sc=-360 data-a=sU", "↑")}${bt("class=ch data-sc=360 data-a=sD", "↓")}</div></div></div></div>`;
 
   for (const id of "sh vo vn od op oe om ob or dt lg0 lg1 tb nt nt2 bp dc dc2 bk fw rl uf ui bq ql pp qs sn bi im eb em er db dtp dm di dk do st si lb ph pm pb vw vc ts ti sd sr sv".split(" ")) D[id] = $(id);
   applyLangUi();
@@ -308,7 +326,7 @@ function mount() {
 
   let mM = 0, mN = "left", mvT = 0, mvP = null, lRD = 0, supM = 0;
   const bInf = (b) => (b === 2 ? ["right", 2] : b === 1 ? ["middle", 4] : ["left", 1]);
-  const flMv = () => { if (mvT) { clearTimeout(mvT); mvT = 0; } if (mvP) { const p = mvP; mvP = null; evIn("mousemove", p, false); } };
+  const flMv = () => { if (mvT) { cTm(mvT); mvT = 0; } if (mvP) { const p = mvP; mvP = null; evIn("mousemove", p, false); } };
   const ptrEv = (act, e, p, button, extra) => evIn(act, { x: p.x, y: p.y, button, clickCount: cl(e.detail || 1, 1, 3), modifiers: modsOf(e) || undefined, ...extra });
 
   on(D.vc, "mousedown", (e) => {
@@ -327,7 +345,7 @@ function mount() {
     if (nowMs() < supM || (!mM && (S.id || S.pa || !S.on))) return;
     const p = ptOf(e); if (!p) return;
     mvP = { x: p.x, y: p.y, button: mM ? mN : "none", buttons: mM, modifiers: modsOf(e) || undefined };
-    if (!mvT) mvT = setTimeout(flMv, mM ? 32 : net.ewmaRttMs > 350 ? 150 : 75);
+    if (!mvT) mvT = sTm(flMv, mM ? 32 : net.ewmaRttMs > 350 ? 150 : 75);
   };
   on(D.vc, "mousemove", onMv);
   on(window, "mousemove", (e) => { if (mM && e.target !== D.vc) onMv(e); });
@@ -347,22 +365,22 @@ function mount() {
 
   let tch = null, lTp = 0, lTx = 0, lTy = 0;
   on(D.vc, "touchstart", (e) => {
-    if (e.touches.length !== 1) { if (tch?.lp) clearTimeout(tch.lp); tch = null; return; }
+    if (e.touches.length !== 1) { if (tch?.lp) cTm(tch.lp); tch = null; return; }
     if (S.po) setPop(false);
     const t0 = e.touches[0], p = ptOf(t0); if (!p) return;
     const c = { x0: t0.clientX, y0: t0.clientY, lx: t0.clientX, ly: t0.clientY, p, mv: 0, lg: 0, lp: 0 };
-    c.lp = setTimeout(() => { if (!c.mv && tch === c) { c.lg = 1; ripple(p.px, p.py); toastK("tRt"); evIn("click", { x: p.x, y: p.y, button: "right", clickCount: 1 }); } }, 500);
+    c.lp = sTm(() => { if (!c.mv && tch === c) { c.lg = 1; ripple(p.px, p.py); toastK("tRt"); evIn("click", { x: p.x, y: p.y, button: "right", clickCount: 1 }); } }, 500);
     tch = c;
   }, { passive: true });
   on(D.vc, "touchmove", (e) => {
     if (!tch || e.touches.length !== 1) return;
     const t0 = e.touches[0], dx = tch.lx - t0.clientX, dy = tch.ly - t0.clientY;
-    if (!tch.mv && Math.hypot(t0.clientX - tch.x0, t0.clientY - tch.y0) > 8) { tch.mv = 1; clearTimeout(tch.lp); }
+    if (!tch.mv && Math.hypot(t0.clientX - tch.x0, t0.clientY - tch.y0) > 8) { tch.mv = 1; cTm(tch.lp); }
     if (tch.mv && !tch.lg) { pd(e); tch.lx = t0.clientX; tch.ly = t0.clientY; qScr(dx * tch.p.sx, dy * tch.p.sy, tch.p); }
   }, { passive: false });
   const endT = (can) => {
     if (!tch) return;
-    const c = tch; tch = null; clearTimeout(c.lp); supM = nowMs() + 500;
+    const c = tch; tch = null; cTm(c.lp); supM = nowMs() + 500;
     if (can || c.mv || c.lg) return;
     const ts = nowMs(), dbl = ts - lTp < 320 && Math.hypot(c.x0 - lTx, c.y0 - lTy) < 24;
     lTp = dbl ? 0 : ts; lTx = c.x0; lTy = c.y0;
@@ -374,7 +392,7 @@ function mount() {
   let wx = 0, wy = 0, wp = null, wt = 0;
   const qScr = (dx, dy, p) => {
     wx += dx; wy += dy; wp = p || wp;
-    if (!wt) wt = setTimeout(() => {
+    if (!wt) wt = sTm(() => {
       const sx = cl(rnd(wx), -1400, 1400), sy = cl(rnd(wy), -1400, 1400), pt = wp || { x: 500, y: 350 };
       wx = wy = wt = 0;
       if (Math.abs(sx) >= 2 || Math.abs(sy) >= 2) evIn("scroll", { x: pt.x, y: pt.y, deltaX: sx, deltaY: sy });
@@ -398,7 +416,7 @@ function mount() {
     const mods = modsOf(e), low = e.key.toLowerCase();
     if ((e.metaKey || e.ctrlKey) && !e.altKey) {
       if (low === "l") return;
-      if (low === "v") { clearTimeout(pArm); pArm = setTimeout(() => { pArm = 0; keyIn("Paste", undefined, true); }, 45); return; }
+      if (low === "v") { cTm(pArm); pArm = sTm(() => { pArm = 0; keyIn("Paste", undefined, true); }, 45); return; }
       const cmd = low === "a" ? ["SelectAll"] : low === "c" ? ["Copy", L().tCp] : low === "x" ? ["Cut"] : low === "z" ? [e.shiftKey ? "Redo" : "Undo"] : low === "y" ? ["Redo"] : null;
       if (cmd) { pd(e); if (cmd[1]) toast(cmd[1]); keyIn(cmd[0], undefined, true); }
       return;
@@ -416,31 +434,31 @@ function mount() {
 
   on(doc, "paste", (e) => {
     if (!S.on || e.target === D.ui || e.target === D.ti || e.target === D.di) return;
-    if (pArm) { clearTimeout(pArm); pArm = 0; }
+    if (pArm) { cTm(pArm); pArm = 0; }
     pd(e);
     const txt = e.clipboardData?.getData("text/plain") || "";
     if (D.si) D.si.value = "";
     if (txt) { toastK("tPs"); txtIn(txt); }
     else keyIn("Paste", undefined, true);
   });
-}
+};
 
-function swTab(tid) {
+const swTab = (tid) => {
   if (!tid || tid === S.aid) return;
   S.aid = tid; S.id = false; S.dlg = null; S.ep++; rstF(); setMeta(S.tabs.find((t) => t.targetId === tid));
   syncDlg(); setSw(true); uTabs(); uSt(); evIn("switch_tab", { targetId: tid });
-}
+};
 
-function clTab(tid) {
+const clTab = (tid) => {
   if (!tid || closing.has(tid)) return;
   closing.add(tid);
   const o = applyOptimisticTabClose(S.tabs, S.aid, tid);
   S.tabs = o.tabs; S.th = ""; S.id = false;
   if (o.wasActive) { S.aid = o.activeTargetId; S.dlg = null; S.ep++; rstF(); syncDlg(); setSw(true); setMeta(S.tabs.find((t) => t.targetId === S.aid)); }
   uTabs(); uSt(); toastK("tCl"); evIn("close_tab", { targetId: tid });
-}
+};
 
-function mkTab(tid) {
+const mkTab = (tid) => {
   const el = mk("div", "tp"), sp = mk("span", "tt"), x = mk("button", "tc");
   el.tabIndex = 0; sa(el, "role", "tab"); el.dataset.id = tid;
   x.type = "button"; x.textContent = "×"; sa(x, "aria-label", L().cls);
@@ -458,9 +476,9 @@ function mkTab(tid) {
   });
   ck(x, (e) => { e.stopPropagation(); clTab(tid); });
   return el;
-}
+};
 
-function uTabs() {
+const uTabs = () => {
   if (!D.tb) return;
   const sig = `${S.aid}|${S.tabs.map((t) => `${t.targetId}:${t.title}:${t.url}`).join("|")}`;
   if (sig === S.ts) return;
@@ -478,9 +496,9 @@ function uTabs() {
     if (cur !== el) D.tb.insertBefore(el, cur || D.nt);
     cur = el.nextSibling;
   }
-}
+};
 
-function uSt() {
+const uSt = () => {
   if (!D.ql) return;
   const t = L(), rtt = net.lastNetRttMs || net.ewmaRttMs, pend = (inB ? 1 : 0) + qIn.length, [w, h] = vp();
   sa(D.sd, "data-net", net.getNetworkGrade());
@@ -489,11 +507,11 @@ function uSt() {
   tx(D.sr, `${S.uc ? t.reu : kb(S.by)} · #${S.seq}${pend ? t.qu(pend) : ""}`);
   tx(D.sv, `${w}×${h}`);
   sLoad();
-}
+};
 
 const recover = (m) => { S.aid = null; S.dlg = null; rstF(1); if (m) toast(m); askUrg(true); };
 
-function onPoll(d, totalMs, reqEpoch = S.ep) {
+const onPoll = (d, totalMs, reqEpoch = S.ep) => {
   if (!d) return;
   if (totalMs > 0) synced = 1;
   setPf(d);
@@ -503,41 +521,26 @@ function onPoll(d, totalMs, reqEpoch = S.ep) {
     S.qa = d.qualityApplied || (s.tierChanged ? s.effectiveTier : S.qa);
   } else if (d.qualityApplied) S.qa = d.qualityApplied;
 
-  if (!shouldApplyFrameResponse({ reqEpoch, currentEpoch: S.ep, currentTargetId: S.aid, payload: d }).apply) {
+  const paintIt = applyFramePayloadState(S, d, reqEpoch, totalMs);
+  if (paintIt === null) {
     if (S.on && S.st && !S.pa) askUrg(false);
     return;
   }
-  S.on = true;
-  if (typeof d.paused === "boolean" && totalMs === 0) { S.pa = d.paused; S.st = !d.paused; }
-  S.id = !S.pa && !!d.screencastPausedIdle;
-  S.dlg = d.dialog || null;
-  const noTabs = isNT(d);
-  S.nt = noTabs;
-  if (noTabs) clrTabs(S.th);
   sView();
-  if (d.popupSwitched) { setErr(null); rstF(); toastK("tPp"); }
+  if (S.nt) sUrl(""); else if (d.page) sUrl(d.page.url);
+  if (d.popupSwitched) { setErr(null); toastK("tPp"); }
   else if (d.recovered) { setErr(null); toastK("tRc"); }
   else setErr(d.error || null);
-  S.nv = false;
-  if (isA(d.tabs)) S.tabs = d.tabs;
-  if (d.tabsHash) S.th = d.tabsHash;
-  if (d.activeTargetId) S.aid = d.activeTargetId;
-  if (d.page && !noTabs) { S.pg = d.page; sUrl(d.page.url); }
   uTabs(); syncDlg();
-  if (!noTabs && d.changed && safeImg(d.imageDataUrl)) {
-    S.seq = d.seq || S.seq + 1; S.fh = d.frameHash || S.fh; S.by = d.imageBytes || S.by; S.uc = false;
-    paint(d.imageDataUrl);
-  } else {
-    S.uc = !!(d.unchanged || !d.changed);
-    if (d.seq) S.seq = Math.max(S.seq, d.seq);
-    if (d.frameHash) S.fh = d.frameHash;
+  if (paintIt) paint(d.imageDataUrl);
+  else {
     if (S.sw && painted && S.fh) setSw(false);
     syncPh();
   }
   uSt();
-}
+};
 
-function pushIn(ev, imm = true) {
+const pushIn = (ev, imm = true) => {
   const wasIdle = S.id;
   act = nowMs();
   if (ev.action !== "pause" && ev.action !== "disconnect") S.id = false;
@@ -545,26 +548,26 @@ function pushIn(ev, imm = true) {
   if (wasIdle && !S.id) syncPauseUi(); else uSt();
   if (inB) return;
   const ms = imm ? 0 : net.getTypeBatchMs();
-  if (ms <= 0) { clearTimeout(inT); inT = 0; flIn(); }
-  else if (!inT) inT = setTimeout(() => { inT = 0; flIn(); }, ms);
-}
+  if (ms <= 0) { cTm(inT); inT = 0; flIn(); }
+  else if (!inT) inT = sTm(() => { inT = 0; flIn(); }, ms);
+};
 
-async function flIn() {
+const flIn = async () => {
   if (inB || !qIn.length || !canCall()) return;
   inB = 1;
   const batch = coalesceInputEvents(qIn); qIn = [];
   const closed = batch.filter((e) => e.action === "close_tab").map((e) => e.targetId), hadDisc = batch.some((e) => e.action === "disconnect");
-  const ep = S.ep, t0 = now(); uSt();
+  const ep = S.ep, t0 = pNow(); uSt();
   try {
     const d = await sendIn(batch, S.aid || undefined);
     synced = 1;
-    if (!hadDisc) net.recordSample({ totalMs: rnd(now() - t0), serverMs: 8, imageBytes: 0 });
+    if (!hadDisc) net.recordSample({ totalMs: rnd(pNow() - t0), serverMs: 8, imageBytes: 0 });
     if (hadDisc || (d?.connected === false && !d?.recoverable && !isTargetErrorText(d?.error))) return goOff(d?.error, d?.portFile);
     if (d?.error && !d?.recovered && !isTargetErrorText(d.error)) setErr(d.error);
     else if (d?.recovered) { setErr(null); toastK("tRc"); }
     if (ep === S.ep) {
       if ("dialog" in (d || {})) { S.dlg = d.dialog || null; syncDlg(); }
-      const noTabs = isNT(d);
+      const noTabs = isNoTabsPayload(d);
       S.nt = noTabs;
       if (noTabs) { clrTabs(d?.tabsHash || ""); syncDlg(); uTabs(); syncPh(); }
       else {
@@ -574,42 +577,46 @@ async function flIn() {
     }
     if (!S.nt && !S.pa) askUrg(false);
   } catch (err) {
-    isTargetErrorText(err?.message) ? recover() : setErr(err?.message || String(err));
+    isTargetErrorText(err?.message) ? recover() : setErr(errMsg(err));
   } finally {
     for (const id of closed) closing.delete(id);
     inB = 0; uSt(); if (qIn.length) flIn();
   }
-}
+};
 
-const stopP = () => { clearTimeout(pT); pT = 0; };
-const sched = (ms, f = false) => { stopP(); if (S.on && (!S.pa || f)) pT = setTimeout(() => { pT = 0; poll(f); }, ms); };
+const stopP = () => { cTm(pT); pT = 0; };
+const sched = (ms, f = false) => { stopP(); if (S.on && (!S.pa || f)) pT = sTm(() => { pT = 0; poll(f); }, ms); };
 const askUrg = (f = false) => { if (!S.on || (S.pa && !f)) return; if (pB) urg = { f: !!(f || urg?.f) }; else sched(20, f); };
-const timing = (idleMs, inputBusy = false) => net.computePollTiming({ idleMs, inputBusy, screencastIdle: S.id });
+const timing = (idleMs, inputBusy = false) => net.computePollTiming({ idleMs, inputBusy, screencastIdle: S.id, hidden: isHidden(), errCount: pErr });
+const nextMs = (idleMs, busy = false) => !isHidden() && S.nt ? 1200 : timing(idleMs, busy).nextDelayMs;
 const reqFrame = (f, w, keep = true) => rpcSc("chrome_stream_frame", { targetId: S.aid || undefined, sinceSeq: !f && keep ? S.seq : 0, lastFrameHash: S.fh || undefined, knownTabsHash: S.th || undefined, qualityPreset: net.getEffectiveQuality(), rttMs: net.ewmaRttMs || 0, waitMs: f ? 0 : w, forceRefresh: f });
 
-async function poll(f = false) {
+const poll = async (f = false) => {
   if (pB || !canCall() || (!f && S.pa)) { if (f && pB) urg = { f: true }; return; }
-  if (doc.visibilityState === "hidden" && !f) return sched(2500, false);
   pB = 1;
-  const ep = S.ep, t0 = now(), tm = timing(nowMs() - act);
+  const ep = S.ep, t0 = pNow(), hid = isHidden();
   try {
-    onPoll(await reqFrame(f, S.nt ? 1000 : tm.waitMs), rnd(now() - t0), ep);
+    const d = await reqFrame(f, hid ? 0 : S.nt ? 1000 : timing(nowMs() - act).waitMs);
+    lastFetchAt = nowMs();
+    pErr = d?.error && !d?.recovered ? Math.min(4, pErr + 1) : 0;
+    onPoll(d, rnd(pNow() - t0), ep);
   } catch (err) {
+    pErr = Math.min(4, pErr + 1);
     if (isTargetErrorText(err?.message)) { S.aid = null; rstF(1); urg = { f: true }; }
-    else setErr(err?.message || String(err));
+    else setErr(errMsg(err));
   } finally {
     pB = 0;
     if (S.on && !S.pa) {
       if (urg) { const u = urg; urg = 0; sched(20, u.f); }
-      else if (S.st) sched(S.nt ? 1200 : timing(nowMs() - act, !!(inB || qIn.length)).nextDelayMs, false);
+      else if (S.st) sched(nextMs(nowMs() - act, !!(inB || qIn.length)), false);
     }
   }
-}
+};
 
-async function conn(f = false) {
+const conn = async (f = false) => {
   if (S.cn || !canCall()) return;
   S.cn = true; S.er = null; stopOffP(); if (!S.on) uOff();
-  const ep = S.ep, t0 = now();
+  const ep = S.ep, t0 = pNow();
   try {
     const c = await rpcSc("chrome_stream_connect", { qualityPreset: net.getEffectiveQuality(), rttMs: net.ewmaRttMs || 0 });
     if (!c?.connected) { S.cn = false; return goOff(c?.error || null, c?.portFile); }
@@ -619,38 +626,55 @@ async function conn(f = false) {
     if (c.tabsHash) S.th = c.tabsHash;
     if (c.activeTargetId) S.aid = c.activeTargetId;
     S.dlg = c.dialog || null;
-    S.nt = isNT(c);
+    S.nt = isNoTabsPayload(c);
     const d = await reqFrame(f || true, 0, false);
-    S.cn = false; onPoll(d, rnd(now() - t0), ep);
-    if (S.on && S.st && !S.pa) sched(S.nt ? 1200 : timing(0).nextDelayMs, false);
+    S.cn = false; lastFetchAt = nowMs(); pErr = 0; offErr = 0; onPoll(d, rnd(pNow() - t0), ep);
+    if (S.on && S.st && !S.pa) sched(nextMs(0), false);
   } catch (err) {
     S.cn = false;
     if (S.on && isTargetErrorText(err?.message)) return recover();
-    goOff(err?.message || String(err));
+    goOff(errMsg(err));
   }
-}
+};
+
+const forceNow = () => {
+  if (!ready) return;
+  const t = nowMs();
+  if (t - lastForceAt < 250) return;
+  lastForceAt = t;
+  pErr = 0; offErr = 0;
+  if (S.on) {
+    if (S.pa) return;
+    act = t;
+    if (S.id) { S.id = false; syncPauseUi(); }
+    stopP(); poll(true);
+  } else if (!S.cn) {
+    stopOffP();
+    if (oB) offUrg = 1; else probeOff();
+  }
+};
+
+const onHide = () => {
+  if (!ready) return;
+  if (S.on && !S.pa && !pB && pT) sched(nextMs(nowMs() - act, !!(inB || qIn.length)), false);
+  else if (!S.on && !S.cn && !oB && oT) schedOffP();
+};
 
 ck(doc, (e) => { if (S.po && !e.target.closest?.(".pw")) setPop(false); });
 on(doc, "keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "l" && D.ui && S.on) { pd(e); D.ui.focus(); D.ui.select(); }
   else if (e.key === "Escape" && S.po) { pd(e); setPop(false); D.bq?.focus(); }
 });
-on(doc, "visibilitychange", () => {
-  if (doc.visibilityState !== "visible") return;
-  if (S.on && S.st && !S.pa) sched(80, false);
-  else if (!S.on && !S.cn) probeOff();
-});
-on(window, "focus", () => { if (!S.on && !S.cn && ready) probeOff(); });
 
-const bootGo = () => { if (!started && ready) { started = 1; if (S.on && !S.pa) poll(false); else if (!S.on) schedOffP(4000); } };
+const bootGo = () => { if (!started && ready) { started = 1; lastForceAt = nowMs(); if (S.on && !S.pa) poll(false); else if (!S.on) schedOffP(); } };
 
-function syncHostCtx(ctx) {
+const syncHostCtx = (ctx) => {
   applyHostContext(ctx);
-  const nextLg = resolvePanelLang({ saved: lsG("chrome_stream_lang"), hostLocale: ctx?.locale || ctx?.language || "", navLang: typeof navigator !== "undefined" ? navigator.language : "", bootLocale: boot?.locale || "" });
+  const nextLg = resolvePanelLang({ saved: lsG("chrome_stream_lang"), hostLocale: ctx?.locale || ctx?.language || "", navLang: globalThis.navigator?.language || "", bootLocale: boot?.locale || "" });
   if (nextLg !== S.lg) { S.lg = nextLg; applyLangUi(); }
-}
+};
 
-function onResult(r) {
+const onResult = (r) => {
   const d = r?.structuredContent; if (!d) return;
   const sig = sigOf(d);
   if (sig === tSig) { if (d.connected) bootGo(); return; }
@@ -659,16 +683,18 @@ function onResult(r) {
   if (typeof d.paused === "boolean" && !synced) { S.pa = d.paused; S.st = !d.paused; }
   if (d.activeTargetId && !synced) S.aid = d.activeTargetId;
   if ("dialog" in d) S.dlg = d.dialog || null;
-  if (d.connected) { S.on = true; act = nowMs(); sView(); uTabs(); uSt(); if (ready) poll(false); return; }
+  if (d.connected) { S.on = true; act = nowMs(); lastFetchAt = nowMs(); sView(); uTabs(); uSt(); if (ready) poll(false); return; }
   if (synced && S.on && !d.connected) return goOff(d.error, d.portFile);
   if (synced || S.cn) return;
   goOff(d.error, d.portFile);
-}
+};
 
 app.ontoolinput = () => {};
 app.ontoolresult = onResult;
 app.ontoolcancelled = () => { S.cn = false; uOff(); };
 app.onhostcontextchanged = syncHostCtx;
+stopReveal = setupRevealObservers({ bridgeApp: app, onReveal: forceNow, onHide, getLastFetchAt: () => lastFetchAt, clock: nowMs });
+app.onteardown = () => { stopP(); stopOffP(); stopReveal?.(); return {}; };
 
 mount();
 if (boot) tSig = sigOf(boot);
@@ -677,5 +703,5 @@ boot?.connected ? onPoll(boot, 0, S.ep) : sView();
 (async () => {
   try {
     await app.connect(); ready = 1; syncHostCtx(app.getHostContext()); uSt(); bootGo();
-  } catch (err) { goOff(L().iEr(err?.message || err)); }
+  } catch (err) { goOff(L().iEr(errMsg(err))); }
 })();
