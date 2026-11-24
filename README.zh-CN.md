@@ -7,7 +7,7 @@
 **在 Antigravity 里直接查看和操作你本机的 Google Chrome，即使手机远程或弱网环境下也能顺畅使用。**
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/static/v1?label=release&message=v0.2.0&color=D97757)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)<!-- x-release-please-version -->
+[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
 
