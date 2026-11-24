@@ -2,10 +2,12 @@
 export const LATEST_PROTOCOL_VERSION = "2026-01-26";
 const de = () => document.documentElement;
 
+const HX = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
 function parseAlpha(v) {
   const s = String(v || "").trim().toLowerCase();
   if (!s || s === "transparent" || s === "none" || s === "initial" || s === "inherit" || s === "unset") return 0;
-  const hx = s.match(/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i);
+  const hx = s.match(HX);
   if (hx) {
     const h = hx[1];
     if (h.length === 4) return parseInt(h[3] + h[3], 16) / 255;
@@ -24,7 +26,7 @@ function parseAlpha(v) {
 export function lum(raw) {
   const s = String(raw || "").trim();
   if (parseAlpha(s) < 0.5) return null;
-  const m = s.match(/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i);
+  const m = s.match(HX);
   if (m) {
     const h = m[1], p = h.length <= 4 ? [h[0]+h[0], h[1]+h[1], h[2]+h[2]] : [h.slice(0,2), h.slice(2,4), h.slice(4,6)];
     return (0.2126 * parseInt(p[0], 16) + 0.7152 * parseInt(p[1], 16) + 0.0722 * parseInt(p[2], 16)) / 255;
@@ -94,14 +96,14 @@ export class App {
   }
   getHostContext() { return this._ctx; }
   getHostCapabilities() { return this._hc; }
-  _send(p) { this._t.postMessage(p, "*"); }
+  _send(p) { this._t.postMessage({ jsonrpc: "2.0", ...p }, "*"); }
   async _req(m) {
     const id = m.id, k = m.method;
     try {
-      if (k === "ping") return this._send({ jsonrpc: "2.0", id, result: {} });
-      if (k === "ui/resource-teardown") return this._send({ jsonrpc: "2.0", id, result: this.onteardown ? (await this.onteardown(m.params || {})) ?? {} : {} });
-      this._send({ jsonrpc: "2.0", id, error: { code: -32601, message: k } });
-    } catch (e) { this._send({ jsonrpc: "2.0", id, error: { code: -32603, message: e?.message || String(e) } }); }
+      if (k === "ping") return this._send({ id, result: {} });
+      if (k === "ui/resource-teardown") return this._send({ id, result: this.onteardown ? (await this.onteardown(m.params || {})) ?? {} : {} });
+      this._send({ id, error: { code: -32601, message: k } });
+    } catch (e) { this._send({ id, error: { code: -32603, message: e?.message || String(e) } }); }
   }
   _note(m) {
     const p = m.params || {}, k = m.method;
@@ -117,10 +119,10 @@ export class App {
       const arm = () => setTimeout(() => { this._p.delete(id); rej(new Error(`Timeout:${method}`)); }, timeoutMs);
       const e = { res, rej, t: arm(), reset() { clearTimeout(e.t); e.t = arm(); } };
       this._p.set(id, e);
-      this._send({ jsonrpc: "2.0", id, method, params });
+      this._send({ id, method, params });
     });
   }
-  notification(method, params) { this._send(params !== undefined ? { jsonrpc: "2.0", method, params } : { jsonrpc: "2.0", method }); }
+  notification(method, params) { this._send(params !== undefined ? { method, params } : { method }); }
   callServerTool(params, o = {}) { return this.request("tools/call", params, { timeoutMs: o.timeout ?? 75000 }); }
   _watchSize() {
     if (typeof ResizeObserver === "undefined" || !this._ctx?.containerDimensions?.maxHeight) return;

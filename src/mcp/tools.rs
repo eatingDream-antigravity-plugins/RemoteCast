@@ -1,3 +1,4 @@
+use crate::i18n::{current_lang, Lang};
 use crate::mcp::server::{stage_status_from_snapshot, SwrBootCache};
 use crate::relay::ipc::RelayBackend;
 use crate::stream::dedup::{hash_frame_data, hash_tabs, is_target_gone_error};
@@ -27,7 +28,7 @@ pub fn tool_definitions() -> Value {
         {
             "name": "chrome_stream_stage",
             "title": "Chrome Stream",
-            "description": "Open the Chrome Stream live browser stage to watch and interactively control local Google Chrome tabs over Chrome DevTools Protocol.",
+            "description": "Open the Chrome Stream live browser stage to view and interactively control local Google Chrome tabs without auto-connecting.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -48,7 +49,7 @@ pub fn tool_definitions() -> Value {
         {
             "name": "chrome_stream_connect",
             "title": "Connect Chrome Stream",
-            "description": "Connect or verify the persistent Chrome DevTools relay session and warm the active tab screencast.",
+            "description": "Connect or verify the persistent local Chrome DevTools session and warm the active tab screencast.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -59,28 +60,9 @@ pub fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "chrome_stream_tabs",
-            "title": "Manage Chrome Tabs",
-            "description": "App-only tool: list, switch, open, or atomically close Chrome tabs with automatic surviving-tab recovery.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["list", "switch", "new", "close"] },
-                    "targetId": { "type": "string" },
-                    "url": { "type": "string" }
-                },
-                "additionalProperties": false
-            },
-            "_meta": {
-                "ui": {
-                    "visibility": ["app"]
-                }
-            }
-        },
-        {
             "name": "chrome_stream_frame",
             "title": "Poll Screencast Frame",
-            "description": "App-only tool: long-poll for the next changed GPU-scaled CDP screencast frame with hash deduplication and adaptive low-bandwidth profiles.",
+            "description": "App-only tool: poll the active tab screencast frame, tab state, and modal JS dialog status without auto-dialing when disconnected.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -103,8 +85,8 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "chrome_stream_input",
-            "title": "Dispatch Fast Input Batch",
-            "description": "App-only tool: dispatch one or more coalesced click/mousemove/scroll/type/key/nav/tab events without blocking on synchronous screenshots.",
+            "title": "Dispatch Interactive Input Batch",
+            "description": "App-only tool: dispatch coalesced mouse, drag, wheel, touch, keyboard, shortcut, IME, dialog, navigation, and tab events.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -118,10 +100,13 @@ pub fn tool_definitions() -> Value {
                                     "type": "string",
                                     "enum": [
                                         "click",
+                                        "mousedown",
+                                        "mouseup",
                                         "mousemove",
                                         "scroll",
                                         "type",
                                         "key",
+                                        "dialog",
                                         "navigate",
                                         "back",
                                         "forward",
@@ -137,15 +122,19 @@ pub fn tool_definitions() -> Value {
                                 "targetId": { "type": "string" },
                                 "x": { "type": "number" },
                                 "y": { "type": "number" },
-                                "button": { "type": "string", "enum": ["left", "right", "middle"] },
-                                "clickCount": { "type": "integer", "minimum": 1, "maximum": 2 },
+                                "button": { "type": "string", "enum": ["left", "right", "middle", "none"] },
+                                "buttons": { "type": "integer", "minimum": 0, "maximum": 7 },
+                                "clickCount": { "type": "integer", "minimum": 1, "maximum": 3 },
+                                "modifiers": { "type": "integer", "minimum": 0, "maximum": 15 },
                                 "deltaX": { "type": "number" },
                                 "deltaY": { "type": "number" },
                                 "text": { "type": "string" },
                                 "pressEnter": { "type": "boolean" },
                                 "key": { "type": "string" },
                                 "repeat": { "type": "integer", "minimum": 1, "maximum": 20 },
-                                "url": { "type": "string" }
+                                "url": { "type": "string" },
+                                "accept": { "type": "boolean" },
+                                "promptText": { "type": "string" }
                             },
                             "required": ["action"]
                         }
@@ -161,28 +150,9 @@ pub fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "chrome_stream_navigate",
-            "title": "Navigate Active Tab",
-            "description": "App-only tool: navigate to a URL/search query or invoke browser back, forward, or reload.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["goto", "back", "forward", "reload"] },
-                    "url": { "type": "string" },
-                    "targetId": { "type": "string" }
-                },
-                "additionalProperties": false
-            },
-            "_meta": {
-                "ui": {
-                    "visibility": ["app"]
-                }
-            }
-        },
-        {
             "name": "chrome_stream_disconnect",
             "title": "Disconnect Chrome Stream",
-            "description": "Stop active screencast streaming and close the Chrome DevTools relay WebSocket to save battery.",
+            "description": "Stop active screencast streaming and close the Chrome DevTools session to save battery.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -206,10 +176,8 @@ pub fn dispatch_tool_with_cache(
     let mut out = match name {
         "chrome_stream_stage" => handle_stage(relay, swr_cache),
         "chrome_stream_connect" => handle_connect(relay, args),
-        "chrome_stream_tabs" => handle_tabs(relay, args),
         "chrome_stream_frame" => handle_frame(relay, args),
         "chrome_stream_input" => handle_input(relay, args),
-        "chrome_stream_navigate" => handle_navigate(relay, args),
         "chrome_stream_disconnect" => handle_disconnect(relay),
         _ => json!({
             "isError": true,
@@ -234,6 +202,7 @@ fn safe_status(relay: &Arc<dyn RelayBackend>) -> Value {
         .unwrap_or_else(|_| {
             json!({
                 "connected": false,
+                "locale": current_lang().as_str(),
                 "portFile": { "exists": false, "valid": false, "port": Value::Null }
             })
         });
@@ -242,7 +211,8 @@ fn safe_status(relay: &Arc<dyn RelayBackend>) -> Value {
 }
 
 fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCache>>) -> Value {
-    let status = if let Some(cache) = swr_cache {
+    let lang = current_lang();
+    let mut status = if let Some(cache) = swr_cache {
         match cache.get_swr(Duration::from_millis(1200)) {
             Some(snap) => stage_status_from_snapshot(&snap),
             None => match relay.call("status", json!({}), Duration::from_secs(3)) {
@@ -251,10 +221,14 @@ fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCac
                     s
                 }
                 Err(err) => {
+                    let msg = match lang {
+                        Lang::En => format!("Chrome Stream relay unavailable: {err}"),
+                        Lang::ZhCn => format!("Chrome Stream 本地服务暂不可用：{err}"),
+                    };
                     return json!({
                         "isError": false,
-                        "content": [{ "type": "text", "text": format!("Chrome Stream relay unavailable: {err}") }],
-                        "structuredContent": { "connected": false, "error": err }
+                        "content": [{ "type": "text", "text": msg }],
+                        "structuredContent": { "connected": false, "locale": lang.as_str(), "error": err }
                     });
                 }
             },
@@ -266,14 +240,19 @@ fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCac
                 s
             }
             Err(err) => {
+                let msg = match lang {
+                    Lang::En => format!("Chrome Stream relay unavailable: {err}"),
+                    Lang::ZhCn => format!("Chrome Stream 本地服务暂不可用：{err}"),
+                };
                 return json!({
                     "isError": false,
-                    "content": [{ "type": "text", "text": format!("Chrome Stream relay unavailable: {err}") }],
-                    "structuredContent": { "connected": false, "error": err }
+                    "content": [{ "type": "text", "text": msg }],
+                    "structuredContent": { "connected": false, "locale": lang.as_str(), "error": err }
                 });
             }
         }
     };
+    status["locale"] = json!(lang.as_str());
 
     let connected = status
         .get("connected")
@@ -289,37 +268,52 @@ fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCac
         .pointer("/portFile/valid")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let port_desc = if port_ready {
-        format!(
-            "ready (port {})",
-            status
-                .pointer("/portFile/port")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(9222)
-        )
-    } else {
-        "not found".to_string()
+    let port_num = status
+        .pointer("/portFile/port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(9222);
+
+    let text = match lang {
+        Lang::En => {
+            let port_desc = if port_ready {
+                format!("ready (port {port_num})")
+            } else {
+                "not detected".to_string()
+            };
+            format!("Chrome Stream: connected={connected}, remote debugging={port_desc}.")
+        }
+        Lang::ZhCn => {
+            let port_desc = if port_ready {
+                format!("已就绪（端口 {port_num}）")
+            } else {
+                "未检测到".to_string()
+            };
+            format!("Chrome Stream：已连接={connected}，远程调试={port_desc}。")
+        }
     };
 
     json!({
-        "content": [{
-            "type": "text",
-            "text": format!("Chrome Stream (local): connected={connected}, DevToolsActivePort={port_desc}.")
-        }],
+        "content": [{ "type": "text", "text": text }],
         "structuredContent": status
     })
 }
 
 fn handle_connect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
+    let lang = current_lang();
     match relay.call("connect", args, Duration::from_secs(70)) {
-        Ok(res) => {
+        Ok(mut res) => {
+            res["locale"] = json!(lang.as_str());
             let count = res
                 .get("tabs")
                 .and_then(|v| v.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
+            let text = match lang {
+                Lang::En => format!("Connected to Chrome ({count} tab(s))."),
+                Lang::ZhCn => format!("已连接到本机 Chrome（共 {count} 个标签页）。"),
+            };
             json!({
-                "content": [{ "type": "text", "text": format!("Connected to Chrome ({count} tab(s)).") }],
+                "content": [{ "type": "text", "text": text }],
                 "structuredContent": res
             })
         }
@@ -329,49 +323,17 @@ fn handle_connect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 .get("connected")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let text = match lang {
+                Lang::En => format!("Connect error: {err}"),
+                Lang::ZhCn => format!("连接失败：{err}"),
+            };
             json!({
                 "isError": false,
-                "content": [{ "type": "text", "text": format!("Connect error: {err}") }],
+                "content": [{ "type": "text", "text": text }],
                 "structuredContent": {
                     "ok": false,
                     "connected": connected,
-                    "error": err,
-                    "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
-                }
-            })
-        }
-    }
-}
-
-fn handle_tabs(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
-    match relay.call("tabs", args, Duration::from_secs(20)) {
-        Ok(res) => json!({
-            "content": [{ "type": "text", "text": "ok" }],
-            "structuredContent": res
-        }),
-        Err(err) => {
-            let st = safe_status(relay);
-            let connected = st
-                .get("connected")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if connected && is_target_gone_error(&err, None) {
-                if let Ok(rec) = relay.call("tabs", json!({ "action": "list" }), Duration::from_secs(10)) {
-                    let mut out = rec;
-                    out["recovered"] = json!(true);
-                    return json!({
-                        "content": [{ "type": "text", "text": "recovered" }],
-                        "structuredContent": out
-                    });
-                }
-            }
-            json!({
-                "isError": false,
-                "content": [{ "type": "text", "text": format!("Tabs error: {err}") }],
-                "structuredContent": {
-                    "ok": false,
-                    "connected": connected,
-                    "recoverable": connected,
+                    "locale": lang.as_str(),
                     "error": err,
                     "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
                 }
@@ -495,7 +457,7 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
         "forceRefresh": force_refresh,
     });
 
-    match relay.call("poll_frame", relay_args.clone(), Duration::from_secs(70)) {
+    match relay.call("poll_frame", relay_args, Duration::from_secs(70)) {
         Ok(frame) => {
             let norm = normalize_frame(
                 frame,
@@ -563,6 +525,7 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 "error": err,
                 "portFile": post.get("portFile").cloned().unwrap_or(Value::Null),
                 "activeTargetId": post.get("activeTargetId").cloned().unwrap_or(Value::Null),
+                "dialog": post.get("dialog").cloned().unwrap_or(Value::Null),
                 "changed": false,
                 "unchanged": true,
                 "seq": since_seq,
@@ -608,6 +571,7 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                         "recovered": true,
                         "connected": true,
                         "activeTargetId": rec.as_ref().and_then(|r| r.get("activeTargetId")).cloned().unwrap_or_else(|| st.get("activeTargetId").cloned().unwrap_or(Value::Null)),
+                        "dialog": rec.as_ref().and_then(|r| r.get("dialog")).cloned().unwrap_or(Value::Null),
                         "epoch": rec.as_ref().and_then(|r| r.get("epoch")).cloned().unwrap_or(Value::Null),
                         "tabs": rec.as_ref().and_then(|r| r.get("tabs")).cloned().unwrap_or(Value::Null),
                         "tabsHash": rec.as_ref().and_then(|r| r.get("tabsHash")).cloned().unwrap_or(Value::Null),
@@ -631,43 +595,24 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
     }
 }
 
-fn handle_navigate(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
-    match relay.call("navigate", args, Duration::from_secs(20)) {
-        Ok(res) => json!({
-            "content": [{ "type": "text", "text": "ok" }],
-            "structuredContent": res
-        }),
-        Err(err) => {
-            let st = safe_status(relay);
-            let live = st
-                .get("connected")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+fn handle_disconnect(relay: &Arc<dyn RelayBackend>) -> Value {
+    let lang = current_lang();
+    let ok_text = match lang {
+        Lang::En => "Disconnected from Chrome.",
+        Lang::ZhCn => "已断开本机 Chrome 连接。",
+    };
+    match relay.call("disconnect", json!({}), Duration::from_secs(10)) {
+        Ok(mut res) => {
+            res["locale"] = json!(lang.as_str());
             json!({
-                "isError": false,
-                "content": [{ "type": "text", "text": format!("Navigate error: {err}") }],
-                "structuredContent": {
-                    "ok": false,
-                    "connected": live,
-                    "recoverable": live,
-                    "error": err,
-                    "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
-                }
+                "content": [{ "type": "text", "text": ok_text }],
+                "structuredContent": res
             })
         }
-    }
-}
-
-fn handle_disconnect(relay: &Arc<dyn RelayBackend>) -> Value {
-    match relay.call("disconnect", json!({}), Duration::from_secs(10)) {
-        Ok(res) => json!({
-            "content": [{ "type": "text", "text": "Disconnected from Chrome." }],
-            "structuredContent": res
-        }),
         Err(err) => json!({
             "isError": false,
             "content": [{ "type": "text", "text": format!("Disconnect note: {err}") }],
-            "structuredContent": { "ok": true, "connected": false }
+            "structuredContent": { "ok": true, "connected": false, "locale": lang.as_str() }
         }),
     }
 }
@@ -733,25 +678,23 @@ mod tests {
     }
 
     #[test]
-    fn exposes_all_seven_clean_tools() {
+    fn exposes_five_clean_english_tools_without_dead_app_tools() {
         let defs = tool_definitions();
-        let names: Vec<&str> = defs
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let arr = defs.as_array().unwrap();
+        let names: Vec<&str> = arr.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
             vec![
                 "chrome_stream_stage",
                 "chrome_stream_connect",
-                "chrome_stream_tabs",
                 "chrome_stream_frame",
                 "chrome_stream_input",
-                "chrome_stream_navigate",
                 "chrome_stream_disconnect",
             ]
         );
+        for tool in arr {
+            let desc = tool["description"].as_str().unwrap();
+            assert!(desc.is_ascii(), "tool description must be clean English ASCII: {desc}");
+        }
     }
 }

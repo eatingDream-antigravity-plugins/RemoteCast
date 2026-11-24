@@ -8,6 +8,8 @@ import {
   applyOptimisticTabClose,
   coalesceInputEvents,
   isTargetErrorText,
+  parsePanelLocaleTag,
+  resolvePanelLang,
   shouldApplyFrameResponse,
 } from "./net-policy.js";
 import { applyHostStyleVariables, lum } from "./bridge.js";
@@ -118,10 +120,13 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     assert.equal(isTargetErrorText("Chrome CDP connection closed"), false);
   });
 
-  it("ships dark-first, zero-flicker, CSP-clean panel bundle under 42 KiB", () => {
+  it("ships dark-first, zero-flicker, CSP-clean, jargon-free panel bundle under 44 KiB", () => {
     const html = fs.readFileSync(path.join(__dirname, "dist", "panel.html"), "utf8");
     const bytes = Buffer.byteLength(html, "utf8");
-    assert.ok(bytes < 42 * 1024, `panel.html is ${bytes} B (>= 42 KiB)`);
+    assert.ok(bytes < 44 * 1024, `panel.html is ${bytes} B (>= 44 KiB)`);
+    for (const jargon of ["SHA-1", "0600 Unix Socket", "原生 Rust", "Local Loopback", "CDP"]) {
+      assert.ok(!html.includes(jargon), `panel.html must not expose internal jargon: ${jargon}`);
+    }
     assert.ok(html.includes('<meta name="color-scheme" content="dark">'));
     assert.ok(html.includes('style="background:#141311;color-scheme:dark"'));
     assert.ok(html.includes("background-color:var(--color-background-primary,#141311)"));
@@ -194,5 +199,22 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     assert.ok(lum("rgba(255, 255, 255, 0.5)") > 0.9);
     assert.ok(lum("#141311ff") < 0.1);
     assert.ok(lum("#FAF8F5") > 0.9);
+  });
+
+  it("resolves bilingual panel locale and backs off polling when screencast is idle", () => {
+    assert.equal(parsePanelLocaleTag("C"), null);
+    assert.equal(parsePanelLocaleTag("POSIX"), null);
+    assert.equal(parsePanelLocaleTag("zh_TW"), "zh-CN");
+    assert.equal(parsePanelLocaleTag("ja-JP"), "en");
+    assert.equal(resolvePanelLang({ saved: "en", hostLocale: "zh-CN", navLang: "zh-CN" }), "en");
+    assert.equal(resolvePanelLang({ saved: "", hostLocale: "zh-Hans-CN", navLang: "en-US" }), "zh-CN");
+    assert.equal(resolvePanelLang({ saved: "", hostLocale: "", navLang: "fr-FR", bootLocale: "zh-CN" }), "en");
+    assert.equal(resolvePanelLang({}), "en");
+
+    const net = new AdaptiveBandwidthController("auto");
+    assert.deepEqual(net.computePollTiming({ idleMs: 15000, inputBusy: false, screencastIdle: true }), {
+      waitMs: 0,
+      nextDelayMs: 4000,
+    });
   });
 });

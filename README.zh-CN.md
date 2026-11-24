@@ -50,8 +50,8 @@ CHROME_STREAM_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/eating
 ### 2. 开启 Chrome 远程调试（只需设置一次）
 
 1. 保持电脑上的 Google Chrome 处于打开状态。
-2. 在 Chrome 地址栏打开 `chrome://inspect/#remote-debugging` 并开启远程调试（或在启动 Chrome 时加上 `--remote-debugging-port=9222`）。
-3. 在 Antigravity 里打开 **Chrome Stream**，点击 **连接**，在 Chrome 弹出的提示框里点一次 **允许** 即可。
+2. 在 Chrome 地址栏打开 `chrome://inspect/#remote-debugging` 并开启远程调试（**Chrome 136+** 默认禁止在主配置目录直接使用 `--remote-debugging-port`，推荐用此方式）。如果你更习惯在终端单独启动调试实例，可加上 `--remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug`。
+3. 在 Antigravity 里打开 **Chrome Stream**，点击 **连接 Chrome**，在 Chrome 弹出的提示框里点一次 **允许** 即可。
 
 如果连不上，在终端里跑一下 `chrome-stream-mcp doctor` 就能看到具体缺哪一步。
 
@@ -75,13 +75,19 @@ CHROME_STREAM_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/eating
 | `chrome_stream_connect` | 连接到本机 Chrome 并开始投屏当前标签页。 |
 | `chrome_stream_disconnect` | 停止投屏并断开 Chrome 调试连接。 |
 
-### 自定义端口或配置目录（可选）
+### 自定义端口、配置目录或语言（可选）
 
-默认会自动寻找本机正在运行的 Chrome（找不到时尝试本地 `9222` 端口）。如果你用了非默认端口或配置目录，可以通过环境变量 `CHROME_STREAM_CHROME_DEBUG_PORT` 或 `CHROME_STREAM_CHROME_PORT_FILE` 指定。
+默认会自动扫描 macOS 与 Linux 常见 Chrome / Chromium 配置目录并验证 `DevToolsActivePort` 端口是否真实存活，失效时自动回退到本地 `9222` 端口。如有特殊路径或语言偏好，可设置 `CHROME_STREAM_DEBUG_PORT`、`CHROME_STREAM_PORT_FILE`、`CHROME_STREAM_USER_DATA_DIR` 或 `CHROME_STREAM_LANG`（`en` / `zh-CN`）。
 
-## 隐私与安全
+## 实现原理与安全边界
 
-Chrome Stream 只允许连接本机环回地址（`127.0.0.1` / `::1`）上的 Chrome，会直接拒绝任何远程地址，请勿将 Chrome 调试端口暴露到外网。返回给 Agent 的结果会自动脱敏，不包含本地文件路径和调试 Token，插件本身也不会发起任何对外网络请求。
+Chrome Stream 只做本地轻量中继，不修改系统配置，也不会在后台偷偷连网或占用显卡资源：
+
+- **仅限本机环回（`127.0.0.1` / `::1`）**：只允许连接本机环回地址上的 Chrome，直接拒绝任何远程或非本机地址；也请不要把 Chrome 调试端口暴露到公网。
+- **用户专属 `0600` 本地 Socket 中继**：通过 `~/.gemini/antigravity/plugin_data/chrome-stream-mcp/` 下权限为 `0600`（仅当前系统用户可读写）的本地 Unix Socket 保持已授权会话，避免每次重启服务都反复弹窗。
+- **单次授权、显式触发**：打开面板本身绝不会自动拨号连接 Chrome；只有你手动点击 **连接 Chrome**（或调用连接工具）并在 Chrome 中点一次 **允许** 才会建立连接，随时可点 **暂停** 或 **断开**。
+- **12 秒无操作自动停流护显卡**：即使面板一直开着，只要 12 秒内没有键鼠或触控交互，后台会自动暂停抓屏让 Chrome GPU 休息；下次点击、滚动、输入或点唤醒条时立即恢复。
+- **信息脱敏与零外连**：返回给 Agent 的结果会自动剔除本地文件路径和内部调试 Token，插件自身不发起任何对外网络请求。
 
 ## 从源码构建
 

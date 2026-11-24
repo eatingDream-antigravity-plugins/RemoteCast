@@ -182,30 +182,89 @@ pub fn normalize_url(raw: &str) -> String {
         return "about:blank".to_string();
     }
     let low = s.to_ascii_lowercase();
-    if low.starts_with("http:")
-        || low.starts_with("https:")
-        || low.starts_with("chrome:")
+    if low.starts_with("http://")
+        || low.starts_with("https://")
+        || low.starts_with("chrome://")
+        || low.starts_with("chrome-extension://")
         || low.starts_with("about:")
-        || low.starts_with("file:")
+        || low.starts_with("file://")
+        || low.starts_with("data:")
+        || low.starts_with("view-source:")
     {
         return s.to_string();
     }
-    if low == "localhost"
-        || low.starts_with("localhost:")
-        || low.starts_with("localhost/")
-        || looks_like_host(s)
-    {
-        return format!("https://{s}");
+    if !s.chars().any(char::is_whitespace) {
+        if is_local_or_ip_authority(s) {
+            return format!("http://{s}");
+        }
+        if looks_like_host(s) {
+            return format!("https://{s}");
+        }
     }
     format!("https://www.google.com/search?q={}", url_encode_query(s))
 }
 
+fn split_authority_host_port(authority: &str) -> Option<(&str, Option<&str>)> {
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (ipv6, after) = rest.split_once(']')?;
+        if ipv6.is_empty() {
+            return None;
+        }
+        if after.is_empty() {
+            return Some((ipv6, None));
+        }
+        let port = after.strip_prefix(':')?;
+        if port.parse::<u16>().ok().filter(|&p| p > 0).is_some() {
+            return Some((ipv6, Some(port)));
+        }
+        return None;
+    }
+    match authority.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') => {
+            if p.parse::<u16>().ok().filter(|&port| port > 0).is_some() {
+                Some((h, Some(p)))
+            } else {
+                None
+            }
+        }
+        _ => Some((authority, None)),
+    }
+}
+
+fn is_bare_ipv4(host: &str) -> bool {
+    let parts: Vec<&str> = host.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.parse::<u8>().is_ok())
+}
+
+fn is_local_or_ip_authority(s: &str) -> bool {
+    let authority = s.split(['/', '?', '#']).next().unwrap_or("");
+    let Some((host, _port)) = split_authority_host_port(authority) else {
+        return false;
+    };
+    if authority.starts_with('[') {
+        return host.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    let low = host.to_ascii_lowercase();
+    if low == "localhost" || low.ends_with(".localhost") {
+        return true;
+    }
+    is_bare_ipv4(host)
+}
+
 fn looks_like_host(s: &str) -> bool {
-    if s.contains(' ') {
+    if s.chars().any(char::is_whitespace) {
         return false;
     }
-    let host_part = s.split(['/', '?', '#']).next().unwrap_or("");
-    let host = host_part.split(':').next().unwrap_or("");
+    let authority = s.split(['/', '?', '#']).next().unwrap_or("");
+    let Some((host, _port)) = split_authority_host_port(authority) else {
+        return false;
+    };
     let Some((prefix, tld)) = host.rsplit_once('.') else {
         return false;
     };
@@ -288,8 +347,19 @@ mod tests {
         assert!(is_disconnected_error("Chrome CDP connection closed"));
 
         assert_eq!(normalize_url("example.com/docs"), "https://example.com/docs");
-        assert_eq!(normalize_url("localhost:3000"), "https://localhost:3000");
+        assert_eq!(normalize_url("example.com:8443/app"), "https://example.com:8443/app");
+        assert_eq!(normalize_url("localhost"), "http://localhost");
+        assert_eq!(normalize_url("localhost:3000"), "http://localhost:3000");
+        assert_eq!(normalize_url("localhost:3000/api?x=1"), "http://localhost:3000/api?x=1");
+        assert_eq!(normalize_url("dev.localhost:5173"), "http://dev.localhost:5173");
+        assert_eq!(normalize_url("127.0.0.1"), "http://127.0.0.1");
+        assert_eq!(normalize_url("127.0.0.1:8080/health"), "http://127.0.0.1:8080/health");
+        assert_eq!(normalize_url("[::1]"), "http://[::1]");
+        assert_eq!(normalize_url("[::1]:5173/ui"), "http://[::1]:5173/ui");
+        assert_eq!(normalize_url("192.0.2.10"), "http://192.0.2.10");
+        assert_eq!(normalize_url("203.0.113.5:8080/status"), "http://203.0.113.5:8080/status");
         assert_eq!(normalize_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
+        assert_eq!(normalize_url("chrome://inspect/#remote-debugging"), "chrome://inspect/#remote-debugging");
         assert_eq!(
             normalize_url("rust cdp"),
             "https://www.google.com/search?q=rust%20cdp"
