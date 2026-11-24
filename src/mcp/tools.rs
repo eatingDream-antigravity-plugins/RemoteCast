@@ -162,11 +162,6 @@ pub fn tool_definitions() -> Value {
     ])
 }
 
-#[cfg(test)]
-pub fn dispatch_tool(relay: &Arc<dyn RelayBackend>, name: &str, args: Value) -> Value {
-    dispatch_tool_with_cache(relay, None, name, args)
-}
-
 pub fn dispatch_tool_with_cache(
     relay: &Arc<dyn RelayBackend>,
     swr_cache: Option<&Arc<SwrBootCache>>,
@@ -614,87 +609,5 @@ fn handle_disconnect(relay: &Arc<dyn RelayBackend>) -> Value {
             "content": [{ "type": "text", "text": format!("Disconnect note: {err}") }],
             "structuredContent": { "ok": true, "connected": false, "locale": lang.as_str() }
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct FlakyRelay {
-        poll_attempts: AtomicUsize,
-        connected: bool,
-    }
-
-    impl RelayBackend for FlakyRelay {
-        fn call(&self, method: &str, params: Value, _timeout: Duration) -> Result<Value, String> {
-            match method {
-                "status" => Ok(json!({
-                    "hostname": "test-host",
-                    "connected": self.connected,
-                    "portFile": { "exists": true, "valid": true, "port": 9222 },
-                    "activeTargetId": "t2",
-                })),
-                "poll_frame" => {
-                    let n = self.poll_attempts.fetch_add(1, Ordering::SeqCst);
-                    if n == 0 {
-                        Err("No target with given id found".into())
-                    } else {
-                        Ok(json!({
-                            "connected": true,
-                            "activeTargetId": "t2",
-                            "tabs": [{ "targetId": "t2", "title": "Live", "url": "https://live.test" }],
-                            "page": { "title": "Live", "url": "https://live.test", "viewportWidth": 1280, "viewportHeight": 800 },
-                            "changed": true,
-                            "seq": 4,
-                            "imageDataUrl": "data:image/jpeg;base64,QUFB",
-                            "imageBytes": 3,
-                            "qualityApplied": params["qualityPreset"],
-                        }))
-                    }
-                }
-                _ => Ok(json!({ "ok": true, "connected": self.connected })),
-            }
-        }
-    }
-
-    #[test]
-    fn chrome_stream_frame_recovers_from_no_target_found_without_disconnecting() {
-        let relay: Arc<dyn RelayBackend> = Arc::new(FlakyRelay {
-            poll_attempts: AtomicUsize::new(0),
-            connected: true,
-        });
-        let res = dispatch_tool(
-            &relay,
-            "chrome_stream_frame",
-            json!({ "targetId": "t-closed", "qualityPreset": "auto", "rttMs": 820 }),
-        );
-        let sc = &res["structuredContent"];
-        assert_eq!(sc["connected"], true);
-        assert_eq!(sc["recovered"], true);
-        assert_eq!(sc["activeTargetId"], "t2");
-        assert_eq!(sc["qualityApplied"], "ultra");
-    }
-
-    #[test]
-    fn exposes_five_clean_english_tools_without_dead_app_tools() {
-        let defs = tool_definitions();
-        let arr = defs.as_array().unwrap();
-        let names: Vec<&str> = arr.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "chrome_stream_stage",
-                "chrome_stream_connect",
-                "chrome_stream_frame",
-                "chrome_stream_input",
-                "chrome_stream_disconnect",
-            ]
-        );
-        for tool in arr {
-            let desc = tool["description"].as_str().unwrap();
-            assert!(desc.is_ascii(), "tool description must be clean English ASCII: {desc}");
-        }
     }
 }

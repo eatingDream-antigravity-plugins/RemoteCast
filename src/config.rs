@@ -218,14 +218,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_port_file_uses_home_dynamically() {
+    fn port_file_discovery_uses_home_and_covers_all_platform_candidates() {
         let p = default_chrome_port_file(Path::new("/tmp/test-home"));
         assert!(p.starts_with("/tmp/test-home"));
         assert!(p.ends_with("DevToolsActivePort"));
-    }
 
-    #[test]
-    fn candidate_port_files_cover_explicit_xdg_snap_flatpak_and_macos_channels() {
         let home = Path::new("/tmp/fake-home");
         let xdg = Path::new("/tmp/fake-xdg");
         let explicit_pf = Path::new("/tmp/custom/DevToolsActivePort");
