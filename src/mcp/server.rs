@@ -662,10 +662,11 @@ mod tests {
 
     struct DummyRelay {
         delay_ms: u64,
+        poll_attempts: AtomicUsize,
     }
 
     impl RelayBackend for DummyRelay {
-        fn call(&self, method: &str, _params: Value, _timeout: Duration) -> Result<Value, String> {
+        fn call(&self, method: &str, params: Value, _timeout: Duration) -> Result<Value, String> {
             if self.delay_ms > 0 && matches!(method, "boot_snapshot" | "status") {
                 thread::sleep(Duration::from_millis(self.delay_ms));
             }
@@ -692,8 +693,26 @@ mod tests {
                 "status" => Ok(json!({
                     "connected": true,
                     "hostname": "private-laptop.local",
-                    "portFile": { "exists": true, "valid": true, "port": 9222 }
+                    "portFile": { "exists": true, "valid": true, "port": 9222 },
+                    "activeTargetId": "t2"
                 })),
+                "poll_frame" => {
+                    if self.poll_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("No target with given id found".into())
+                    } else {
+                        Ok(json!({
+                            "connected": true,
+                            "activeTargetId": "t2",
+                            "tabs": [{ "targetId": "t2", "title": "Live", "url": "https://live.test" }],
+                            "page": { "title": "Live", "url": "https://live.test", "viewportWidth": 1280, "viewportHeight": 800 },
+                            "changed": true,
+                            "seq": 4,
+                            "imageDataUrl": "data:image/jpeg;base64,QUFB",
+                            "imageBytes": 3,
+                            "qualityApplied": params["qualityPreset"],
+                        }))
+                    }
+                }
                 _ => Ok(json!({ "ok": true, "connected": true })),
             }
         }
@@ -710,7 +729,10 @@ mod tests {
         )
         .unwrap();
 
-        let srv = McpServer::new(Arc::new(DummyRelay { delay_ms: 0 }), html_path);
+        let srv = McpServer::new(
+            Arc::new(DummyRelay { delay_ms: 0, poll_attempts: AtomicUsize::new(0) }),
+            html_path,
+        );
         let input = [
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }).to_string(),
             json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
@@ -718,6 +740,7 @@ mod tests {
             json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": STAGE_URI } }).to_string(),
             json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" }).to_string(),
             json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "chrome_stream_stage", "arguments": {} } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "chrome_stream_frame", "arguments": { "targetId": "t-closed", "qualityPreset": "auto", "rttMs": 820 } } }).to_string(),
         ]
         .join("\n")
             + "\n";
@@ -743,7 +766,7 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(responses.len(), 5);
+        assert_eq!(responses.len(), 6);
 
         let r1 = responses.iter().find(|r| r["id"] == 1).unwrap();
         assert_eq!(r1["result"]["serverInfo"]["name"], "chrome-stream-mcp");
@@ -759,7 +782,22 @@ mod tests {
         assert!(!html.contains("secret-uuid"));
 
         let r4 = responses.iter().find(|r| r["id"] == 4).unwrap();
-        assert_eq!(r4["result"]["tools"].as_array().unwrap().len(), 5);
+        let tools = r4["result"]["tools"].as_array().unwrap();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            tool_names,
+            vec![
+                "chrome_stream_stage",
+                "chrome_stream_connect",
+                "chrome_stream_frame",
+                "chrome_stream_input",
+                "chrome_stream_disconnect",
+            ]
+        );
+        for tool in tools {
+            let desc = tool["description"].as_str().unwrap();
+            assert!(desc.is_ascii(), "tool description must be clean English ASCII: {desc}");
+        }
 
         let r5 = responses.iter().find(|r| r["id"] == 5).unwrap();
         assert_eq!(r5["result"]["structuredContent"]["connected"], true);
@@ -767,6 +805,13 @@ mod tests {
         assert!(r5["result"]["structuredContent"]["portFile"].get("path").is_none());
         assert!(r5["result"]["structuredContent"]["portFile"].get("wsUrl").is_none());
         assert!(!r5["result"]["content"][0]["text"].as_str().unwrap().contains("private-laptop"));
+
+        let r6 = responses.iter().find(|r| r["id"] == 6).unwrap();
+        let fsc = &r6["result"]["structuredContent"];
+        assert_eq!(fsc["connected"], true);
+        assert_eq!(fsc["recovered"], true);
+        assert_eq!(fsc["activeTargetId"], "t2");
+        assert_eq!(fsc["qualityApplied"], "ultra");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -782,7 +827,10 @@ mod tests {
         )
         .unwrap();
 
-        let srv = McpServer::new(Arc::new(DummyRelay { delay_ms: 60 }), html_path);
+        let srv = McpServer::new(
+            Arc::new(DummyRelay { delay_ms: 60, poll_attempts: AtomicUsize::new(0) }),
+            html_path,
+        );
         srv.prewarm_startup();
 
         // Wait for startup background pre-warm to finish once

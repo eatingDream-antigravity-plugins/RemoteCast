@@ -5,48 +5,30 @@ description: View, connect, pause, or disconnect a live local Google Chrome scre
 
 # Chrome Stream MCP
 
-Use Chrome Stream MCP when the user explicitly wants to view or interactively control tabs in their local Google Chrome browser through the Chrome Stream MCP App stage.
+Use Chrome Stream MCP when the user explicitly wants to view or interact with tabs in their local Google Chrome through the Chrome Stream MCP App stage.
 
 ## Public MCP Tools
 
-Only invoke the public tools listed below. App-only tools (`chrome_stream_tabs`, `chrome_stream_frame`, `chrome_stream_input`, `chrome_stream_navigate`) carry `_meta.ui.visibility: ["app"]` and are reserved exclusively for the embedded panel UI.
+Invoke only the public tools below (app-only tools carry `_meta.ui.visibility: ["app"]` for the panel UI):
 
 | Tool | Purpose | Parameters |
 | --- | --- | --- |
-| `chrome_stream_stage` | Open the Chrome Stream MCP App stage (`ui://chrome-stream-mcp/stage`) and report current relay/Chrome readiness without forcing a dial. | `{}` |
-| `chrome_stream_connect` | Establish or verify the persistent local CDP relay session and warm the active tab screencast. | `{ qualityPreset?: "auto" \| "ultra" \| "low" \| "medium" \| "high", rttMs?: number }` |
-| `chrome_stream_disconnect` | Stop active screencasting and close the Chrome CDP WebSocket to release GPU/CPU and save battery. | `{}` |
+| `chrome_stream_stage` | Open the stage (`ui://chrome-stream-mcp/stage`) and report relay/Chrome readiness without auto-connecting. | `{}` |
+| `chrome_stream_connect` | Connect or verify the persistent local relay session and start streaming the active tab. | `{ qualityPreset?: "auto" \| "ultra" \| "low" \| "medium" \| "high", rttMs?: number }` |
+| `chrome_stream_disconnect` | Stop screencasting and close the Chrome CDP WebSocket to save CPU/GPU/battery. | `{}` |
 
-## Standard Workflows
+## Workflows
 
-### 1. Opening the live viewer
-1. Call `chrome_stream_stage` to open the stage UI and read the current status snapshot (`connected`, `portFile.valid`, `activeTargetId`, `tabs`).
-2. Do **not** assume Chrome is already connected: opening the stage intentionally never auto-dials Chrome when disconnected, avoiding surprise Chrome permission prompts or white flashes.
-3. If the user asks to start streaming immediately and Chrome debugging is ready, call `chrome_stream_connect` (default `qualityPreset: "auto"`, or `"ultra"` / `"low"` on constrained remote links). Otherwise, let the user click **Connect** directly inside the stage panel.
+- **Open viewer**: Call `chrome_stream_stage` to inspect `connected`, `portFile.valid`, `activeTargetId`, and `tabs`. Never assume Chrome is connected (staging never auto-dials). Call `chrome_stream_connect` only if the user asked to start streaming right away; otherwise let them click **Connect** in the panel.
+- **Zero open tabs**: Chrome Stream never auto-creates `about:blank`. If `connected: true` and `tabs` is empty (`activeTargetId: null`), tell the user they can click **New Tab (`+`)** in the panel or open a tab in Chrome.
+- **Pause vs. disconnect**: Panel **Pause / Resume** freezes capture while keeping Chrome authorization alive (and capture auto-pauses after 12s idle). Call `chrome_stream_disconnect` when the user is finished or wants to close the debugging connection.
+- **Weak networks**: Default to `qualityPreset: "auto"`; on slow/cellular links (> 350 ms RTT), pass `"low"` or `"ultra"`.
 
-### 2. Handling zero open tabs
-- Chrome Stream respects zero open tabs and **never** forcibly creates an `about:blank` tab when the last tab is closed or when Chrome has no open pages.
-- When `connected: true` and `tabs` is empty (`activeTargetId: null`), inform the user that Chrome is connected with zero open tabs and they can click **New Tab (`+`)** in the stage toolbar or open a page in Chrome.
+## Local Chrome Debugging & Guardrails
 
-### 3. Pausing vs. disconnecting & background/reveal refresh
-- **Pause / Resume** (inside the stage toolbar): pauses frame polling and stops GPU screencasting while keeping the authorized CDP relay WebSocket alive, so resuming requires no new Chrome permission prompt. The relay also stops GPU screencasting automatically after 12 seconds of inactivity.
-- **Background & reveal refresh**: While unpaused (`paused: false`), the panel continues lightweight RTT-adaptive background refreshes (2s–12s connected, 3s–10s staged) using hash deduplication (`unchanged: true`, zero redundant image bytes/repaints), and immediately force-refreshes (`forceRefresh: true`) when a kept-alive side/global pane is revealed (`ResizeObserver`, `IntersectionObserver`, `hostContext`, `visibilitychange`, `focus`, `pageshow`, stale `pointerenter`), without ever overriding explicit **Pause**.
-- **Disconnect** (`chrome_stream_disconnect` or the stage **Disconnect** button): terminates the CDP WebSocket completely to minimize power usage. Use `chrome_stream_disconnect` whenever the user finishes their session or asks to free battery/resources.
+If `portFile.valid` is `false`, guide the user to:
+1. Enable remote debugging in running Chrome at `chrome://inspect/#remote-debugging` (recommended on Chrome 136+), or launch a separate profile with `--remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug`.
+2. Click **Connect** (or call `chrome_stream_connect`) and click **Allow** once in Chrome. Run `chrome-stream-mcp doctor --json` locally if troubleshooting is needed.
 
-### 4. Weak-network quality tuning
-- Default to `qualityPreset: "auto"`, which adapts across four profiles (`ultra`, `low`, `medium`, `high`) based on measured RTT with SHA-1 frame deduplication (`unchanged: true`, zero redundant image bytes).
-- On high-latency or cellular links (> 350 ms RTT), recommend or pass `qualityPreset: "low"` or `"ultra"`.
-
-## Safe Chrome Remote Debugging Setup
-
-If `chrome_stream_stage` reports that Chrome debugging is not reachable (`portFile.valid: false`), guide the user through these local-only steps:
-
-1. Ensure Google Chrome is running locally.
-2. Open `chrome://inspect/#remote-debugging` in Chrome and enable remote debugging (recommended for your default profile on Chrome 136+), or launch a separate Chrome profile with `--remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug`.
-3. Trigger **Connect** (or `chrome_stream_connect`) and click **Allow** once in Chrome's permission prompt. The persistent `0600` Unix-socket relay (`chrome-stream-mcp relay`) retains the authorized WebSocket across MCP server restarts.
-4. For troubleshooting, the user can run `chrome-stream-mcp doctor --json` locally to inspect `DevToolsActivePort` TCP liveness, port `9222` fallback, relay socket mode (`0600`), and panel bundle health.
-
-## Security & Privacy Guardrails
-
-- Chrome Stream connects exclusively to loopback addresses (`127.0.0.1` / `::1`) with SSRF checks and stores relay IPC files under the plugin data directory with `0600` permissions.
-- Tool responses automatically redact local filesystem paths, WebSocket tokens, and hostnames. Never ask the user to expose Chrome remote debugging on `0.0.0.0` or a non-loopback interface.
+- Connections are strictly loopback-only (`127.0.0.1` / `::1`) over a `0600` local relay; never suggest binding remote debugging to `0.0.0.0` or non-loopback interfaces.
+- Tool responses automatically redact local filesystem paths, WebSocket tokens, and hostnames.

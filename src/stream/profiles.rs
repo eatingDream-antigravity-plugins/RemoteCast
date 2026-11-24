@@ -103,7 +103,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adaptive_profile_selection_covers_all_rtt_bands() {
+    fn adaptive_profiles_and_stale_frame_filtering() {
         assert_eq!(resolve_profile("auto", 900.0).name, "ultra");
         assert_eq!(resolve_profile("auto", 900.0).every_nth_frame, 3);
         assert_eq!(resolve_profile("auto", 900.0).max_width, 800);
@@ -113,10 +113,7 @@ mod tests {
         assert_eq!(resolve_profile("auto", 60.0).name, "high");
         assert_eq!(resolve_profile("high", 900.0).name, "high");
         assert_eq!(resolve_profile("unknown", 0.0).name, "medium");
-    }
 
-    #[test]
-    fn stale_epoch_and_target_filtering_works() {
         let tabs = vec![
             TabInfo {
                 target_id: "t1".into(),
