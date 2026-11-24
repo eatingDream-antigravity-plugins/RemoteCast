@@ -308,19 +308,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sha1_matches_rfc6455_and_nist_vectors() {
-        // RFC 6455 Section 1.3 handshake accept vector
+    fn sha1_and_frame_tab_hashing_deduplicates_reliably() {
+        // RFC 6455 Section 1.3 handshake accept vector & NIST empty string
         let combined = b"dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         assert_eq!(base64_encode(&sha1(combined)), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
-
-        // NIST empty string
         let empty = sha1(b"");
         let hex: String = empty.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-    }
 
-    #[test]
-    fn frame_and_tab_hashing_deduplicates_reliably() {
         let h1 = hash_frame_data("data:image/jpeg;base64,AAAA1234");
         let h2 = hash_frame_data("AAAA1234");
         let h3 = hash_frame_data("BBBB5678");
@@ -333,9 +328,7 @@ mod tests {
             title: "Docs".into(),
             url: "https://example.com".into(),
         }];
-        let th1 = hash_tabs(&tabs);
-        let th2 = hash_tabs(&tabs);
-        assert_eq!(th1, th2);
+        assert_eq!(hash_tabs(&tabs), hash_tabs(&tabs));
         assert_eq!(hash_tabs(&[]), "empty");
     }
 

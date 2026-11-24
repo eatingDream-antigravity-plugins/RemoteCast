@@ -3412,6 +3412,21 @@ pub mod tests {
                         key: Some("Cut".into()),
                         ..Default::default()
                     },
+                    InputEvent {
+                        action: "key".into(),
+                        key: Some("SelectAll".into()),
+                        ..Default::default()
+                    },
+                    InputEvent {
+                        action: "key".into(),
+                        key: Some("Copy".into()),
+                        ..Default::default()
+                    },
+                    InputEvent {
+                        action: "key".into(),
+                        key: Some("Paste".into()),
+                        ..Default::default()
+                    },
                 ],
             })
             .unwrap();
@@ -3445,8 +3460,8 @@ pub mod tests {
                 && m["params"]["modifiers"] == 8
         }));
 
-        // Verify Undo, Redo, Cut edit commands AND OS modifier mapping (macOS=4, Linux=2)
-        for cmd in ["undo", "redo", "cut"] {
+        // Verify edit commands AND OS modifier mapping (macOS=4, Linux=2)
+        for cmd in ["undo", "redo", "cut", "selectAll", "copy", "paste"] {
             assert!(sent.iter().any(|m| {
                 m["method"] == "Input.dispatchKeyEvent"
                     && m["params"]["commands"]
@@ -3462,55 +3477,8 @@ pub mod tests {
     }
 
     #[test]
-    fn closes_active_tab_atomically_and_warms_surviving_neighbor() {
+    fn tab_close_lifecycle_handles_non_active_double_active_and_last_tab() {
         let (client, holder) = make_mock_client(vec![
-            tab("t1", "One", "https://one.test"),
-            tab("t2", "Two", "https://two.test"),
-            tab("t3", "Three", "https://three.test"),
-        ]);
-        client
-            .poll_frame(PollFrameParams {
-                target_id: Some("t2".into()),
-                quality_preset: "low".into(),
-                wait_ms: 40,
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!(client.active_target_id().as_deref(), Some("t2"));
-        assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
-
-        let res = client
-            .dispatch_input_batch(InputBatchParams {
-                target_id: Some("t2".into()),
-                events: vec![InputEvent {
-                    action: "close_tab".into(),
-                    target_id: Some("t2".into()),
-                    ..Default::default()
-                }],
-            })
-            .unwrap();
-
-        assert_eq!(res["connected"], true);
-        assert_eq!(res["activeTargetId"], "t3");
-        let ids: Vec<&str> = res["tabs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["targetId"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, vec!["t1", "t3"]);
-        assert_eq!(client.screencast_target_id().as_deref(), Some("t3"));
-        let sent = holder.lock().unwrap().as_ref().unwrap().state.lock().unwrap().sent.clone();
-        assert!(sent.iter().any(|m| m["method"] == "Page.stopScreencast"));
-        assert!(sent
-            .iter()
-            .any(|m| m["method"] == "Target.activateTarget" && m["params"]["targetId"] == "t3"));
-        client.dispose();
-    }
-
-    #[test]
-    fn closes_non_active_tab_without_disturbing_active_session_or_frame() {
-        let (client, _) = make_mock_client(vec![
             tab("t1", "One", "https://one.test"),
             tab("t2", "Two", "https://two.test"),
             tab("t3", "Three", "https://three.test"),
@@ -3523,56 +3491,57 @@ pub mod tests {
                 ..Default::default()
             })
             .unwrap();
-
-        let res = client.close_tab(Some("t3"), None).unwrap();
-        assert_eq!(res["connected"], true);
-        assert_eq!(res["activeTargetId"], "t2");
+        assert_eq!(client.active_target_id().as_deref(), Some("t2"));
         assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
-        assert_eq!(res["seq"], f1["seq"]);
-        client.dispose();
-    }
 
-    #[test]
-    fn double_close_does_not_close_innocent_tab() {
-        let (client, _) = make_mock_client(vec![
-            tab("t1", "One", "https://one.test"),
-            tab("t2", "Two", "https://two.test"),
-        ]);
-        client
-            .poll_frame(PollFrameParams {
-                target_id: Some("t1".into()),
-                quality_preset: "low".into(),
-                wait_ms: 40,
-                ..Default::default()
+        // 1. Closing a non-active tab keeps active session & frame sequence untouched.
+        let r_non_active = client.close_tab(Some("t1"), None).unwrap();
+        assert_eq!(r_non_active["connected"], true);
+        assert_eq!(r_non_active["activeTargetId"], "t2");
+        assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
+        assert_eq!(r_non_active["seq"], f1["seq"]);
+
+        // 2. Duplicate/nonexistent close never closes an innocent surviving tab.
+        let r_dup = client.close_tab(Some("t-nonexistent"), None).unwrap();
+        assert_eq!(r_dup["connected"], true);
+        assert_eq!(r_dup["tabs"].as_array().unwrap().len(), 2);
+        assert_eq!(r_dup["activeTargetId"], "t2");
+
+        // 3. Closing the active tab switches atomically and warms surviving neighbor.
+        let r_active = client
+            .dispatch_input_batch(InputBatchParams {
+                target_id: Some("t2".into()),
+                events: vec![InputEvent {
+                    action: "close_tab".into(),
+                    target_id: Some("t2".into()),
+                    ..Default::default()
+                }],
             })
             .unwrap();
+        assert_eq!(r_active["connected"], true);
+        assert_eq!(r_active["activeTargetId"], "t3");
+        let ids: Vec<&str> = r_active["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["targetId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["t3"]);
+        assert_eq!(client.screencast_target_id().as_deref(), Some("t3"));
+        let sent = holder.lock().unwrap().as_ref().unwrap().state.lock().unwrap().sent.clone();
+        assert!(sent.iter().any(|m| m["method"] == "Page.stopScreencast"));
+        assert!(sent
+            .iter()
+            .any(|m| m["method"] == "Target.activateTarget" && m["params"]["targetId"] == "t3"));
 
-        let res = client.close_tab(Some("t-nonexistent"), None).unwrap();
-        assert_eq!(res["connected"], true);
-        assert_eq!(res["tabs"].as_array().unwrap().len(), 2);
-        assert_eq!(res["activeTargetId"], "t1");
-        client.dispose();
-    }
-
-    #[test]
-    fn closing_last_tab_leaves_zero_tabs_without_creating_about_blank() {
-        let (client, holder) = make_mock_client(vec![tab("t1", "Only", "https://only.test")]);
-        client
-            .poll_frame(PollFrameParams {
-                target_id: Some("t1".into()),
-                quality_preset: "low".into(),
-                wait_ms: 40,
-                ..Default::default()
-            })
-            .unwrap();
-
-        let res = client.close_tab(Some("t1"), None).unwrap();
-        assert_eq!(res["connected"], true);
-        assert_eq!(res["noTabs"], true);
-        assert!(res["activeTargetId"].is_null());
-        assert!(res["tabs"].as_array().unwrap().is_empty());
+        // 4. Closing the last tab enters zero-tab state without creating about:blank.
+        let r_last = client.close_tab(Some("t3"), None).unwrap();
+        assert_eq!(r_last["connected"], true);
+        assert_eq!(r_last["noTabs"], true);
+        assert!(r_last["activeTargetId"].is_null());
+        assert!(r_last["tabs"].as_array().unwrap().is_empty());
         assert!(client.screencast_target_id().is_none());
-        let sent = holder
+        let sent_after = holder
             .lock()
             .unwrap()
             .as_ref()
@@ -3583,7 +3552,7 @@ pub mod tests {
             .sent
             .clone();
         assert!(
-            !sent.iter().any(|m| m["method"] == "Target.createTarget"),
+            !sent_after.iter().any(|m| m["method"] == "Target.createTarget"),
             "closing last tab must NOT auto-create about:blank"
         );
         client.dispose();
@@ -3928,35 +3897,6 @@ pub mod tests {
             .unwrap();
         assert_eq!(live_poll["paused"], false);
         assert_eq!(client.screencast_target_id().as_deref(), Some("t1"));
-        client.dispose();
-    }
-
-    #[test]
-    fn dispatches_copy_paste_and_select_all_edit_commands() {
-        let (client, holder) = make_mock_client(vec![tab("t1", "Doc", "https://doc.test")]);
-        client
-            .dispatch_input_batch(InputBatchParams {
-                target_id: Some("t1".into()),
-                events: ["SelectAll", "Copy", "Paste"]
-                    .into_iter()
-                    .map(|k| InputEvent {
-                        action: "key".into(),
-                        key: Some(k.into()),
-                        ..Default::default()
-                    })
-                    .collect(),
-            })
-            .unwrap();
-        let sent = holder.lock().unwrap().as_ref().unwrap().state.lock().unwrap().sent.clone();
-        for cmd in ["selectAll", "copy", "paste"] {
-            assert!(sent.iter().any(|m| {
-                m["method"] == "Input.dispatchKeyEvent"
-                    && m["params"]["commands"]
-                        .as_array()
-                        .map(|a| a.iter().any(|v| v == cmd))
-                        .unwrap_or(false)
-            }));
-        }
         client.dispose();
     }
 }

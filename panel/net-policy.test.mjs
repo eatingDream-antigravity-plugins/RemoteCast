@@ -75,7 +75,8 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     ]);
   });
 
-  it("drops stale frames from previous epoch or mismatched targetId while accepting recovery", () => {
+  it("enforces stale-frame filtering, optimistic tab close, and background payload state", () => {
+    // Stale epoch & mismatched target filtering vs external close recovery
     assert.equal(
       shouldApplyFrameResponse({
         reqEpoch: 2,
@@ -103,9 +104,8 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       }).apply,
       true
     );
-  });
 
-  it("handles optimistic tab close for active, non-active, and last tab", () => {
+    // Optimistic tab close (active, non-active, last) & target-gone classification
     const tabs = [{ targetId: "t1" }, { targetId: "t2" }, { targetId: "t3" }];
     const a = applyOptimisticTabClose(tabs, "t2", "t2");
     assert.equal(a.wasActive, true);
@@ -121,6 +121,68 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
 
     assert.equal(isTargetErrorText("No target with given id found"), true);
     assert.equal(isTargetErrorText("Chrome CDP connection closed"), false);
+
+    // Background state & frame payload updates preserve userPaused and unchanged 0-churn behavior
+    const state = {
+      on: true, ep: 1, aid: "t1", tabs: [{ targetId: "t1", title: "One" }], th: "th1",
+      pg: { url: "https://a.test" }, seq: 5, fh: "fh5", by: 1200, uc: false,
+      pa: false, st: true, id: true, dlg: null, nt: false, nv: true,
+    };
+
+    const paintUnchanged = applyFramePayloadState(state, {
+      connected: true,
+      activeTargetId: "t1",
+      tabs: [{ targetId: "t1", title: "One" }, { targetId: "t2", title: "Two" }],
+      tabsHash: "th2",
+      changed: false,
+      unchanged: true,
+      screencastPausedIdle: true,
+    }, 1, 45);
+    assert.equal(paintUnchanged, false);
+    assert.equal(state.uc, true);
+    assert.equal(state.fh, "fh5");
+    assert.equal(state.by, 1200);
+    assert.equal(state.tabs.length, 2);
+    assert.equal(state.th, "th2");
+    assert.equal(state.id, true);
+
+    const paintChanged = applyFramePayloadState(state, {
+      connected: true,
+      activeTargetId: "t2",
+      tabs: [{ targetId: "t1", title: "One" }, { targetId: "t2", title: "Two" }],
+      tabsHash: "th2",
+      page: { title: "Two", url: "https://b.test" },
+      seq: 8,
+      frameHash: "fh8",
+      imageBytes: 2400,
+      imageDataUrl: "data:image/jpeg;base64,AAAA",
+      changed: true,
+      unchanged: false,
+      screencastPausedIdle: false,
+      popupSwitched: true,
+    }, 1, 55);
+    assert.equal(paintChanged, true);
+    assert.equal(state.uc, false);
+    assert.equal(state.seq, 8);
+    assert.equal(state.fh, "fh8");
+    assert.equal(state.by, 2400);
+    assert.equal(state.aid, "t2");
+    assert.equal(state.id, false);
+    assert.equal(state.pg.url, "https://b.test");
+
+    state.pa = true;
+    state.st = false;
+    const paintWhilePaused = applyFramePayloadState(state, {
+      connected: true,
+      activeTargetId: "t2",
+      paused: false,
+      screencastPausedIdle: false,
+      changed: false,
+      unchanged: true,
+    }, 1, 30);
+    assert.equal(paintWhilePaused, false);
+    assert.equal(state.pa, true);
+    assert.equal(state.id, false);
   });
 
   it("ships dark-first, zero-flicker, CSP-clean, jargon-free panel bundle under 45 KiB", () => {
@@ -208,7 +270,7 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     assert.ok(lum("#FAF8F5") > 0.9);
   });
 
-  it("resolves bilingual panel locale and backs off polling when screencast is idle", () => {
+  it("resolves bilingual locale and computes RTT-adaptive idle/hidden poll timings", () => {
     assert.equal(parsePanelLocaleTag("C"), null);
     assert.equal(parsePanelLocaleTag("POSIX"), null);
     assert.equal(parsePanelLocaleTag("zh_TW"), "zh-CN");
@@ -223,17 +285,13 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       waitMs: 0,
       nextDelayMs: 4000,
     });
-  });
-
-  it("computes RTT-adaptive background and stage poll cadences with error backoff when hidden", () => {
-    const net = new AdaptiveBandwidthController("auto");
 
     // Uncalibrated / fast RTT (< 140ms)
     assert.deepEqual(net.computePollTiming({ hidden: true, idleMs: 0 }), { waitMs: 0, nextDelayMs: 2000 });
     assert.equal(net.computeOfflinePollDelay({ hidden: true }), 3000);
     assert.equal(net.computeOfflinePollDelay({ hidden: false }), 3000);
 
-    // Fast calibrated (60ms)
+    // Fast calibrated (60ms) + error backoff
     net.recordSample({ totalMs: 160, serverMs: 100, imageBytes: 5000, now: 1000 });
     assert.deepEqual(net.computePollTiming({ hidden: true }), { waitMs: 0, nextDelayMs: 2000 });
     assert.deepEqual(net.computePollTiming({ hidden: true, errCount: 1 }), { waitMs: 0, nextDelayMs: 4000 });
@@ -393,72 +451,6 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     fakeApp.onhostcontextchanged({ displayMode: "inline" });
     assert.equal(reveals, 9);
     assert.equal(baseHostCtxCalls, 4);
-  });
-
-  it("applies background state & frame updates while preserving userPaused and unchanged 0-churn behavior", () => {
-    const state = {
-      on: true, ep: 1, aid: "t1", tabs: [{ targetId: "t1", title: "One" }], th: "th1",
-      pg: { url: "https://a.test" }, seq: 5, fh: "fh5", by: 1200, uc: false,
-      pa: false, st: true, id: true, dlg: null, nt: false, nv: true,
-    };
-
-    // Background unchanged reply -> 0 canvas repaint (returns false), preserves seq/fh/bytes, updates tabs if changed
-    const paintUnchanged = applyFramePayloadState(state, {
-      connected: true,
-      activeTargetId: "t1",
-      tabs: [{ targetId: "t1", title: "One" }, { targetId: "t2", title: "Two" }],
-      tabsHash: "th2",
-      changed: false,
-      unchanged: true,
-      screencastPausedIdle: true,
-    }, 1, 45);
-    assert.equal(paintUnchanged, false);
-    assert.equal(state.uc, true);
-    assert.equal(state.fh, "fh5");
-    assert.equal(state.by, 1200);
-    assert.equal(state.tabs.length, 2);
-    assert.equal(state.th, "th2");
-    assert.equal(state.id, true);
-
-    // Background changed reply -> unconditionally paints (returns true) & updates frame/page/idle state
-    const paintChanged = applyFramePayloadState(state, {
-      connected: true,
-      activeTargetId: "t2",
-      tabs: [{ targetId: "t1", title: "One" }, { targetId: "t2", title: "Two" }],
-      tabsHash: "th2",
-      page: { title: "Two", url: "https://b.test" },
-      seq: 8,
-      frameHash: "fh8",
-      imageBytes: 2400,
-      imageDataUrl: "data:image/jpeg;base64,AAAA",
-      changed: true,
-      unchanged: false,
-      screencastPausedIdle: false,
-      popupSwitched: true,
-    }, 1, 55);
-    assert.equal(paintChanged, true);
-    assert.equal(state.uc, false);
-    assert.equal(state.seq, 8);
-    assert.equal(state.fh, "fh8");
-    assert.equal(state.by, 2400);
-    assert.equal(state.aid, "t2");
-    assert.equal(state.id, false);
-    assert.equal(state.pg.url, "https://b.test");
-
-    // Explicit userPaused is preserved even on live polls (totalMs > 0)
-    state.pa = true;
-    state.st = false;
-    const paintWhilePaused = applyFramePayloadState(state, {
-      connected: true,
-      activeTargetId: "t2",
-      paused: false,
-      screencastPausedIdle: false,
-      changed: false,
-      unchanged: true,
-    }, 1, 30);
-    assert.equal(paintWhilePaused, false);
-    assert.equal(state.pa, true);
-    assert.equal(state.id, false);
   });
 
   it("boots built panel.html cleanly in sandboxed vm (throwing localStorage + strict WebIDL timers)", async () => {
