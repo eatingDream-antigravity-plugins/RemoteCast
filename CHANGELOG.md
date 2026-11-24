@@ -3,6 +3,24 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.3.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.2.0...v0.3.0) (2026-11-24)
+
+
+### Features
+
+* **panel:** add adaptive background refresh and instant pane reveal wake ([#11](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/11)) ([1d05ea7](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/1d05ea75d79d0564c1acecc870e3ba7859cced7b))
+
+
+### Bug Fixes
+
+* **docs:** serve release badge from first-party assets/release-badge.svg ([#10](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/10)) ([68dcdfd](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/68dcdfd79f529f1f2a856bf24d0c0f8591a53ef8))
+* **docs:** use shields static/v1 query URL so release-please preserves badge color ([#9](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/9)) ([2ecced1](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/2ecced1c7e6d1da1c1e10686275275a1e2c7a806))
+
+
+### Documentation
+
+* replace dynamic release badge with auto-bumped static badge ([#7](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/7)) ([e043383](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/e043383931e813628bf635d3d0033a018f9cd7bf))
+
 ## [0.2.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.1.0...v0.2.0) (2026-11-24)
 
 
