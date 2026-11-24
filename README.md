@@ -7,7 +7,7 @@
 **View and interact with your own local Google Chrome tabs right inside Antigravity, even over a slow phone or remote connection.**
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.2.0-D97757)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)<!-- x-release-please-version -->
+[![Release](https://img.shields.io/static/v1?label=release&message=v0.2.0&color=D97757)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)<!-- x-release-please-version -->
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
 
