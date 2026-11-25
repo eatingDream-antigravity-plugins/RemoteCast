@@ -32,7 +32,7 @@ const KEYWORDS_AND_GLOBALS = new Set(
 
 // Internal class properties/methods owned exclusively by our bundle (never present on DOM/MCP payloads).
 const INTERNAL_PROPS = new Set(
-  "effectiveTier calibrated ewmaRttMs lastNetRttMs lastKbps fastStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
+  "effectiveTier calibrated ewmaRttMs lastNetRttMs lastKbps fastStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState resolveStageAspect setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
 );
 
 function tokenizeJs(src) {
@@ -521,7 +521,7 @@ function minifyJsTokens(src) {
   }
 
   // Sort root identifiers + hoisted globals/strings together so highest-gain items get 1-char names first
-  const hoistGlobals = new Set("document window Math Date Array Number String Object Boolean encodeURIComponent Promise Error Set Map JSON globalThis".split(" "));
+  const hoistGlobals = new Set("document window Math Date Array Number String Object Boolean encodeURIComponent Promise Error Set Map JSON globalThis requestAnimationFrame cancelAnimationFrame ResizeObserver IntersectionObserver getComputedStyle null undefined".split(" "));
   const globalCounts = new Map();
   const strCounts = new Map();
   for (let idx = 0; idx < raw.length; idx++) {
@@ -529,7 +529,7 @@ function minifyJsTokens(src) {
     const p = prevNonWs(idx), nx = nextNonWs(idx);
     const afterDot = p?.v === "." || p?.v === "?.";
     const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
-    if (t.k === "id" && hoistGlobals.has(t.v) && !afterDot && !isObjKey && !tokenTargetScope[idx] && !braceProtected.has(t.v) && p?.v !== "typeof") {
+    if (t.k === "id" && hoistGlobals.has(t.v) && !afterDot && !isObjKey && !tokenTargetScope[idx] && !braceProtected.has(t.v) && p?.v !== "typeof" && (t.v !== "undefined" || !["=", ".", "?.", "[", "("].includes(nx?.v))) {
       globalCounts.set(t.v, (globalCounts.get(t.v) || 0) + 1);
       continue;
     }
@@ -538,7 +538,7 @@ function minifyJsTokens(src) {
     strCounts.set(t.v, (strCounts.get(t.v) || 0) + 1);
   }
   const hoistCandidates = [
-    ...[...globalCounts.entries()].map(([s, cnt]) => [s, cnt, (s.length - 1) * cnt - s.length - 3]),
+    ...[...globalCounts.entries()].map(([s, cnt]) => [s, cnt, ((s === "undefined" ? 6 : s.length) - 1) * cnt - (s === "undefined" ? 2 : s.length + 3)]),
     ...[...strCounts.entries()].map(([s, cnt]) => [s, cnt, (s.length - 1) * cnt - s.length - 3]),
   ].filter(([, cnt, gain]) => cnt >= 2 && gain >= 2);
 
@@ -554,10 +554,14 @@ function minifyJsTokens(src) {
     const alias = genNames[gi];
     if (item.kind === "id") {
       if (alias.length < item.k.length) { rootScope.rename.set(item.k, alias); gi++; }
-    } else if ((item.k.length - alias.length) * item.cnt - alias.length - 2 - item.k.length > 0) {
-      strMap.set(item.k, alias);
-      strDecls.push(`${alias}=${item.k}`);
-      gi++;
+    } else {
+      const origLen = item.k === "undefined" ? 6 : item.k.length;
+      const declCost = item.k === "undefined" ? alias.length + 1 : alias.length + 2 + item.k.length;
+      if ((origLen - alias.length) * item.cnt - declCost > 0) {
+        strMap.set(item.k, alias);
+        strDecls.push(item.k === "undefined" ? alias : `${alias}=${item.k}`);
+        gi++;
+      }
     }
   }
 
@@ -641,6 +645,7 @@ function minifyJsTokens(src) {
         t.k = "op"; t.v = t.v === "true" ? "!0" : "!1"; continue;
       }
       if (!afterDot && !isObjKey && t.v === "undefined" && !["=", ".", "?.", "[", "("].includes(nx?.v)) {
+        if (strMap.has("undefined")) { t.v = strMap.get("undefined"); continue; }
         t.k = "op"; t.v = "void 0"; continue;
       }
       const ts = tokenTargetScope[idx];
@@ -662,6 +667,7 @@ function minifyJsTokens(src) {
   let res = strDecls.length ? `let ${strDecls.join(",")};` : "";
   let lastTok = null;
   let parenDepth = 0;
+  let blockParenDepth = 0;
   let stmtIsLet = false;
   const stmtStack = [];
 
@@ -670,7 +676,7 @@ function minifyJsTokens(src) {
     if (t.k === "ws") {
       const nx = nextNonWs(idx);
       if (!lastTok || !nx) continue;
-      if (parenDepth === 0 && stmtIsLet && nx.v === "let" && (lastTok.v !== "}" || lastTok.isBlock)) {
+      if (parenDepth === blockParenDepth && stmtIsLet && nx.v === "let" && (lastTok.v !== "}" || lastTok.isBlock)) {
         res += ",";
         lastTok = { k: "op", v: "," };
         idx = raw.indexOf(nx);
@@ -713,7 +719,7 @@ function minifyJsTokens(src) {
     if (t.v === ";") {
       const nx = nextNonWs(idx);
       if (nx?.v === "}") { stmtIsLet = false; continue; }
-      if (parenDepth === 0 && stmtIsLet && nx?.v === "let") {
+      if (parenDepth === blockParenDepth && stmtIsLet && nx?.v === "let") {
         res += ",";
         lastTok = { k: "op", v: "," };
         idx = raw.indexOf(nx);
@@ -724,11 +730,11 @@ function minifyJsTokens(src) {
 
     if (t.v === "(") parenDepth++;
     else if (t.v === ")") parenDepth = Math.max(0, parenDepth - 1);
-    else if (t.v === "{") { stmtStack.push(stmtIsLet); stmtIsLet = false; }
-    else if (t.v === "}") { stmtIsLet = Boolean(stmtStack.pop()); }
-    else if (parenDepth === 0 && t.k === "id" && t.v === "let" && (!lastTok || lastTok.v === ";" || lastTok.v === "{" || (lastTok.v === "}" && lastTok.isBlock) || lastTok.v === "\n")) {
+    else if (t.v === "{") { stmtStack.push([stmtIsLet, blockParenDepth]); stmtIsLet = false; blockParenDepth = parenDepth; }
+    else if (t.v === "}") { const prevSt = stmtStack.pop(); stmtIsLet = Boolean(prevSt?.[0]); blockParenDepth = prevSt ? prevSt[1] : 0; }
+    else if (parenDepth === blockParenDepth && t.k === "id" && t.v === "let" && (!lastTok || lastTok.v === ";" || lastTok.v === "{" || (lastTok.v === "}" && lastTok.isBlock) || lastTok.v === "\n")) {
       stmtIsLet = true;
-    } else if (parenDepth === 0 && t.k === "id" && ["if", "else", "for", "while", "do", "try", "catch", "finally", "switch", "case", "default", "function", "class", "return", "throw", "break", "continue"].includes(t.v) && lastTok?.v !== "." && lastTok?.v !== "?.") {
+    } else if (parenDepth === blockParenDepth && t.k === "id" && ["if", "else", "for", "while", "do", "try", "catch", "finally", "switch", "case", "default", "function", "class", "return", "throw", "break", "continue"].includes(t.v) && lastTok?.v !== "." && lastTok?.v !== "?.") {
       stmtIsLet = false;
     }
 
