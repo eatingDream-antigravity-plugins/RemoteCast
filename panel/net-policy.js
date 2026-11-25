@@ -165,18 +165,16 @@ export function applyFramePayloadState(S, d, reqEpoch = S.ep, totalMs = 0) {
   return sp;
 }
 
+export function resolveStageAspect(viewW, viewH, imgW, imgH) {
+  const va = +viewW > 0 && +viewH > 0 ? viewW / viewH : 0, ia = +imgW > 0 && +imgH > 0 ? imgW / imgH : 0;
+  const a = va ? (ia && Math.abs(ia - va) / va > 0.04 ? ia : va) : ia;
+  return a > 0 ? +a.toFixed(4) : 0;
+}
+
 export function setupRevealObservers(o = {}) {
-  const g = globalThis;
-  const dc = o.rootDoc ?? g.document;
-  const wn = o.rootWin ?? g.window;
-  const ap = o.bridgeApp;
-  const getLF = o.getLastFetchAt || (() => 0);
-  const nw = o.clock || (() => Date.now());
-  const sm = o.staleMs ?? 900;
-  const tm = o.throttleMs ?? 250;
-  const RO = o.ResizeObs ?? g.ResizeObserver;
-  const IO = o.IntersectionObs ?? g.IntersectionObserver;
-  const offs = [];
+  const g = globalThis, dc = o.rootDoc ?? g.document, wn = o.rootWin ?? g.window, ap = o.bridgeApp;
+  const getLF = o.getLastFetchAt || (() => 0), nw = o.clock || (() => Date.now()), sm = o.staleMs ?? 900, tm = o.throttleMs ?? 250;
+  const RO = o.ResizeObs ?? g.ResizeObserver, IO = o.IntersectionObs ?? g.IntersectionObserver, offs = [];
   let lt = -1e15;
   const trig = () => { const t = nw(); if (t - lt < tm) return false; lt = t; o.onReveal?.(); return true; };
   const rt = dc?.documentElement;
@@ -196,8 +194,7 @@ export function setupRevealObservers(o = {}) {
     io.observe(rt); offs.push(() => io.disconnect?.());
   }
   add(dc, "visibilitychange", () => { const vs = dc?.visibilityState; if (vs === "hidden") o.onHide?.(); else if (vs === "visible") trig(); });
-  add(wn, "focus", trig);
-  add(wn, "pageshow", trig);
+  add(wn, "focus", trig); add(wn, "pageshow", trig);
   add(rt, "pointerenter", () => { if (nw() - getLF() > sm) trig(); }, { passive: true });
   if (ap) {
     const pv = ap.onhostcontextchanged || null;

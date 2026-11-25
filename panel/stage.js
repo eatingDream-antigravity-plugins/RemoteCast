@@ -8,6 +8,7 @@ import {
   isSafeImageUrl,
   isTargetErrorText,
   resolvePanelLang,
+  resolveStageAspect,
   setupRevealObservers,
 } from "./net-policy.js";
 
@@ -72,7 +73,7 @@ const L = () => I18N[S.lg] || I18N.en;
 
 let qIn = [], inB = 0, inT = 0, pB = 0, pT = 0, oT = 0, oB = 0, urg = 0, act = nowMs(), tT = 0;
 let pErr = 0, offErr = 0, offUrg = 0, lastFetchAt = boot ? nowMs() : 0, lastForceAt = 0, stopReveal = null;
-let pGen = 0, painted = 0, started = 0, synced = 0, ready = 0, tSig = "";
+let pGen = 0, painted = 0, started = 0, synced = 0, ready = 0, tSig = "", lAr = 0;
 const closing = new Set(), tMap = new Map(), D = {};
 
 const kb = (b) => (!b ? "0 KB" : b < 1024 ? `${b} B` : `${(b / 1024).toFixed(b < 10240 ? 1 : 0)} KB`);
@@ -96,12 +97,18 @@ const toastK = (k) => toast(L()[k]);
 const setPf = (d) => { if (d?.portFile) S.pf = d.portFile; };
 const ripple = (px, py) => { if (!D.vw) return; const d = mk("div", "rip"); d.style.left = `${px}%`; d.style.top = `${py}%`; D.vw.appendChild(d); sTm(() => d.remove(), 420); };
 
+const fitStage = (nw = painted ? D.vc?.width : 0, nh = painted ? D.vc?.height : 0) => {
+  const a = resolveStageAspect(S.pg.viewportWidth, S.pg.viewportHeight, nw, nh);
+  if (a && a !== lAr && D.vw) D.vw.style.setProperty("--ar", lAr = a);
+};
+
 const paint = (url) => {
   if (!isSafeImageUrl(url) || !D.vc) return;
   const gen = ++pGen, im = new Image(), [vw, vh] = vp();
   im.decoding = "async";
   const blit = (src, nw, nh) => {
     if (gen !== pGen || !D.vc) { src.close?.(); return; }
+    fitStage(nw, nh);
     if (D.vc.width !== nw || D.vc.height !== nh) { D.vc.width = nw; D.vc.height = nh; }
     D.vc.getContext("2d", { alpha: false })?.drawImage(src, 0, 0, nw, nh);
     src.close?.(); painted = 1; hd(D.vc, 0); hd(D.ph, 1); setSw(false);
@@ -211,7 +218,7 @@ const sView = () => {
     setPop(false); painted = 0; syncDlg();
     hd(D.vc, 1); D.vc.classList.remove("sw", "pa");
     hd(D.ph, 0); hd(D.pb, 1); uOff();
-  } else { stopOffP(); syncDlg(); syncPauseUi(); }
+  } else { stopOffP(); syncDlg(); syncPauseUi(); fitStage(); }
 };
 
 const applyLangUi = () => {
@@ -252,7 +259,7 @@ const mount = () => {
     `<div class=st id=st tabindex=0 data-a=stA><textarea class=si id=si autocapitalize=off autocomplete=off autocorrect=off spellcheck=false data-a=stA></textarea>` +
     `<div class=lb id=lb></div><div class=ph id=ph><span id=pm></span>${bH("nt2", "bp", "nt", "", " hidden")}</div>` +
     `<button type=button class=pbg id=pb hidden></button>` +
-    `<div class=vw id=vw><canvas class=vc id=vc width=960 height=600 data-a=vcA hidden></canvas></div><div class=tst id=ts role=status aria-live=polite></div></div>` +
+    `<div class=vw id=vw><canvas class=vc id=vc data-a=vcA hidden></canvas></div><div class=tst id=ts role=status aria-live=polite></div></div>` +
     `<div class=ime id=im hidden><div class=row><input class=inp id=ti type=text data-p=imP />${bH("ty", "", "tyB")}${bH("te", "bp", "seB")}</div>` +
     `<div class=ik>${ik}${bt("class=ch data-sc=-360 data-a=sU", "↑")}${bt("class=ch data-sc=360 data-a=sD", "↓")}</div></div></div></div>`;
 
@@ -534,6 +541,7 @@ const onPoll = (d, totalMs, reqEpoch = S.ep) => {
   uTabs(); syncDlg();
   if (paintIt) paint(d.imageDataUrl);
   else {
+    fitStage();
     if (S.sw && painted && S.fh) setSw(false);
     syncPh();
   }
