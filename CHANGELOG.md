@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.3.2](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.1...v0.3.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **panel:** lock stage viewport aspect ratio to eliminate quality-switch zoom jitter ([#14](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/14)) ([df713e3](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/df713e3beea1d1e444996709671a40cdf2a7a266))
+
 ## [0.3.1](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.0...v0.3.1) (2026-11-24)
 
 
