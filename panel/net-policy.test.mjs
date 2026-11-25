@@ -12,6 +12,7 @@ import {
   isTargetErrorText,
   parsePanelLocaleTag,
   resolvePanelLang,
+  resolveStageAspect,
   setupRevealObservers,
   shouldApplyFrameResponse,
 } from "./net-policy.js";
@@ -208,6 +209,7 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     assert.ok(!html.includes("cs-enter"));
     assert.ok(html.includes("prefers-reduced-motion"));
     assert.ok(html.includes("containerDimensions"));
+    assert.ok(html.includes("container-type:size") && html.includes("100cqw") && html.includes("100cqh"));
     assert.ok(!/https?:\/\/|wss?:\/\//i.test(html), "panel.html must have zero external URLs");
   });
 
@@ -641,5 +643,23 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       for (const id of activeTimers) clearTimeout(id);
       activeTimers.clear();
     }
+  });
+
+  it("resolveStageAspect locks viewport aspect across all quality tiers without zoom jitter", () => {
+    for (const [imgW, imgH] of [
+      [800, 500],
+      [798, 500],
+      [960, 600],
+      [1152, 720],
+      [1440, 900],
+      [2880, 1800],
+    ]) {
+      assert.equal(resolveStageAspect(1440, 900, imgW, imgH), 1.6);
+    }
+
+    assert.equal(resolveStageAspect(400, 850, 245, 520), 0.4706);
+    assert.equal(resolveStageAspect(1280, 800, 419, 520), +(419 / 520).toFixed(4));
+    assert.equal(resolveStageAspect(0, 0, 960, 600), 1.6);
+    assert.equal(resolveStageAspect(0, 0, 0, 0), 0);
   });
 });

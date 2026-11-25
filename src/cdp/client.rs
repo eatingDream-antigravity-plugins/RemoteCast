@@ -1435,17 +1435,20 @@ impl CdpClient {
         quality_preset: &str,
         rtt_ms: f64,
     ) -> Result<(), CdpError> {
-        {
+        let (mut vw, mut vh): (u32, u32) = {
             let mut st = self.state.lock().unwrap();
             if st.dialogs.contains_key(target_id) {
                 return Ok(());
             }
             st.last_fallback_shot_at = Some(Instant::now());
-        }
+            st.latest_frame
+                .as_ref()
+                .filter(|f| f.target_id == target_id && f.viewport_width > 0 && f.viewport_height > 0)
+                .map(|f| (f.viewport_width, f.viewport_height))
+                .unwrap_or((1280, 800))
+        };
 
         let qp = resolve_profile(quality_preset, rtt_ms);
-        let mut vw: u32 = 1280;
-        let mut vh: u32 = 800;
         let mut got_vp = false;
 
         match self.send_cdp(
