@@ -9,7 +9,7 @@ const on = (n, ev, fn, o) => n?.addEventListener(ev, fn, o), ck = (n, fn) => on(
 const pd = (e) => e.preventDefault(), tx = (n, v) => { if (n.textContent !== v) n.textContent = v; }, hd = (n, v) => (n.hidden = !!v);
 const tg = (n, c, v) => n.classList.toggle(c, !!v), pNow = () => performance.now(), nowMs = () => Date.now(), cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const sTm = (f, m) => globalThis.setTimeout(f, m), cTm = (i) => globalThis.clearTimeout(i), hid = () => doc.visibilityState === "hidden";
-const root = doc.getElementById("app"), app = new App({ name: "Chrome Stream", version: "0.4.0" }, {}), net = new AdaptiveBandwidthController("auto");
+const root = doc.getElementById("app"), app = new App({ name: "RemoteCast", version: "0.4.0" }, {}), net = new AdaptiveBandwidthController("auto");
 const KEYS = new Set([...REP, "Enter", "Escape", "Home", "End"]);
 const QK = "auto low medium high ultra".split(" "), IK = "Enter Escape Tab Backspace Undo Copy Paste SelectAll".split(" ");
 const DLG = "alert confirm prompt beforeunload".split(" "), PAGE_ACT = new Set("click mousedown mouseup mousemove scroll type key dialog navigate back forward reload close_tab".split(" "));
@@ -250,7 +250,7 @@ const mount = () => {
   const gLi = (num, idx) => { const s = h("s"); gNodes[idx] = s; return h("li", 0, ["s.n", `t=${num}`], s); };
   const row = (k, id) => [".pr", 0, ["s", `.i=${k}`], [`s.nm#${id}`, "t=-"]];
   const ib = (id, a, ic, ex = "", sz = 14, pid) => [`!.i#${id}`, `.a=${a}${ex}`, ico(ic, sz, pid)];
-  const hdr = (did, mid, ...rt) => ["header.h", 0, [".m", 0, mkEmblem(did, 0), ["s.w", "t=Chrome Stream"], did === "ld" && ["s.rm#rm!", ".i=81"]], mid, [".ha", 0, ...rt]];
+  const hdr = (did, mid, ...rt) => ["header.h", 0, [".m", 0, mkEmblem(did, 0), ["s.w", "t=RemoteCast"], did === "ld" && ["s.rm#rm!", ".i=81"]], mid, [".ha", 0, ...rt]];
   const okI = !!portF?.valid, qRail = h(".sg#qs", "role=radiogroup", [".qt#qt"]);
   qBtns = QK.map((v, i) => { const b = h(v === qMode ? "b.on" : "b", `role=radio;.q=${v};.i=${26 + i};@c=${v === qMode}`); ck(b, () => setQ(v)); qRail.append(b); return b; });
 

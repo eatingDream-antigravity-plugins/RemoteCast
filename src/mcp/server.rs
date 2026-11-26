@@ -688,7 +688,7 @@ impl McpServer {
             "resources/list" => Ok(json!({
                 "resources": [{
                     "uri": STAGE_URI,
-                    "name": "Chrome Stream Live Stage",
+                    "name": "RemoteCast Live Stage",
                     "description": "Low-bandwidth adaptive screencast viewer and interactive controller for local Google Chrome tabs.",
                     "mimeType": APP_MIME,
                     "_meta": {

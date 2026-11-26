@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Chrome Stream MCP" width="80" height="80">
+<img src="assets/logo.svg" alt="RemoteCast" width="80" height="80">
 
-# Chrome Stream MCP
+# RemoteCast (chrome-stream-mcp)
 
 **View and interact with your local Google Chrome tabs inside Antigravity — crisp and responsive even over slow mobile or remote links.**
 
-English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[Homepage](https://remotecast.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)
@@ -14,13 +14,13 @@ English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatin
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
 
-<img src="docs/social-preview.png" alt="Chrome Stream MCP panel preview" width="860">
+<img src="docs/social-preview.png" alt="RemoteCast panel preview" width="860">
 
 </div>
 
 ## Overview
 
-Chrome Stream is a native Rust relay and SEP-1865 MCP App. It streams local Chrome tabs into Antigravity and supports interactive input and tab controls. Chrome debugging traffic stays on loopback (`127.0.0.1` and `::1`).
+RemoteCast (`chrome-stream-mcp`) is a native Rust relay and SEP-1865 MCP App. It streams local Chrome tabs into Antigravity and supports interactive input and tab controls. Chrome debugging traffic stays on loopback (`127.0.0.1` and `::1`).
 
 ## Features
 
@@ -43,7 +43,7 @@ Reload Antigravity after installation.
 
 ### 2. Connect Chrome
 
-- **Personal Chrome** uses Chrome's `DevToolsActivePort` files exclusively. Enable remote debugging at `chrome://inspect/#remote-debugging`, open **Chrome Stream**, select **Connect Personal Chrome**, and confirm **Allow** in Chrome. Use **Standby** to keep an authorized connection open.
+- **Personal Chrome** uses Chrome's `DevToolsActivePort` files exclusively. Enable remote debugging at `chrome://inspect/#remote-debugging`, open **RemoteCast**, select **Connect Personal Chrome**, and confirm **Allow** in Chrome. Use **Standby** to keep an authorized connection open.
 - **Remote Chrome (No Allow)** launches an isolated profile with `0700` permissions on `127.0.0.1`. It reuses a running browser only when its live debugging endpoint matches the isolated profile. If the port is occupied, set `CHROME_STREAM_DEBUG_PORT` to a free port or use Personal mode.
 
 ## For AI Agents
@@ -69,6 +69,10 @@ Point your coding agent directly to the machine-readable guides for complete MCP
 - [AI Guide & Configuration Reference](docs/ai-guide.md) — MCP tools, environment variables, CLI subcommands, build from source
 - [Agent Skill](skills/chrome-stream/SKILL.md) — On-demand agent workflow rules
 - [LLM Index](llms.txt) · [Contributor Guide](AGENTS.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+
+## Antigravity Plugin Suite
+
+Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [ContextRadar](https://github.com/eatingDream-antigravity-plugins/context-radar-mcp) (`context-radar-mcp`) · [ClamGuard](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp) (`mac-clamshell-mcp`) · **RemoteCast** (`chrome-stream-mcp`) · [ColabDeck](https://github.com/eatingDream-antigravity-plugins/colab-mcp) (`colab-mcp`) — powered by [PanelKit](https://github.com/eatingDream-antigravity-plugins/agy-mcp-kit) (`agy-mcp-kit`).
 
 ## License
 
