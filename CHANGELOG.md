@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.5.1](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.5.0...v0.5.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* align display branding and panel wordmark to RemoteCast ([#22](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/22)) ([793e3de](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/793e3de61e2d4b999f78f37ee013e6891b7e4b10))
+
 ## [0.5.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.4.0...v0.5.0) (2026-11-26)
 
 
