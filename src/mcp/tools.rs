@@ -256,7 +256,7 @@ fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCac
     if connected && swr_cache.is_none() {
         let r = Arc::clone(relay);
         let _ = std::thread::spawn(move || {
-            let _ = r.call("warm", json!({ "qualityPreset": "low" }), Duration::from_secs(2));
+            let _ = r.call("warm", json!({}), Duration::from_secs(2));
         });
     }
     let port_ready = status
@@ -539,11 +539,17 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
 }
 
 fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
+    let t_start = Instant::now();
     match relay.call("input", args, Duration::from_secs(30)) {
-        Ok(res) => json!({
-            "content": [{ "type": "text", "text": "ok" }],
-            "structuredContent": res
-        }),
+        Ok(mut res) => {
+            if res.get("serverMs").and_then(|v| v.as_u64()).is_none() {
+                res["serverMs"] = json!(t_start.elapsed().as_millis() as u64);
+            }
+            json!({
+                "content": [{ "type": "text", "text": "ok" }],
+                "structuredContent": res
+            })
+        }
         Err(err) => {
             let st = safe_status(relay);
             let live = st
@@ -554,7 +560,7 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 let rec = relay
                     .call(
                         "poll_frame",
-                        json!({ "sinceSeq": 0, "waitMs": 0, "forceRefresh": true, "qualityPreset": "low" }),
+                        json!({ "sinceSeq": 0, "waitMs": 0, "forceRefresh": true }),
                         Duration::from_secs(15),
                     )
                     .ok();
@@ -568,10 +574,12 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                         "activeTargetId": rec.as_ref().and_then(|r| r.get("activeTargetId")).cloned().unwrap_or_else(|| st.get("activeTargetId").cloned().unwrap_or(Value::Null)),
                         "dialog": rec.as_ref().and_then(|r| r.get("dialog")).cloned().unwrap_or(Value::Null),
                         "epoch": rec.as_ref().and_then(|r| r.get("epoch")).cloned().unwrap_or(Value::Null),
+                        "pauseEpoch": rec.as_ref().and_then(|r| r.get("pauseEpoch")).cloned().unwrap_or_else(|| st.get("pauseEpoch").cloned().unwrap_or(json!(0))),
                         "tabs": rec.as_ref().and_then(|r| r.get("tabs")).cloned().unwrap_or(Value::Null),
                         "tabsHash": rec.as_ref().and_then(|r| r.get("tabsHash")).cloned().unwrap_or(Value::Null),
                         "seq": rec.as_ref().and_then(|r| r.get("seq")).cloned().unwrap_or(json!(0)),
                         "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
+                        "serverMs": t_start.elapsed().as_millis() as u64,
                     }
                 });
             }
@@ -584,6 +592,7 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                     "recoverable": live,
                     "error": err,
                     "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
+                    "serverMs": t_start.elapsed().as_millis() as u64,
                 }
             })
         }

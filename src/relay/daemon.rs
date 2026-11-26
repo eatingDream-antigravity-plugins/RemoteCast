@@ -243,7 +243,7 @@ pub fn dispatch_rpc(
             let qp = params
                 .get("qualityPreset")
                 .and_then(|v| v.as_str())
-                .unwrap_or("low");
+                .filter(|s| !s.is_empty());
             let rtt = params.get("rttMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
             Ok(cdp.boot_snapshot(pid, RELAY_VERSION, qp, rtt))
         }
@@ -251,12 +251,12 @@ pub fn dispatch_rpc(
             let qp = params
                 .get("qualityPreset")
                 .and_then(|v| v.as_str())
-                .unwrap_or("low")
-                .to_string();
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             let rtt = params.get("rttMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
             if cdp.is_connected() {
                 let c = Arc::clone(cdp);
-                let _ = thread::spawn(move || c.warm_active_tab(&qp, rtt));
+                let _ = thread::spawn(move || c.warm_active_tab(qp.as_deref(), rtt));
             } else {
                 let c = Arc::clone(cdp);
                 let _ = thread::spawn(move || c.prewarm_readiness());
@@ -281,6 +281,7 @@ pub fn dispatch_rpc(
                 "ok": true,
                 "connected": cdp.is_connected(),
                 "paused": false,
+                "pauseEpoch": cdp.pause_epoch(),
                 "screencastPausedIdle": false,
                 "noTabs": active_tid.is_none(),
                 "hostname": "localhost",
@@ -399,6 +400,7 @@ pub fn dispatch_rpc(
                 "ok": true,
                 "connected": cdp.is_connected(),
                 "paused": true,
+                "pauseEpoch": cdp.pause_epoch(),
                 "portFile": cdp.public_port_file(),
             }))
         }
@@ -408,6 +410,7 @@ pub fn dispatch_rpc(
                 "ok": true,
                 "connected": cdp.is_connected(),
                 "paused": false,
+                "pauseEpoch": cdp.pause_epoch(),
                 "portFile": cdp.public_port_file(),
             }))
         }
@@ -418,6 +421,7 @@ pub fn dispatch_rpc(
                 "ok": true,
                 "connected": false,
                 "paused": false,
+                "pauseEpoch": cdp.pause_epoch(),
                 "portFile": cdp.public_port_file(),
             }))
         }

@@ -49,6 +49,16 @@ pub const PROFILE_HIGH: QualityProfile = QualityProfile {
     every_nth_frame: 1,
 };
 
+pub fn profile_by_name(name: &str) -> &'static QualityProfile {
+    match name {
+        "ultra" => &PROFILE_ULTRA,
+        "low" => &PROFILE_LOW,
+        "medium" => &PROFILE_MEDIUM,
+        "high" => &PROFILE_HIGH,
+        _ => &PROFILE_MEDIUM,
+    }
+}
+
 pub fn resolve_profile(preset: &str, rtt_ms: f64) -> &'static QualityProfile {
     match preset {
         "ultra" => &PROFILE_ULTRA,
