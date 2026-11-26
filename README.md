@@ -59,6 +59,24 @@ Use the panel header's **Connect**, **Pause / Resume**, and **Disconnect** contr
 - **Explicit connect & 12s idle GPU stop**: Opening the panel never auto-dials Chrome; screen capture pauses automatically after 12 seconds of inactivity and wakes on your next interaction.
 - **Privacy redaction & zero outbound traffic**: Strips local paths and internal WebSocket tokens before reaching the agent, with zero outbound network requests.
 
+## AI Agent Integration
+
+- **Antigravity**: One-line installer above registers the MCP server, live viewer, and `skills/chrome-stream/SKILL.md` automatically.
+- **Claude Code / Codex / Cursor / OpenCode (any MCP stdio client)**: Point your MCP config to the installed binary and add the portable skill [`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md) (or `npx skills add eatingDream-antigravity-plugins/chrome-stream-mcp`):
+
+```json
+{
+  "mcpServers": {
+    "chrome-stream-mcp": {
+      "command": "/path/to/chrome-stream-mcp",
+      "args": ["serve", "--data-dir", "/path/to/chrome-stream-data", "--panel-html", "/path/to/panel.html"]
+    }
+  }
+}
+```
+
+- **LLM index & coding-agent guide**: [`llms.txt`](llms.txt) · [`AGENTS.md`](AGENTS.md)
+
 ## Build from source
 
 Requires Rust (`cargo`) and Node.js 20+ (panel build/tests only; zero npm dependencies):

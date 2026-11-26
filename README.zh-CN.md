@@ -59,6 +59,24 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chr
 - **显式触发与 12 秒无操作停流护显卡**：打开面板绝不自动拨号；12 秒无交互自动暂停抓屏让 GPU 休息，下次交互立即唤醒。
 - **信息脱敏与零外连**：向 Agent 返回前自动剔除本地路径与内部 WebSocket Token，插件本身不发起任何对外网络请求。
 
+## AI Agent 接入指南
+
+- **Antigravity**：执行上方一键安装脚本即自动注册 MCP 服务、实时投屏面板与 [`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md)。
+- **Claude Code / Codex / Cursor / OpenCode（任意 stdio MCP 客户端）**：将 MCP 配置指向已安装的二进制，并加载通用 Skill [`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md)（或运行 `npx skills add eatingDream-antigravity-plugins/chrome-stream-mcp`）：
+
+```json
+{
+  "mcpServers": {
+    "chrome-stream-mcp": {
+      "command": "/path/to/chrome-stream-mcp",
+      "args": ["serve", "--data-dir", "/path/to/chrome-stream-data", "--panel-html", "/path/to/panel.html"]
+    }
+  }
+}
+```
+
+- **LLM 索引与协作指南**：[`llms.txt`](llms.txt) · [`AGENTS.md`](AGENTS.md)
+
 ## 从源码构建
 
 需要 Rust（`cargo`）和 Node.js 20+（仅用于面板打包和测试，零 npm 依赖）：
