@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_PORT_FILE_BYTES: u64 = 4096;
 
@@ -82,7 +82,11 @@ pub fn read_port_file(path: &Path) -> PortFileStatus {
         };
     };
     let mut raw = String::new();
-    if file.take(MAX_PORT_FILE_BYTES).read_to_string(&mut raw).is_err() {
+    if file
+        .take(MAX_PORT_FILE_BYTES)
+        .read_to_string(&mut raw)
+        .is_err()
+    {
         return PortFileStatus {
             exists: true,
             valid: false,
@@ -99,7 +103,10 @@ pub fn read_port_file(path: &Path) -> PortFileStatus {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    let port = lines.first().and_then(|s| s.parse::<u16>().ok()).filter(|&p| p > 0);
+    let port = lines
+        .first()
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|&p| p > 0);
     let ws_path = lines.get(1).copied().unwrap_or("");
     let candidate = port.map(|p| format!("ws://127.0.0.1:{p}{ws_path}"));
     let syntax_valid = ws_path.starts_with('/')
@@ -171,7 +178,8 @@ pub fn validate_loopback_ws_url(url: &str) -> Result<(String, u16, String), Stri
             .ok_or_else(|| format!("Missing port in URL: {url}"))?
     };
 
-    let is_loopback = host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost") || host == "::1";
+    let is_loopback =
+        host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost") || host == "::1";
     if !is_loopback {
         return Err(format!("Refusing non-loopback CDP host: {host}"));
     }
@@ -193,74 +201,59 @@ pub fn validate_loopback_ws_url(url: &str) -> Result<(String, u16, String), Stri
     Ok((connect_host.to_string(), port, path.to_string()))
 }
 
-/// Fallback discovery against a dedicated `--remote-debugging-port=<port>` Chrome instance.
-/// Tries IPv4 loopback first and falls back to IPv6 loopback for dual-stack hygiene.
+/// Discovers a browser WebSocket served by the configured loopback port.
 pub fn probe_debug_port_ws_url(port: u16) -> Option<String> {
-    if port == 0 {
+    probe_ipv4_debug_port_ws_url(port)
+        .or_else(|| probe_debug_address(SocketAddr::from((Ipv6Addr::LOCALHOST, port))))
+}
+
+pub fn probe_ipv4_debug_port_ws_url(port: u16) -> Option<String> {
+    probe_debug_address(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+}
+
+fn probe_debug_address(addr: SocketAddr) -> Option<String> {
+    if addr.port() == 0 {
         return None;
     }
-    for (host, addr_str) in [
-        ("127.0.0.1", format!("127.0.0.1:{port}")),
-        ("[::1]", format!("[::1]:{port}")),
-    ] {
-        let Ok(addr) = addr_str.parse::<SocketAddr>() else {
-            continue;
-        };
-        let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(250)) else {
-            continue;
-        };
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(250)).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(300)))
+        .ok()?;
+    let request = format!(
+        "GET /json/version HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
 
-        let req = format!(
-            "GET /json/version HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
-        );
-        if stream.write_all(req.as_bytes()).is_err() {
-            continue;
+    let read_deadline = Instant::now() + Duration::from_millis(400);
+    let mut resp = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 2048];
+    while resp.len() < 32_768 {
+        let remaining = read_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
         }
-
-        let mut resp = Vec::with_capacity(4096);
-        let mut chunk = [0u8; 2048];
-        while resp.len() < 32_768 {
-            match stream.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => resp.extend_from_slice(&chunk[..n]),
-                Err(_) => break,
-            }
-        }
-        let text = String::from_utf8_lossy(&resp);
-        let Some((headers, body)) = text.split_once("\r\n\r\n") else {
-            continue;
-        };
-        if !headers.starts_with("HTTP/1.1 200") && !headers.starts_with("HTTP/1.0 200") {
-            continue;
-        }
-        let Ok(json) = serde_json::from_str::<Value>(body.trim()) else {
-            continue;
-        };
-        let Some(ws_url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if validate_loopback_ws_url(ws_url).is_ok() {
-            return Some(ws_url.to_string());
+        stream.set_read_timeout(Some(remaining)).ok()?;
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => resp.extend_from_slice(&chunk[..n]),
         }
     }
-    None
-}
 
-pub fn resolve_ws_url_candidates(candidates: &[PathBuf], debug_port: u16) -> Option<String> {
-    let status = discover_port_file(candidates);
-    if status.exists && status.valid {
-        if let Some(url) = status.ws_url {
-            return Some(url);
-        }
+    let text = std::str::from_utf8(&resp).ok()?;
+    let (headers, body) = text.split_once("\r\n\r\n")?;
+    let status = headers
+        .lines()
+        .next()?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if !matches!(status.as_slice(), ["HTTP/1.0" | "HTTP/1.1", "200", ..]) {
+        return None;
     }
-    probe_debug_port_ws_url(debug_port)
-}
-
-#[cfg(test)]
-pub fn resolve_ws_url(port_file: &Path, debug_port: u16) -> Option<String> {
-    resolve_ws_url_candidates(&[port_file.to_path_buf()], debug_port)
+    let json = serde_json::from_str::<Value>(body.trim()).ok()?;
+    let ws_url = json.get("webSocketDebuggerUrl")?.as_str()?;
+    let (host, port, path) = validate_loopback_ws_url(ws_url).ok()?;
+    (host == addr.ip().to_string() && port == addr.port() && path.starts_with("/devtools/browser/"))
+        .then(|| ws_url.to_string())
 }
 
 #[cfg(test)]
@@ -295,13 +288,18 @@ mod tests {
 
     #[test]
     fn parses_port_file_probes_liveness_and_falls_back_when_stale() {
-        let dir = std::env::temp_dir().join(format!("chrome-stream-port-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chrome-stream-port-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let live_pf = dir.join("DevToolsActivePort");
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let live_port = listener.local_addr().unwrap().port();
-        fs::write(&live_pf, format!("{live_port}\n/devtools/browser/test-id\n")).unwrap();
+        fs::write(
+            &live_pf,
+            format!("{live_port}\n/devtools/browser/test-id\n"),
+        )
+        .unwrap();
 
         let st = read_port_file(&live_pf);
         assert!(st.exists && st.valid && !st.stale);
@@ -322,7 +320,10 @@ mod tests {
         drop(listener);
         let stale_st = read_port_file(&live_pf);
         assert!(stale_st.exists);
-        assert!(!stale_st.valid, "stale DevToolsActivePort must NOT report valid=true");
+        assert!(
+            !stale_st.valid,
+            "stale DevToolsActivePort must NOT report valid=true"
+        );
         assert!(stale_st.stale);
         assert!(stale_st.ws_url.is_none());
 
@@ -345,7 +346,9 @@ mod tests {
             }
         });
 
-        let resolved = resolve_ws_url(&live_pf, fb_port);
+        let resolved = discover_port_file(std::slice::from_ref(&live_pf))
+            .ws_url
+            .or_else(|| probe_debug_port_ws_url(fb_port));
         assert_eq!(resolved.as_deref(), Some(expected_fb_ws.as_str()));
         let _ = srv.join();
 
@@ -353,7 +356,11 @@ mod tests {
         let live2_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let live2_port = live2_listener.local_addr().unwrap().port();
         let snap_pf = dir.join("SnapDevToolsActivePort");
-        fs::write(&snap_pf, format!("{live2_port}\n/devtools/browser/snap-id\n")).unwrap();
+        fs::write(
+            &snap_pf,
+            format!("{live2_port}\n/devtools/browser/snap-id\n"),
+        )
+        .unwrap();
         let multi = discover_port_file(&[live_pf.clone(), snap_pf]);
         assert!(multi.valid && !multi.stale);
         assert_eq!(multi.port, Some(live2_port));

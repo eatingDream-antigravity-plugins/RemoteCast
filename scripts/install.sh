@@ -127,7 +127,7 @@ STAGE_DIR="${TMP_DIR}/stage"
 mkdir -p "$STAGE_DIR"
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$STAGE_DIR"
 
-mkdir -p "${INSTALL_DIR}/bin" "${INSTALL_DIR}/panel/dist" "${INSTALL_DIR}/skills/chrome-stream" "${INSTALL_DIR}/assets"
+mkdir -p "${INSTALL_DIR}/bin" "${INSTALL_DIR}/panel/dist" "${INSTALL_DIR}/skills/chrome-stream" "${INSTALL_DIR}/assets" "${INSTALL_DIR}/docs"
 
 # Atomic binary swap avoids ETXTBSY if a persistent relay daemon is running.
 cp "${STAGE_DIR}/bin/chrome-stream-mcp" "${INSTALL_DIR}/bin/chrome-stream-mcp.new"
@@ -139,6 +139,12 @@ cp "${STAGE_DIR}/plugin.json" "${INSTALL_DIR}/plugin.json"
 cp "${STAGE_DIR}/mcp_config.json" "${INSTALL_DIR}/mcp_config.json"
 cp "${STAGE_DIR}/skills/chrome-stream/SKILL.md" "${INSTALL_DIR}/skills/chrome-stream/SKILL.md"
 cp "${STAGE_DIR}/assets/logo.svg" "${INSTALL_DIR}/assets/logo.svg"
+if [ -f "${STAGE_DIR}/docs/ai-guide.md" ]; then
+  cp "${STAGE_DIR}/docs/ai-guide.md" "${INSTALL_DIR}/docs/ai-guide.md"
+fi
+if [ -f "${STAGE_DIR}/llms.txt" ]; then
+  cp "${STAGE_DIR}/llms.txt" "${INSTALL_DIR}/llms.txt"
+fi
 cp "${STAGE_DIR}/LICENSE" "${INSTALL_DIR}/LICENSE"
 cp "${STAGE_DIR}/README.md" "${INSTALL_DIR}/README.md"
 

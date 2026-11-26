@@ -1,89 +1,72 @@
 // Lightweight SEP-1865 (2026-01-26) MCP Apps PostMessage bridge.
 export const LATEST_PROTOCOL_VERSION = "2026-01-26";
-const de = () => document.documentElement;
-const HX = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const de = () => document.documentElement, HX = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i, UN = "ui/notifications/";
+const px = (h, i) => parseInt(h.length <= 4 ? h[i] + h[i] : h.slice(i * 2, i * 2 + 2), 16);
 
-function parseAlpha(v) {
+const parseAlpha = (v) => {
   const s = String(v || "").trim().toLowerCase();
   if (/^(|transparent|none|initial|inherit|unset)$/.test(s)) return 0;
   const hx = s.match(HX);
-  if (hx) {
-    const h = hx[1];
-    return h.length === 4 ? parseInt(h[3] + h[3], 16) / 255 : h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
-  }
+  if (hx) return hx[1].length % 4 === 0 ? px(hx[1], 3) / 255 : 1;
   const fn = s.match(/^(?:rgba?|hsla?)\([^,)]+,[^,)]+,[^,)]+,\s*(\d*\.?\d+%?)\s*\)$/) || s.match(/\/\s*(\d*\.?\d+%?)\s*\)$/);
   if (!fn) return 1;
-  const a = fn[1].endsWith("%") ? parseFloat(fn[1]) / 100 : parseFloat(fn[1]);
+  const a = parseFloat(fn[1]) / (fn[1].endsWith("%") ? 100 : 1);
   return Number.isFinite(a) ? Math.max(0, Math.min(1, a)) : 0;
-}
+};
 
-export function lum(raw) {
+export const lum = (raw) => {
   const s = String(raw || "").trim();
   if (parseAlpha(s) < 0.5) return null;
-  const m = s.match(HX);
-  if (m) {
-    const h = m[1], p = h.length <= 4 ? [h[0] + h[0], h[1] + h[1], h[2] + h[2]] : [h.slice(0, 2), h.slice(2, 4), h.slice(4, 6)];
-    return (0.2126 * parseInt(p[0], 16) + 0.7152 * parseInt(p[1], 16) + 0.0722 * parseInt(p[2], 16)) / 255;
-  }
-  const r = s.match(/^rgba?\(\s*(\d*\.?\d+)[\s,]+(\d*\.?\d+)[\s,]+(\d*\.?\d+)/i);
-  return r ? (0.2126 * +r[1] + 0.7152 * +r[2] + 0.0722 * +r[3]) / 255 : null;
-}
+  const m = s.match(HX), r = m ? [0, 1, 2].map((i) => px(m[1], i)) : s.match(/^rgba?\(\s*(\d*\.?\d+)[\s,]+(\d*\.?\d+)[\s,]+(\d*\.?\d+)/i)?.slice(1);
+  return r ? (0.2126 * +r[0] + 0.7152 * +r[1] + 0.0722 * +r[2]) / 255 : null;
+};
 
-export function applyDocumentTheme(t) {
+export const applyDocumentTheme = (t) => {
   if (t !== "dark" && t !== "light") return;
-  const e = de(), bg = `var(--color-background-primary,${t === "light" ? "#FAF8F5" : "#141311"})`;
-  if (e.getAttribute("data-theme") !== t) e.setAttribute("data-theme", t);
-  e.style.colorScheme = t; e.style.backgroundColor = bg;
-  if (document.body) document.body.style.backgroundColor = bg;
-  const m = document.querySelector?.('meta[name="color-scheme"]');
-  if (m && m.getAttribute("content") !== t) m.setAttribute("content", t);
-}
+  const e = de(), bg = `var(--color-background-primary,${t === "light" ? "#FAF8F4" : "#141311"})`;
+  e.setAttribute("data-theme", t); e.style.colorScheme = t; e.style.backgroundColor = bg;
+  document.body && (document.body.style.backgroundColor = bg);
+  document.querySelector?.('meta[name="color-scheme"]')?.setAttribute("content", t);
+};
 
-export function applyHostStyleVariables(v, el = de()) {
+export const applyHostStyleVariables = (v, el = de()) => {
   if (!v || typeof v !== "object") return;
-  for (const [k, x] of Object.entries(v)) {
-    if (x == null) continue;
-    const val = String(x).trim();
-    if (k === "--color-background-primary" && (!val || parseAlpha(val) < 0.9)) continue;
-    el.style.setProperty(k, val);
+  for (const k in v) if (v[k] != null) {
+    const val = String(v[k]).trim();
+    if (k !== "--color-background-primary" || (val && parseAlpha(val) >= 0.9)) el.style.setProperty(k, val);
   }
-}
+};
 
-export function applyHostFonts(css) {
+export const applyHostFonts = (css) => {
   if (!css || document.getElementById("__mcp-hf")) return;
   const s = document.createElement("style"); s.id = "__mcp-hf"; s.textContent = css; document.head.appendChild(s);
-}
+};
 
-export function applyHostContext(c) {
+export const applyHostContext = (c) => {
   if (!c || typeof c !== "object") return;
-  if (c.styles?.variables) applyHostStyleVariables(c.styles.variables);
-  if (c.styles?.css?.fonts) applyHostFonts(c.styles.css.fonts);
+  const st = c.styles, vs = st?.variables;
+  vs && applyHostStyleVariables(vs);
+  st?.css?.fonts && applyHostFonts(st.css.fonts);
   const raw = String(c.theme || "").trim().toLowerCase();
   let t = /dark|night|black/.test(raw) ? "dark" : /light|day|white/.test(raw) ? "light" : null;
   if (!t) {
-    const bg = c.styles?.variables?.["--color-background-primary"] ||
-      (typeof getComputedStyle === "function" ? getComputedStyle(de()).getPropertyValue("--color-background-primary") : "");
-    const l = lum(bg);
+    const l = lum(vs?.["--color-background-primary"] || (typeof getComputedStyle === "function" ? getComputedStyle(de()).getPropertyValue("--color-background-primary") : ""));
     if (l !== null) t = l < 0.45 ? "dark" : "light";
   }
-  if (t) applyDocumentTheme(t);
-}
+  t && applyDocumentTheme(t);
+};
 
 export class App {
   constructor(i, c = {}, o = {}) {
-    this._i = i; this._c = c || {}; this._o = { autoResize: true, ...o };
-    this._n = 1; this._p = new Map(); this._up = false; this._t = window.parent;
-    this._m = (e) => {
-      if (e.source !== this._t) return;
-      const m = e.data;
-      if (!m || typeof m !== "object" || m.jsonrpc !== "2.0") return;
+    const s = this; s._i = i; s._c = c || {}; s._o = { autoResize: true, ...o }; s._n = 1; s._p = new Map(); s._up = false; s._ci = null; s._t = window.parent;
+    s._m = (e) => {
+      if (e.source !== s._t) return;
+      const m = e.data; if (!m || typeof m !== "object" || m.jsonrpc !== "2.0") return;
       if (m.id !== undefined && !m.method) {
-        const p = this._p.get(m.id);
-        if (!p) return;
-        this._p.delete(m.id); globalThis.clearTimeout(p.t);
+        const p = s._p.get(m.id); if (!p) return;
+        s._p.delete(m.id); globalThis.clearTimeout(p.t);
         m.error ? p.rej(new Error(m.error.message || JSON.stringify(m.error))) : p.res(m.result);
-      } else if (m.id !== undefined) this._req(m);
-      else if (m.method) this._note(m);
+      } else m.id !== undefined ? s._req(m) : m.method && s._note(m);
     };
   }
   getHostContext() { return this._ctx; }
@@ -92,60 +75,53 @@ export class App {
   async _req(m) {
     const id = m.id, k = m.method;
     try {
-      if (k === "ping") return this._send({ id, result: {} });
-      if (k === "ui/resource-teardown") return this._send({ id, result: this.onteardown ? (await this.onteardown(m.params || {})) ?? {} : {} });
-      this._send({ id, error: { code: -32601, message: k } });
+      const r = k === "ping" ? {} : k === "ui/resource-teardown" ? (await this.onteardown?.(m.params || {})) ?? {} : null;
+      this._send(r ? { id, result: r } : { id, error: { code: -32601, message: k } });
     } catch (e) { this._send({ id, error: { code: -32603, message: e?.message || String(e) } }); }
   }
   _note(m) {
-    const p = m.params || {}, k = m.method;
-    if (k === "ui/notifications/tool-input") this.ontoolinput?.(p);
-    else if (k === "ui/notifications/tool-result") this.ontoolresult?.(p);
-    else if (k === "ui/notifications/tool-cancelled") this.ontoolcancelled?.(p);
-    else if (k === "ui/notifications/host-context-changed") { this._ctx = { ...this._ctx, ...p }; this.onhostcontextchanged?.(p); }
-    else if (k === "notifications/progress") for (const e of this._p.values()) e.reset();
+    const s = this, p = m.params || {}, k = m.method;
+    if (k === UN + "tool-input") s.ontoolinput?.(p);
+    else if (k === UN + "tool-result") s.ontoolresult?.(p);
+    else if (k === UN + "tool-cancelled") s.ontoolcancelled?.(p);
+    else if (k === UN + "host-context-changed") { s._ctx = { ...s._ctx, ...p }; s.onhostcontextchanged?.(p); }
+    else if (k === "notifications/progress") s._p.forEach((e) => e.reset());
   }
-  request(method, params, { timeoutMs = 75000 } = {}) {
-    const id = this._n++;
+  request(method, params, { timeoutMs: tm = 75000 } = {}) {
+    const s = this, id = s._n++;
     return new Promise((res, rej) => {
-      const arm = () => globalThis.setTimeout(() => { this._p.delete(id); rej(new Error(`Timeout:${method}`)); }, timeoutMs);
+      const arm = () => globalThis.setTimeout(() => { s._p.delete(id); rej(new Error(`Timeout:${method}`)); }, tm);
       const e = { res, rej, t: arm(), reset() { globalThis.clearTimeout(e.t); e.t = arm(); } };
-      this._p.set(id, e); this._send({ id, method, params });
+      s._p.set(id, e); s._send({ id, method, params });
     });
   }
   notification(method, params) { this._send(params !== undefined ? { method, params } : { method }); }
   callServerTool(params, o = {}) { return this.request("tools/call", params, { timeoutMs: o.timeout ?? 75000 }); }
   _watchSize() {
-    if (typeof ResizeObserver === "undefined" || !this._ctx?.containerDimensions?.maxHeight) return;
+    const s = this; if (typeof ResizeObserver === "undefined" || !s._ctx?.containerDimensions?.maxHeight) return;
     let raf = 0, lw = 0, lh = 0;
-    const go = () => {
-      if (raf) return; raf = 1;
-      requestAnimationFrame(() => {
-        raf = 0;
-        const r = de(), pv = r.style.height;
-        r.style.height = "max-content";
-        const h = Math.ceil(r.getBoundingClientRect().height), w = Math.ceil(window.innerWidth);
-        r.style.height = pv;
-        if (w !== lw || h !== lh) { lw = w; lh = h; this.notification("ui/notifications/size-changed", { width: w, height: h }); }
-      });
-    };
-    go(); (this._ro = new ResizeObserver(go)).observe(de());
+    const go = () => !raf && (raf = 1, requestAnimationFrame(() => {
+      raf = 0; const r = de(), pv = r.style.height; r.style.height = "max-content";
+      const h = Math.ceil(r.getBoundingClientRect().height), w = Math.ceil(window.innerWidth);
+      r.style.height = pv;
+      if (w !== lw || h !== lh) { lw = w; lh = h; s.notification(UN + "size-changed", { width: w, height: h }); }
+    }));
+    go(); (s._ro = new ResizeObserver(go)).observe(de());
   }
-  async connect() {
-    if (this._up) return;
-    this._up = true; window.addEventListener("message", this._m);
-    try {
-      const r = await this.request("ui/initialize", { appInfo: this._i, appCapabilities: this._c, protocolVersion: LATEST_PROTOCOL_VERSION }, { timeoutMs: 20000 });
-      if (!r || typeof r !== "object") throw new Error("Bad init");
-      this._ctx = r.hostContext; this._hc = r.hostCapabilities || {};
-      applyHostContext(this._ctx); this.notification("ui/notifications/initialized");
-      if (this._o.autoResize) this._watchSize();
-    } catch (e) { this.close(); throw e; }
+  connect() {
+    const s = this; if (s._up) return s._ci || Promise.resolve();
+    s._up = true; window.addEventListener("message", s._m);
+    return (s._ci = s.request("ui/initialize", { appInfo: s._i, appCapabilities: s._c, protocolVersion: LATEST_PROTOCOL_VERSION }, { timeoutMs: 20000 }).then((r) => {
+      if (!r || typeof r !== "object" || r.protocolVersion !== LATEST_PROTOCOL_VERSION) throw new Error("Bad init");
+      s._ctx = r.hostContext; s._hc = r.hostCapabilities || {};
+      applyHostContext(s._ctx); s.notification(UN + "initialized");
+      s._o.autoResize && s._watchSize();
+    }).catch((e) => { s.close(); throw e; }));
   }
   close() {
-    this._up = false; window.removeEventListener("message", this._m);
-    this._ro?.disconnect(); this._ro = null;
-    for (const e of this._p.values()) { globalThis.clearTimeout(e.t); e.rej(new Error("Closed")); }
-    this._p.clear();
+    const s = this; s._up = false; s._ci = s._hc = null; window.removeEventListener("message", s._m);
+    s._ro?.disconnect(); s._ro = null;
+    s._p.forEach((e) => { globalThis.clearTimeout(e.t); e.rej(new Error("Closed")); });
+    s._p.clear();
   }
 }

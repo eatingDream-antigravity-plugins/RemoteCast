@@ -4,89 +4,72 @@
 
 # Chrome Stream MCP
 
-**View and interact with your own local Google Chrome tabs right inside Antigravity, even over a slow phone or remote connection.**
+**View and interact with your local Google Chrome tabs inside Antigravity — crisp and responsive even over slow mobile or remote links.**
+
+English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
-
-English | [简体中文](README.zh-CN.md)
 
 <img src="docs/social-preview.png" alt="Chrome Stream MCP panel preview" width="860">
 
 </div>
 
-## Highlights
+## Overview
 
-- **Real local Chrome in Antigravity**: Click, type, scroll, navigate, and manage tabs in your existing Chrome profile (accounts and extensions intact).
-- **Adaptive weak-network streaming**: Automatically scales quality across four RTT-based presets, skips unchanged frames, syncs quietly in the background, and wakes immediately when a kept-alive pane is reopened.
-- **Clean tab semantics**: Closing the last tab shows a clean empty state instead of forcing an unwanted `about:blank` tab open.
+Chrome Stream is a native Rust relay and SEP-1865 MCP App. It streams local Chrome tabs into Antigravity and supports interactive input and tab controls. Chrome debugging traffic stays on loopback (`127.0.0.1` and `::1`).
 
-## Install & Setup
+## Features
 
-### 1. Install the plugin (macOS & Linux)
+- **Personal Chrome or one-click Remote Chrome**: Connect to your existing Chrome profile (logins and extensions intact), or launch an isolated loopback Remote Chrome profile that never needs local **Allow** confirmation.
+- **Standby keeps Allow alive remotely**: Header **Standby / Wake** freezes capture at 0 FPS while keeping the authorized session warm across reloads; **Revoke & Disconnect** lives safely in the `⋯` overflow menu with a clear warning.
+- **Weak-network progressive clarity**: Maintains legible motion floors during scrolling/typing, then automatically settles into a crisp WebP still frame (~380 ms after activity) with 0-byte unchanged deduplication.
+- **Zero-jitter adaptive pacing**: EWMA RTT smoothing with asymmetric hysteresis prevents quality thrashing on mobile jitter while keeping wheel and click feedback responsive.
+- **Epoch-safe input & clean tab semantics**: Binds clicks/keys to the exact tab epoch so background tab switches never misroute input, and closing the last tab shows a clean empty state instead of forcing `about:blank`.
+- **Editorial-Warm MCP App UI**: Dark-first, zero-flicker, zero-dependency single-file panel (`< 43.5 KB`) with strict `default-src 'none'` CSP and full EN / 中文 support.
+
+## Quick Start
+
+### 1. Install (macOS & Linux)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chrome-stream-mcp/main/scripts/install.sh | sh
 ```
 
-Installs the SHA-256-verified prebuilt binary (macOS Apple Silicon/Intel, Linux x86_64) into `~/.gemini/config/plugins/chrome-stream-mcp`. Pin a version with `CHROME_STREAM_VERSION=v0.3.0`, then reload Antigravity.
+Reload Antigravity after installation.
 
-### 2. Enable Chrome remote debugging (one-time)
+### 2. Connect Chrome
 
-1. Open `chrome://inspect/#remote-debugging` in your running Google Chrome and enable remote debugging (recommended on **Chrome 136+**; or launch a separate profile with `--remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug`).
-2. Open **Chrome Stream** in Antigravity, click **Connect**, and click **Allow** once in Chrome.
+- **Personal Chrome** uses Chrome's `DevToolsActivePort` files exclusively. Enable remote debugging at `chrome://inspect/#remote-debugging`, open **Chrome Stream**, select **Connect Personal Chrome**, and confirm **Allow** in Chrome. Use **Standby** to keep an authorized connection open.
+- **Remote Chrome (No Allow)** launches an isolated profile with `0700` permissions on `127.0.0.1`. It reuses a running browser only when its live debugging endpoint matches the isolated profile. If the port is occupied, set `CHROME_STREAM_DEBUG_PORT` to a free port or use Personal mode.
 
-Run `chrome-stream-mcp doctor` if Chrome doesn't connect.
+## For AI Agents
 
-## Usage
+Point your coding agent directly to the machine-readable guides for complete MCP tool schemas, `CHROME_STREAM_*` environment variables, CLI diagnostics, and stdio setup:
 
-Use the panel header's **Connect**, **Pause / Resume**, and **Disconnect** controls directly, or ask your agent via the on-demand skill (zero always-on prompt overhead):
+- **Skill (`agentskills.io`)**: [`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md) (or `npx skills add eatingDream-antigravity-plugins/chrome-stream-mcp`)
+- **Full AI & Configuration Guide**: [`docs/ai-guide.md`](docs/ai-guide.md)
+- **LLM Entry Index**: [`llms.txt`](llms.txt)
 
-| Tool | What it does |
-| :--- | :--- |
-| `chrome_stream_stage` | Opens the panel and reports status without auto-connecting. |
-| `chrome_stream_connect` | Connects to local Chrome and starts streaming the active tab. |
-| `chrome_stream_disconnect` | Stops streaming and closes the Chrome debugging connection. |
+> Prompt hint: *"Read `llms.txt` and `docs/ai-guide.md` in `chrome-stream-mcp` to configure stdio MCP, run `chrome-stream-mcp doctor --json`, or connect Chrome in standby/remote mode."*
 
-**Optional overrides**: Auto-discovers standard macOS/Linux Chrome/Chromium profiles (falling back to localhost `9222`). Override via `CHROME_STREAM_DEBUG_PORT`, `CHROME_STREAM_PORT_FILE`, `CHROME_STREAM_USER_DATA_DIR`, or `CHROME_STREAM_LANG` (`en` / `zh-CN`).
+## Safety & Privacy
 
-## Architecture & Safety
+- **Loopback-only (`127.0.0.1` / `::1`)**: Rejects non-loopback endpoints; never exposes Chrome debugging ports to a network interface.
+- **Local access controls** use a `0600` Unix socket, verify the peer user ID, and validate directory ownership and write permissions before using the socket or the `0700` Chrome profile.
+- **Explicit connect & 12 s idle stop**: Opening the stage never auto-dials Chrome; screen capture pauses automatically after 12 seconds of inactivity and wakes on interaction.
+- **Sanitized diagnostics**. `chrome-stream-mcp doctor --json` omits local filesystem paths and raw DevTools WebSocket URLs by default.
+- **MCP Apps capability**. The `resources/read` response includes live bootstrap tabs and pixels only after the host negotiates the MCP App MIME type. Other hosts receive static panel HTML.
 
-- **Loopback-only (`127.0.0.1` / `::1`)**: Rejects non-loopback targets; never expose Chrome's debugging port publicly.
-- **Single-approval `0600` local relay**: A user-only (`0600`) Unix socket under `~/.gemini/antigravity/plugin_data/chrome-stream-mcp/` keeps the authorized session alive across plugin reloads so you only click **Allow** once per browser session.
-- **Explicit connect & 12s idle GPU stop**: Opening the panel never auto-dials Chrome; screen capture pauses automatically after 12 seconds of inactivity and wakes on your next interaction.
-- **Privacy redaction & zero outbound traffic**: Strips local paths and internal WebSocket tokens before reaching the agent, with zero outbound network requests.
+## Documentation
 
-## AI Agent Integration
+- [AI Guide & Configuration Reference](docs/ai-guide.md) — MCP tools, environment variables, CLI subcommands, build from source
+- [Agent Skill](skills/chrome-stream/SKILL.md) — On-demand agent workflow rules
+- [LLM Index](llms.txt) · [Contributor Guide](AGENTS.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
 
-- **Antigravity**: One-line installer above registers the MCP server, live viewer, and `skills/chrome-stream/SKILL.md` automatically.
-- **Claude Code / Codex / Cursor / OpenCode (any MCP stdio client)**: Point your MCP config to the installed binary and add the portable skill [`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md) (or `npx skills add eatingDream-antigravity-plugins/chrome-stream-mcp`):
+## License
 
-```json
-{
-  "mcpServers": {
-    "chrome-stream-mcp": {
-      "command": "/path/to/chrome-stream-mcp",
-      "args": ["serve", "--data-dir", "/path/to/chrome-stream-data", "--panel-html", "/path/to/panel.html"]
-    }
-  }
-}
-```
-
-- **LLM index & coding-agent guide**: [`llms.txt`](llms.txt) · [`AGENTS.md`](AGENTS.md)
-
-## Build from source
-
-Requires Rust (`cargo`) and Node.js 20+ (panel build/tests only; zero npm dependencies):
-
-```sh
-git clone https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp.git && cd chrome-stream-mcp
-node panel/build.mjs && node --test panel/net-policy.test.mjs
-cargo test --locked && cargo build --release --locked
-```
-
-## Contributing & License
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md), and [SECURITY.md](SECURITY.md). Licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE).
