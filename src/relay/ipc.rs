@@ -1,12 +1,19 @@
 use crate::config::Config;
+#[cfg(not(test))]
+use crate::local_io::create_private_directory;
+use crate::local_io::{effective_uid, owned_directory, read_bounded_line, socket_parent};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::Shutdown;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
+#[cfg(not(test))]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -20,80 +27,176 @@ pub trait RelayBackend: Send + Sync {
     }
 }
 
-/// Quick one-shot probe used by `chrome-stream-mcp doctor` and relay startup deduplication.
-pub fn probe_relay_ping(sock_path: &Path) -> Option<Value> {
-    let mut stream = UnixStream::connect(sock_path).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(600)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
-    let req = format!("{}\n", json!({ "id": 0, "method": "ping", "params": {} }));
-    stream.write_all(req.as_bytes()).ok()?;
-    stream.flush().ok()?;
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).ok()?;
-    if n == 0 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_str(line.trim()).ok()?;
-    parsed.get("result").cloned()
+const MAX_PROBE_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_RPC_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+pub fn verify_same_user(stream: &UnixStream) -> io::Result<()> {
+    verify_peer_uid(stream, effective_uid())
 }
 
+fn verify_peer_uid(stream: &UnixStream, uid: libc::uid_t) -> io::Result<()> {
+    if peer_uid(stream)? != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Relay peer must belong to the current user",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> io::Result<libc::uid_t> {
+    let mut cred = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: cred points to len writable bytes and the socket fd is valid.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            cred.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid relay peer credentials",
+        ));
+    }
+    // SAFETY: successful getsockopt initialized the complete structure.
+    Ok(unsafe { cred.assume_init() }.uid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(stream: &UnixStream) -> io::Result<libc::uid_t> {
+    let mut uid = 0;
+    let mut gid = 0;
+    // SAFETY: both output pointers and the socket fd are valid.
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+fn connect_socket(sock_path: &Path) -> io::Result<UnixStream> {
+    owned_directory(socket_parent(sock_path), false)?;
+    let metadata = fs::symlink_metadata(sock_path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != effective_uid()
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Unsafe relay socket",
+        ));
+    }
+    let stream = UnixStream::connect(sock_path)?;
+    verify_same_user(&stream)?;
+    Ok(stream)
+}
+
+/// Quick one-shot probe used by doctor and relay startup deduplication.
+pub fn probe_relay_ping(sock_path: &Path) -> io::Result<Value> {
+    let mut stream = connect_socket(sock_path)?;
+    stream.set_read_timeout(Some(Duration::from_millis(600)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(400)))?;
+    writeln!(
+        stream,
+        "{}",
+        json!({ "id": 0, "method": "ping", "params": {} })
+    )?;
+    read_probe_reply(&mut BufReader::new(stream))
+}
+
+fn read_probe_reply(reader: &mut impl BufRead) -> io::Result<Value> {
+    let mut line = Vec::new();
+    read_bounded_line(reader, &mut line, MAX_PROBE_RESPONSE_BYTES)?;
+    let mut parsed: Value = serde_json::from_slice(&line)?;
+    if parsed["id"] == 0 && parsed["result"]["ok"] == true {
+        return Ok(parsed["result"].take());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Invalid relay probe reply",
+    ))
+}
+
+type PendingReplies = HashMap<u64, mpsc::Sender<Result<Value, String>>>;
+
 struct ActiveConn {
-    writer: Arc<Mutex<UnixStream>>,
-    open: Arc<AtomicBool>,
+    writer: Mutex<UnixStream>,
+    open: AtomicBool,
+    pending: Mutex<PendingReplies>,
 }
 
 /// Persistent multiplexed Unix-socket JSON-RPC client to the detached `chrome-stream-mcp relay` daemon.
 /// Concurrent callers (e.g. long-polling `chrome_stream_frame` + fast `chrome_stream_input`) share one socket
 /// without head-of-line blocking.
 pub struct RelayClient {
+    #[cfg(not(test))]
     data_dir: PathBuf,
     sock_path: PathBuf,
-    port_file: PathBuf,
+    #[cfg(not(test))]
+    port_file: Option<PathBuf>,
+    #[cfg(not(test))]
     debug_port: u16,
     auto_spawn: bool,
     connect_lock: Mutex<()>,
     conn: Mutex<Option<Arc<ActiveConn>>>,
-    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>,
     next_id: AtomicU64,
 }
 
 impl RelayClient {
     pub fn from_config(cfg: &Config) -> Arc<Self> {
         Arc::new(Self {
+            #[cfg(not(test))]
             data_dir: cfg.data_dir.clone(),
             sock_path: cfg.relay_sock.clone(),
-            port_file: cfg.port_file.clone(),
+            #[cfg(not(test))]
+            port_file: cfg.port_files.first().cloned(),
+            #[cfg(not(test))]
             debug_port: cfg.debug_port,
             auto_spawn: true,
             connect_lock: Mutex::new(()),
             conn: Mutex::new(None),
-            pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
         })
     }
 
     pub fn connect_only(sock_path: PathBuf) -> Arc<Self> {
+        #[cfg(not(test))]
         let data_dir = sock_path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         Arc::new(Self {
+            #[cfg(not(test))]
             data_dir,
             sock_path,
-            port_file: PathBuf::new(),
+            #[cfg(not(test))]
+            port_file: None,
+            #[cfg(not(test))]
             debug_port: 9222,
             auto_spawn: false,
             connect_lock: Mutex::new(()),
             conn: Mutex::new(None),
-            pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
         })
     }
 
+    #[cfg(test)]
     fn spawn_relay(&self) -> Result<(), String> {
-        let _ = fs::create_dir_all(&self.data_dir);
-        let _ = fs::set_permissions(&self.data_dir, fs::Permissions::from_mode(0o700));
+        Err("Starting a relay process is disabled in test builds".into())
+    }
+
+    #[cfg(not(test))]
+    fn spawn_relay(&self) -> Result<(), String> {
+        create_private_directory(&self.data_dir)
+            .map_err(|e| format!("Could not prepare relay data directory: {e}"))?;
         let exe = std::env::current_exe()
             .map_err(|e| format!("Failed locating current executable for relay spawn: {e}"))?;
 
@@ -104,9 +207,12 @@ impl RelayClient {
             .stderr(Stdio::null())
             .env("CHROME_STREAM_DATA_DIR", &self.data_dir)
             .env("CHROME_STREAM_RELAY_SOCK", &self.sock_path)
-            .env("CHROME_STREAM_CHROME_DEBUG_PORT", self.debug_port.to_string());
-        if !self.port_file.as_os_str().is_empty() {
-            cmd.env("CHROME_STREAM_CHROME_PORT_FILE", &self.port_file);
+            .env(
+                "CHROME_STREAM_CHROME_DEBUG_PORT",
+                self.debug_port.to_string(),
+            );
+        if let Some(port_file) = &self.port_file {
+            cmd.env("CHROME_STREAM_CHROME_PORT_FILE", port_file);
         }
 
         // Detach into a new session so `chrome-stream-mcp relay` survives MCP server reloads.
@@ -127,52 +233,43 @@ impl RelayClient {
             .try_clone()
             .map_err(|e| format!("Failed cloning relay Unix socket: {e}"))?;
         let active = Arc::new(ActiveConn {
-            writer: Arc::new(Mutex::new(stream)),
-            open: Arc::new(AtomicBool::new(true)),
+            writer: Mutex::new(stream),
+            open: AtomicBool::new(true),
+            pending: Mutex::new(HashMap::new()),
         });
 
-        let open_flag = Arc::clone(&active.open);
-        let pending_map = Arc::clone(&self.pending);
+        let connection = Arc::clone(&active);
         thread::Builder::new()
             .name("chrome-stream-ipc".to_string())
             .spawn(move || {
                 let mut reader = BufReader::new(reader_stream);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
-                            let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
-                                continue;
-                            };
-                            let Some(id) = msg.get("id").and_then(|v| v.as_u64()) else {
-                                continue;
-                            };
-                            let tx = { pending_map.lock().unwrap().remove(&id) };
-                            if let Some(tx) = tx {
-                                if let Some(err) = msg.get("error").and_then(|v| v.as_str()) {
-                                    let _ = tx.send(Err(err.to_string()));
-                                } else {
-                                    let res =
-                                        msg.get("result").cloned().unwrap_or_else(|| json!({}));
-                                    let _ = tx.send(Ok(res));
-                                }
-                            }
-                        }
+                let mut line = Vec::new();
+                let reason = loop {
+                    match read_bounded_line(&mut reader, &mut line, MAX_RPC_RESPONSE_BYTES) {
+                        Ok(0) => break "Local CDP relay connection closed".to_string(),
+                        Err(err) => break format!("Local CDP relay response read failed: {err}"),
+                        Ok(_) => {}
                     }
-                }
-                open_flag.store(false, Ordering::SeqCst);
-                let drained: Vec<_> = {
-                    let mut map = pending_map.lock().unwrap();
-                    map.drain().map(|(_, tx)| tx).collect()
+                    let Ok(mut msg) = serde_json::from_slice::<Value>(&line) else {
+                        continue;
+                    };
+                    let Some(id) = msg["id"].as_u64() else {
+                        continue;
+                    };
+                    let tx = connection.pending.lock().unwrap().remove(&id);
+                    if let Some(tx) = tx {
+                        let reply = match msg["error"].as_str() {
+                            Some(err) => Err(err.to_string()),
+                            None => Ok(msg["result"].take()),
+                        };
+                        let _ = tx.send(reply);
+                    }
                 };
-                for tx in drained {
-                    let _ = tx.send(Err("Local CDP relay connection closed".to_string()));
+                connection.open.store(false, Ordering::SeqCst);
+                let _ = reader.get_ref().shutdown(Shutdown::Both);
+                let drained = std::mem::take(&mut *connection.pending.lock().unwrap());
+                for tx in drained.into_values() {
+                    let _ = tx.send(Err(reason.clone()));
                 }
             })
             .map_err(|e| format!("Failed spawning IPC reader thread: {e}"))?;
@@ -205,15 +302,15 @@ impl RelayClient {
             }
         }
 
-        if let Ok(stream) = UnixStream::connect(&self.sock_path) {
-            return self.attach_stream(stream);
-        }
-
-        if !self.auto_spawn {
-            return Err(format!(
-                "Unable to connect to relay socket {}",
-                self.sock_path.display()
-            ));
+        match connect_socket(&self.sock_path) {
+            Ok(stream) => return self.attach_stream(stream),
+            Err(err)
+                if self.auto_spawn
+                    && matches!(
+                        err.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) => {}
+            Err(err) => return Err(format!("Unable to connect to relay socket: {err}")),
         }
 
         self.spawn_relay()?;
@@ -224,7 +321,7 @@ impl RelayClient {
             let sleep_ms = if attempt < 12 { 10 } else { 25 };
             attempt += 1;
             thread::sleep(Duration::from_millis(sleep_ms));
-            match UnixStream::connect(&self.sock_path) {
+            match connect_socket(&self.sock_path) {
                 Ok(stream) => return self.attach_stream(stream),
                 Err(e) => last_err = e.to_string(),
             }
@@ -244,18 +341,30 @@ impl RelayBackend for RelayClient {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let (tx, rx) = mpsc::channel();
             {
-                self.pending.lock().unwrap().insert(id, tx);
+                let mut pending = active.pending.lock().unwrap();
+                if !active.open.load(Ordering::SeqCst) {
+                    continue;
+                }
+                pending.insert(id, tx);
             }
 
-            let payload = format!("{}\n", json!({ "id": id, "method": method, "params": params }));
+            let payload = format!(
+                "{}\n",
+                json!({ "id": id, "method": method, "params": params })
+            );
             let write_res = {
                 let mut w = active.writer.lock().unwrap();
-                let _ = w.set_write_timeout(Some(Duration::from_secs(5)));
-                w.write_all(payload.as_bytes()).and_then(|_| w.flush())
+                let result = w
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .and_then(|_| w.write_all(payload.as_bytes()));
+                if result.is_err() {
+                    let _ = w.shutdown(Shutdown::Both);
+                }
+                result
             };
             if let Err(e) = write_res {
                 active.open.store(false, Ordering::SeqCst);
-                self.pending.lock().unwrap().remove(&id);
+                active.pending.lock().unwrap().remove(&id);
                 // Safe single retry on stale/restarted socket before request was delivered.
                 if attempt == 0 {
                     continue;
@@ -266,15 +375,117 @@ impl RelayBackend for RelayClient {
             return match rx.recv_timeout(timeout) {
                 Ok(res) => res,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.pending.lock().unwrap().remove(&id);
+                    active.pending.lock().unwrap().remove(&id);
                     Err(format!("Relay timeout on {method}"))
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.pending.lock().unwrap().remove(&id);
+                    active.pending.lock().unwrap().remove(&id);
                     Err("Local CDP relay connection closed".to_string())
                 }
             };
         }
         Err("Local CDP relay connection closed".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn rejects_untrusted_socket_parents_and_checks_peer_uid() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("csm-ipc-parent-{}", std::process::id()));
+        let shared = root.join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        let unsafe_socket = shared.join("relay.sock");
+        assert_eq!(
+            connect_socket(&unsafe_socket).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let link = root.join("link");
+        symlink(&shared, &link).unwrap();
+        assert!(connect_socket(&link.join("relay.sock")).is_err());
+        fs::remove_dir_all(root).unwrap();
+
+        let (client, server) = UnixStream::pair().unwrap();
+        for side in [&client, &server] {
+            verify_same_user(side).unwrap();
+            assert_eq!(
+                verify_peer_uid(side, effective_uid().wrapping_add(1))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn oversize_relay_replies_fail_with_an_explicit_limit_error() {
+        let mut probe = Cursor::new(vec![b'x'; MAX_PROBE_RESPONSE_BYTES + 1]);
+        let err = read_probe_reply(&mut probe).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("65536-byte limit"));
+
+        let relay = RelayClient::connect_only(PathBuf::new());
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        relay.attach_stream(client).unwrap();
+        let responder = thread::spawn(move || {
+            let mut request = String::new();
+            BufReader::new(&peer).read_line(&mut request).unwrap();
+            peer.write_all(&vec![b'x'; MAX_RPC_RESPONSE_BYTES + 1])
+                .unwrap();
+        });
+        let err = relay
+            .call("poll_frame", json!({}), Duration::from_secs(3))
+            .unwrap_err();
+        assert!(err.contains("16777216-byte limit"));
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn old_reader_eof_cannot_cancel_a_new_connections_pending_call() {
+        fn read_request(stream: &UnixStream) -> Value {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        let relay = RelayClient::connect_only(PathBuf::new());
+        let (old_socket, old_peer) = UnixStream::pair().unwrap();
+        relay.attach_stream(old_socket).unwrap();
+        let old = Arc::clone(&relay);
+        let old_rpc = thread::spawn(move || old.call("status", json!({}), Duration::from_secs(3)));
+        assert_eq!(read_request(&old_peer)["method"], "status");
+
+        let (new_socket, mut new_peer) = UnixStream::pair().unwrap();
+        relay.attach_stream(new_socket).unwrap();
+        let new_rpc = thread::spawn(move || relay.call("ping", json!({}), Duration::from_secs(3)));
+        let req = read_request(&new_peer);
+        assert_eq!(req["method"], "ping");
+        drop(old_peer);
+        assert!(old_rpc
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .contains("connection closed"));
+
+        writeln!(
+            new_peer,
+            "{}",
+            json!({ "id": req["id"], "result": { "ok": true } })
+        )
+        .unwrap();
+        assert_eq!(new_rpc.join().unwrap().unwrap()["ok"], true);
     }
 }

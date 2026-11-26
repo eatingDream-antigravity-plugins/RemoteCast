@@ -4,38 +4,28 @@
 
 ## For AI Agents
 
-- [Agent Skill](skills/chrome-stream/SKILL.md): Complete MCP tool reference (`chrome_stream_stage`, `chrome_stream_connect`, `chrome_stream_disconnect`), Chrome debugging setup, and weak-network workflows (`agentskills.io` compatible).
-- [Contributor & Agent Guide](AGENTS.md): Architecture, Cargo/panel test commands, loopback security boundaries, and plugin packaging rules.
+- [AI & Configuration Guide](docs/ai-guide.md): Complete MCP tool schemas (`chrome_stream_stage`, `chrome_stream_connect`, `chrome_stream_disconnect`, plus app-only tools), Standby vs. Revoke semantics, isolated Remote Chrome mode, weak-net profiles, `CHROME_STREAM_*` env vars, CLI flags, and build steps.
+- [Agent Skill](skills/chrome-stream/SKILL.md): Concise `agentskills.io`-compatible operational workflow for agents.
+- [Contributor & Agent Guide](AGENTS.md): Architecture, Cargo/panel verification gates, loopback security boundaries, and plugin packaging rules.
 - [README (English)](README.md) | [README (简体中文)](README.zh-CN.md)
 
-## Quick Connect (Any MCP Client)
+## Quick Install (macOS / Linux)
 
-Install the prebuilt binary (macOS / Linux):
 ```sh
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chrome-stream-mcp/main/scripts/install.sh | sh
-```
-
-Generic stdio MCP configuration (`mcpServers`):
-```json
-{
-  "mcpServers": {
-    "chrome-stream-mcp": {
-      "command": "~/.gemini/config/plugins/chrome-stream-mcp/bin/chrome-stream-mcp",
-      "args": [
-        "serve",
-        "--data-dir", "~/.gemini/antigravity/plugin_data/chrome-stream-mcp",
-        "--panel-html", "~/.gemini/config/plugins/chrome-stream-mcp/panel/dist/panel.html"
-      ]
-    }
-  }
-}
 ```
 
 ## Public MCP Tools
 
 - `chrome_stream_stage`: Opens the live viewer (`ui://chrome-stream-mcp/stage`) and reports relay/Chrome readiness without auto-connecting.
-- `chrome_stream_connect`: Connects to the persistent `0600` local relay and streams the active tab (`qualityPreset?: "auto" | "ultra" | "low" | "medium" | "high"`, `rttMs?`).
-- `chrome_stream_disconnect`: Stops screencasting and closes the Chrome CDP WebSocket.
+- `chrome_stream_connect`: Connects to local Chrome (`mode?: "auto" | "personal" | "remote"`, `qualityPreset?: "auto" | "ultra" | "low" | "medium" | "high"`, `rttMs?`) and streams the active tab.
+- `chrome_stream_disconnect`: Supports `mode?: "standby" | "revoke"` (default `"revoke"`). `"standby"` pauses at 0 FPS while keeping Chrome authorization alive; `"revoke"` closes the CDP WebSocket.
+
+## App-Only MCP Tools (SEP-1865 UI Hosts)
+
+- `chrome_stream_frame`: Long-polls adaptive motion JPEG or crisp settled WebP stills with 0-byte unchanged deduplication.
+- `chrome_stream_input`: Dispatches coalesced inputs bound to `(targetId, targetEpoch)` with stale-target rejection.
+- `chrome_stream_launch_remote`: Launches or reuses an isolated loopback Remote Chrome (`127.0.0.1`, `0700` profile) without requiring local Allow confirmation.
 
 ## CLI Subcommands
 

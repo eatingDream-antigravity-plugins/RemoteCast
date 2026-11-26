@@ -24,8 +24,9 @@ pub trait CdpTransport: Send + Sync {
     fn close(&self);
 }
 
-pub type TransportFactory =
-    Arc<dyn Fn(&str, Duration, EventCallback) -> Result<Arc<dyn CdpTransport>, String> + Send + Sync>;
+pub type TransportFactory = Arc<
+    dyn Fn(&str, Duration, EventCallback) -> Result<Arc<dyn CdpTransport>, String> + Send + Sync,
+>;
 
 pub fn default_ws_factory() -> TransportFactory {
     Arc::new(|url, timeout, on_event| {
@@ -55,9 +56,10 @@ impl WsTransport {
             .parse()
             .map_err(|e| format!("Invalid loopback address {addr_str}: {e}"))?;
 
-        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| {
-            format!("Unable to connect to Chrome DevTools WebSocket ({addr_str}): {e}")
-        })?;
+        let mut stream =
+            TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| {
+                format!("Unable to connect to Chrome DevTools WebSocket ({addr_str}): {e}")
+            })?;
         let _ = stream.set_nodelay(true);
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         // Chrome holds the HTTP upgrade response open while waiting for the user's "Allow" click.
@@ -115,7 +117,13 @@ impl WsTransport {
         thread::Builder::new()
             .name("chrome-stream-ws".to_string())
             .spawn(move || {
-                run_reader_loop(reader_stream, residual, reader_writer, reader_open, on_event);
+                run_reader_loop(
+                    reader_stream,
+                    residual,
+                    reader_writer,
+                    reader_open,
+                    on_event,
+                );
             })
             .map_err(|e| format!("Failed spawning WebSocket reader thread: {e}"))?;
 
@@ -144,12 +152,12 @@ impl CdpTransport for WsTransport {
     }
 
     fn close(&self) {
-        if self.open.swap(false, Ordering::SeqCst) {
-            if let Ok(mut guard) = self.writer.lock() {
-                let _ = write_client_frame(&mut *guard, 0x8, &[]);
-                let _ = guard.shutdown(Shutdown::Both);
-            }
+        let was_open = self.open.swap(false, Ordering::SeqCst);
+        let mut writer = self.writer.lock().unwrap_or_else(|err| err.into_inner());
+        if was_open {
+            let _ = write_client_frame(&mut *writer, 0x8, &[]);
         }
+        let _ = writer.shutdown(Shutdown::Both);
     }
 }
 
@@ -181,7 +189,9 @@ fn verify_handshake_response(headers: &str, sec_key: &str) -> Result<(), String>
     let mut lines = headers.lines();
     let status = lines.next().unwrap_or("");
     if !status.contains(" 101 ") && !status.ends_with(" 101") {
-        return Err(format!("Expected HTTP 101 Switching Protocols, got: {status}"));
+        return Err(format!(
+            "Expected HTTP 101 Switching Protocols, got: {status}"
+        ));
     }
 
     let expected_accept = expected_ws_accept(sec_key);
@@ -211,8 +221,7 @@ pub fn expected_ws_accept(sec_key: &str) -> String {
 
 fn write_client_frame<W: Write>(writer: &mut W, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
     let mut mask = [0u8; 4];
-    getrandom::fill(&mut mask)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("CSPRNG failed: {e}")))?;
+    getrandom::fill(&mut mask).map_err(|e| std::io::Error::other(format!("CSPRNG failed: {e}")))?;
 
     let len = payload.len();
     let mut header = Vec::with_capacity(14);
@@ -384,20 +393,18 @@ fn run_reader_loop(
                     frag_buf.extend_from_slice(&frame.payload);
                 }
             }
-            0x0 => {
-                // Continuation frame
-                if frag_opcode.is_some() {
-                    if frag_buf.len().saturating_add(frame.payload.len()) > MAX_WS_MESSAGE_BYTES {
-                        break;
-                    }
-                    frag_buf.extend_from_slice(&frame.payload);
-                    if frame.fin {
-                        let op = frag_opcode.take();
-                        let bytes = std::mem::take(&mut frag_buf);
-                        if op == Some(0x1) {
-                            if let Ok(text) = String::from_utf8(bytes) {
-                                on_event(TransportEvent::Text(text));
-                            }
+            // Continuation frame
+            0x0 if frag_opcode.is_some() => {
+                if frag_buf.len().saturating_add(frame.payload.len()) > MAX_WS_MESSAGE_BYTES {
+                    break;
+                }
+                frag_buf.extend_from_slice(&frame.payload);
+                if frame.fin {
+                    let op = frag_opcode.take();
+                    let bytes = std::mem::take(&mut frag_buf);
+                    if op == Some(0x1) {
+                        if let Ok(text) = String::from_utf8(bytes) {
+                            on_event(TransportEvent::Text(text));
                         }
                     }
                 }
@@ -415,6 +422,44 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn close_shuts_down_read_side_after_a_websocket_write_error() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        // A connected socket pair supplies real write and shutdown behavior without a listener.
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let stream = TcpStream::from(OwnedFd::from(stream));
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let transport = WsTransport {
+            writer: Arc::new(Mutex::new(stream)),
+            open: Arc::new(AtomicBool::new(true)),
+        };
+        // Preserve the read side while causing a real write failure.
+        transport
+            .writer
+            .lock()
+            .unwrap()
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        assert!(transport.send_text("write fails").is_err());
+        assert!(!transport.is_open());
+        let mut read_side = transport.writer.lock().unwrap().try_clone().unwrap();
+        read_side
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        transport.close();
+        transport.close();
+
+        // The local read must finish even while the peer stays open.
+        let _ = peer.write_all(b"new bytes");
+        let result = read_side.read(&mut [0]);
+        assert!(
+            matches!(result, Ok(0))
+                || result.is_err_and(|err| err.kind() == std::io::ErrorKind::NotConnected)
+        );
+    }
 
     fn write_server_frame(stream: &mut TcpStream, fin: bool, opcode: u8, payload: &[u8]) {
         let mut head = Vec::new();
