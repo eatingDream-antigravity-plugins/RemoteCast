@@ -64,7 +64,7 @@ impl InputDispatcher {
                 }));
             }
 
-            if matches!(action, "resume" | "new_tab" | "close_tab" | "switch_tab") {
+            if matches!(action, "resume" | "new_tab" | "switch_tab") {
                 was_idle_paused |= client.capture.lock().unwrap().notify_activity();
             }
             if action == "resume" {
@@ -80,7 +80,11 @@ impl InputDispatcher {
 
             if action == "close_tab" {
                 let tid = ev.target_id.as_deref().or(params.target_id.as_deref());
-                let res = client.close_tab(tid, None)?;
+                let mut res = client.close_tab(tid, batch_epoch, None)?;
+                if res["ok"] == false {
+                    res["serverMs"] = json!(t_start.elapsed().as_millis() as u64);
+                    return Ok(res);
+                }
                 if let Some(arr) = res.get("tabs") {
                     if let Ok(parsed) = serde_json::from_value::<Vec<TabInfo>>(arr.clone()) {
                         latest_tabs = Some(parsed);
@@ -483,7 +487,11 @@ impl InputDispatcher {
                 let tabs = client.tabs.lock().unwrap();
                 let still_active = tabs.tab_epoch == expected_epoch
                     && tabs.active_target_id.as_deref() == Some(&tid);
-                client.capture.lock().unwrap().finish_input(still_active);
+                client
+                    .capture
+                    .lock()
+                    .unwrap()
+                    .finish_input(still_active && step_res.is_ok());
             }
             client.notify_frame_waiters();
 
@@ -568,7 +576,6 @@ impl InputDispatcher {
     }
 
     fn disconnect(client: &Arc<CdpClient>, started_at: Instant) -> Value {
-        client.stop_screencast();
         client.disconnect();
         json!({
             "ok": true,
@@ -605,7 +612,11 @@ impl InputDispatcher {
         Ok(())
     }
 
-    fn stale_target(client: &Arc<CdpClient>, reason: &str, started_at: Instant) -> Value {
+    pub(crate) fn stale_target(
+        client: &Arc<CdpClient>,
+        reason: &str,
+        started_at: Instant,
+    ) -> Value {
         let _ = client.list_tabs(false);
         let (active, epoch, tabs, dialog, pause_epoch, paused) = {
             let state = client.tabs.lock().unwrap();
@@ -623,7 +634,7 @@ impl InputDispatcher {
             "staleTarget": true,
             "needsRefresh": true,
             "recoverable": true,
-            "connected": true,
+            "connected": client.is_connected(),
             "error": format!("{reason}. Refresh the panel before sending input again."),
             "activeTargetId": active,
             "epoch": epoch,

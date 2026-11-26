@@ -61,9 +61,15 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
 
     net.setMode("high");
     assert.equal(net.getEffectiveQuality(), "high");
+
+    // Single severe jitter spike (40, 2000, 40ms) MUST NOT downgrade to low
+    const spikeNet = new AdaptiveBandwidthController("auto");
+    assert.equal(spikeNet.recordSample({ totalMs: 40, serverMs: 0, imageBytes: 10_000, now: 1000 }).effectiveTier, "high");
+    assert.equal(spikeNet.recordSample({ totalMs: 2000, serverMs: 0, imageBytes: 10_000, now: 2000 }).effectiveTier, "high");
+    assert.equal(spikeNet.recordSample({ totalMs: 40, serverMs: 0, imageBytes: 10_000, now: 3000 }).effectiveTier, "high");
   });
 
-  it("coalesces type, scroll, mousemove, repeatable key, switch_tab, and duplicate close_tab", () => {
+  it("coalesces type, scroll, mousemove, repeatable key, switch_tab, and duplicate close_tab only for matching target+epoch", () => {
     const out = coalesceInputEvents([
       { action: "type", text: "h", pressEnter: false },
       { action: "type", text: "i", pressEnter: false },
@@ -87,6 +93,14 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       { action: "switch_tab", targetId: "t2" },
       { action: "close_tab", targetId: "t3" },
     ]);
+
+    const isolated = coalesceInputEvents([
+      { action: "type", text: "a", pressEnter: false, targetId: "t1", targetEpoch: 1 },
+      { action: "type", text: "b", pressEnter: false, targetId: "t1", targetEpoch: 2 },
+      { action: "scroll", x: 1, y: 1, deltaX: 0, deltaY: 50, targetId: "t1", targetEpoch: 2 },
+      { action: "scroll", x: 2, y: 2, deltaX: 0, deltaY: 50, targetId: "t2", targetEpoch: 2 },
+    ]);
+    assert.equal(isolated.length, 4, "events with differing targetId or targetEpoch must never coalesce");
   });
 
   it("enforces stale-frame filtering, optimistic tab close, and background payload state", () => {
@@ -744,21 +758,44 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       const msgHandler = winListeners.get("message")?.[0];
       assert.equal(typeof msgHandler, "function");
 
+      // First handshake fails (bad protocolVersion) -> listener removed -> Retry (#er) re-attaches & succeeds!
       msgHandler({
         source: win.parent,
         data: {
           jsonrpc: "2.0",
           id: initReq.id,
-          result: { hostContext: { theme: "dark" }, hostCapabilities: { serverTools: true } },
+          result: { protocolVersion: "2024-01-01", hostContext: { theme: "dark" }, hostCapabilities: { serverTools: true } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal((winListeners.get("message") || []).length, 0, "failed handshake must remove message listener");
+      assert.equal(els.get("ob").disabled, true, "controls must stay gated before handshake succeeds");
+
+      // Click Retry (#er) to re-run ui/initialize handshake
+      els.get("er").listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const initReq2 = posted.filter((m) => m.method === "ui/initialize").pop();
+      assert.ok(initReq2 && initReq2.id !== initReq.id, "Retry must send a fresh ui/initialize");
+      const msgHandler2 = winListeners.get("message")?.[0];
+      assert.equal(typeof msgHandler2, "function", "Retry must re-attach message listener");
+      msgHandler2({
+        source: win.parent,
+        data: {
+          jsonrpc: "2.0",
+          id: initReq2.id,
+          result: { protocolVersion: "2026-01-26", hostContext: { theme: "dark" }, hostCapabilities: { serverTools: true } },
         },
       });
       await new Promise((r) => setTimeout(r, 15));
+
+      // Verify + New tab button (#nt) is pinned outside [role=tablist] (#tb)
+      assert.equal(els.get("tb").children.includes(els.get("nt")), false, "+ button must live outside scrolling tablist");
 
       const frameCalls = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_frame");
       assert.ok(frameCalls.length >= 1, "panel must start background polling when hidden");
       assert.equal(frameCalls[0].params.arguments.waitMs, 0);
 
-      msgHandler({
+      msgHandler2({
         source: win.parent,
         data: {
           jsonrpc: "2.0",
@@ -784,9 +821,9 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       assert.ok(callsAfterReveal.length >= 2, "ResizeObserver reveal must trigger immediate refresh");
       assert.equal(callsAfterReveal[callsAfterReveal.length - 1].params.arguments.forceRefresh, true);
 
-      // Calibrate fast RTT (50ms -> "high") on the reveal frame response
+      // Calibrate fast RTT (50ms -> "high") and crisp WebP + Remote mode on reveal frame response
       fakeNowMs += 50;
-      msgHandler({
+      msgHandler2({
         source: win.parent,
         data: {
           jsonrpc: "2.0",
@@ -795,6 +832,9 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
             structuredContent: {
               connected: true,
               activeTargetId: "t1",
+              connectionMode: "remote",
+              crisp: true,
+              format: "webp",
               changed: false,
               unchanged: true,
               serverMs: 10,
@@ -804,6 +844,8 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
         },
       });
       await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("qh").hidden, false, "HD cue must surface on crisp WebP");
+      assert.equal(els.get("rm").hidden, false, "Remote chip must surface in remote mode");
 
       // Trigger an input batch (`chrome_stream_input`) with a slow 1200ms response:
       // flIn MUST send targetEpoch AND MUST NOT pollute AdaptiveBandwidthController RTT EWMA!
@@ -813,7 +855,7 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       assert.ok(inCall, "reload click must dispatch chrome_stream_input");
       assert.equal(inCall.params.arguments.targetEpoch, 1, "page input must bind targetEpoch");
       fakeNowMs += 1200;
-      msgHandler({
+      msgHandler2({
         source: win.parent,
         data: {
           jsonrpc: "2.0",
@@ -834,17 +876,35 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       await new Promise((r) => setTimeout(r, 30));
       assert.equal(els.get("sm").textContent, "Remote Profile", "popover mode must reflect remote connectionMode");
 
-      // Standby (#bp) sends pause without calling chrome_stream_disconnect
+      // Standby (#bp) awaits server confirmation; error MUST NOT flip UI to paused!
+      els.get("bp").listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const pauseFailCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").pop();
+      assert.equal(pauseFailCall?.params?.arguments?.events?.[0]?.action, "pause");
+      assert.equal(els.get("bp").getAttribute("aria-pressed"), "false", "Standby must NOT flip optimistically before confirmation");
+      msgHandler2({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: pauseFailCall.id, result: { structuredContent: { ok: false, connected: true, error: "relay busy" } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("bp").getAttribute("aria-pressed"), "false", "failed Standby must keep live state");
+
+      // Confirmed Standby flips UI, then confirmed Wake resumes
       els.get("bp").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
       const pauseCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").pop();
-      assert.equal(pauseCall?.params?.arguments?.events?.[0]?.action, "pause", "header Standby button must pause stream without revoking");
-      // Wake (#bp again) resumes
+      msgHandler2({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: pauseCall.id, result: { structuredContent: { ok: true, connected: true, paused: true, pauseEpoch: 4 } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("bp").getAttribute("aria-pressed"), "true", "confirmed Standby must update UI");
+
       els.get("bp").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
       const resumeCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").pop();
       assert.equal(resumeCall?.params?.arguments?.events?.[0]?.action, "resume");
-      msgHandler({
+      msgHandler2({
         source: win.parent,
         data: { jsonrpc: "2.0", id: resumeCall.id, result: { structuredContent: { ok: true, connected: true, paused: false, pauseEpoch: 5 } } },
       });
@@ -858,17 +918,48 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
         "slow chrome_stream_input RPC must not downgrade frame qualityPreset"
       );
 
-      // Overflow Revoke & Disconnect (#dc) sends mode:"revoke" and offline Launch Remote (#ol) calls chrome_stream_launch_remote
+      // Overflow Revoke & Disconnect (#dc): unconfirmed error MUST keep panel online; confirmed revoke goes offline
       els.get("dc").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
-      const discCall = posted.find((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect");
-      assert.equal(discCall?.params?.arguments?.mode, "revoke");
+      const discFailCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect").pop();
+      assert.equal(discFailCall?.params?.arguments?.mode, "revoke");
+      assert.equal(els.get("vn").hidden, false, "Revoke must NOT go offline optimistically before confirmation");
+      msgHandler2({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: discFailCall.id, result: { structuredContent: { ok: false, unconfirmed: true, error: "relay busy" } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("vn").hidden, false, "unconfirmed Revoke must remain online for retry");
+
+      // Retry Revoke and confirm connected:false -> now goes offline
+      els.get("dc").listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const discOkCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect").pop();
+      msgHandler2({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: discOkCall.id, result: { structuredContent: { ok: true, connected: false } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("vo").hidden, false, "confirmed Revoke must switch to offline view");
+
+      // Connect Personal Chrome (#ob) MUST send explicit mode:"personal"
+      els.get("ob").listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const personalCall = posted.find((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_connect");
+      assert.equal(personalCall?.params?.arguments?.mode, "personal", "Personal Chrome button must send explicit mode:personal");
+      msgHandler2({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: personalCall.id, result: { structuredContent: { connected: false } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Offline Launch Remote (#ol) calls chrome_stream_launch_remote
       els.get("ol").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
       const launchCall = posted.find((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_launch_remote");
       assert.ok(launchCall, "Launch Remote Chrome button must call chrome_stream_launch_remote");
 
-      msgHandler({
+      msgHandler2({
         source: win.parent,
         data: { jsonrpc: "2.0", id: 999, method: "ui/resource-teardown", params: {} },
       });

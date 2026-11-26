@@ -1,4 +1,5 @@
 use crate::cdp::client::{CdpClient, CdpError, JsDialogInfo, CMD_TIMEOUT};
+use crate::cdp::input::InputDispatcher;
 use crate::i18n::current_lang;
 use crate::stream::dedup::hash_tabs;
 use crate::stream::profiles::TabInfo;
@@ -98,8 +99,12 @@ impl TabStateStore {
     }
 
     pub fn record_attach(&mut self, target_id: &str, session_id: &str) {
-        self.sessions
-            .insert(target_id.to_string(), session_id.to_string());
+        if let Some(old) = self
+            .sessions
+            .insert(target_id.to_string(), session_id.to_string())
+        {
+            self.session_to_target.remove(&old);
+        }
         self.session_to_target
             .insert(session_id.to_string(), target_id.to_string());
     }
@@ -181,13 +186,6 @@ impl TabStateStore {
         self.active_target_id
             .as_deref()
             .and_then(|tid| self.dialogs.get(tid))
-            .and_then(|d| serde_json::to_value(d).ok())
-            .unwrap_or(Value::Null)
-    }
-
-    pub fn dialog_value_for(&self, target_id: &str) -> Value {
-        self.dialogs
-            .get(target_id)
             .and_then(|d| serde_json::to_value(d).ok())
             .unwrap_or(Value::Null)
     }
@@ -361,14 +359,15 @@ impl TabStateStore {
         update_active: bool,
     ) -> String {
         let popup_switched = self.popup_switched_target.as_deref();
-        let safe_req =
-            if popup_switched.is_some() && popup_switched == self.active_target_id.as_deref() {
-                self.active_target_id.as_deref()
-            } else {
-                requested_id
-                    .filter(|id| !id.is_empty() && !self.is_recently_closed(id))
-                    .or(self.active_target_id.as_deref())
-            };
+        let safe_req = if !update_active
+            || (popup_switched.is_some() && popup_switched == self.active_target_id.as_deref())
+        {
+            self.active_target_id.as_deref()
+        } else {
+            requested_id
+                .filter(|id| !id.is_empty() && !self.is_recently_closed(id))
+                .or(self.active_target_id.as_deref())
+        };
         let chosen = safe_req
             .and_then(|c| tabs.iter().find(|t| t.target_id == c))
             .map(|t| t.target_id.clone())
@@ -422,14 +421,22 @@ pub(crate) fn list_tabs(client: &Arc<CdpClient>, force: bool) -> Result<Vec<TabI
         return Ok(fresh);
     }
 
-    let res = client.send_cdp("Target.getTargets", json!({}), None, CMD_TIMEOUT)?;
-    let raw = res
-        .get("targetInfos")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    Ok(client.tabs.lock().unwrap().update_cached_tabs(raw))
+    let generation = client.transport_generation();
+    let mut res = client.send_cdp_at_generation(
+        Some(generation),
+        "Target.getTargets",
+        json!({}),
+        None,
+        CMD_TIMEOUT,
+    )?;
+    let raw = match res
+        .as_object_mut()
+        .and_then(|obj| obj.remove("targetInfos"))
+    {
+        Some(Value::Array(tabs)) => tabs,
+        _ => Vec::new(),
+    };
+    client.with_current_tabs(generation, |tabs| tabs.update_cached_tabs(raw))
 }
 
 pub(crate) fn resolve_target_id(
@@ -444,15 +451,15 @@ pub(crate) fn resolve_target_id(
         if update_active {
             client.tabs.lock().unwrap().clear_no_tabs();
             client.capture.lock().unwrap().clear_latest_frame();
-        }
-        let need_stop_sc = client
-            .capture
-            .lock()
-            .unwrap()
-            .screencast_target_id
-            .is_some();
-        if need_stop_sc {
-            client.stop_screencast();
+            if client
+                .capture
+                .lock()
+                .unwrap()
+                .screencast_target_id
+                .is_some()
+            {
+                client.stop_screencast();
+            }
         }
         return Ok((None, Vec::new()));
     }
@@ -481,7 +488,9 @@ pub(crate) fn attach(client: &Arc<CdpClient>, target_id: &str) -> Result<String,
         }
     }
 
-    let res = client.send_cdp(
+    let generation = client.transport_generation();
+    let res = client.send_cdp_at_generation(
+        Some(generation),
         "Target.attachToTarget",
         json!({ "targetId": target_id, "flatten": true }),
         None,
@@ -493,7 +502,13 @@ pub(crate) fn attach(client: &Arc<CdpClient>, target_id: &str) -> Result<String,
         .ok_or_else(|| CdpError::new("Target.attachToTarget missing sessionId"))?
         .to_string();
 
-    client.tabs.lock().unwrap().record_attach(target_id, &sid);
+    client.with_current_tabs(generation, |tabs| {
+        if tabs.is_recently_closed(target_id) {
+            return Err(CdpError::new("No target with given id found"));
+        }
+        tabs.record_attach(target_id, &sid);
+        Ok(())
+    })??;
     // Enable Page domain non-blockingly so JS modal dialogs (`alert`/`confirm`/`prompt`/`beforeunload`)
     // fire `Page.javascriptDialogOpening` instead of silently freezing the tab.
     client.send_no_wait("Page.enable", json!({}), Some(&sid));
@@ -503,9 +518,22 @@ pub(crate) fn attach(client: &Arc<CdpClient>, target_id: &str) -> Result<String,
 pub(crate) fn close_tab(
     client: &Arc<CdpClient>,
     target_id_to_close: Option<&str>,
+    target_epoch: Option<u64>,
     quality_preset: Option<&str>,
 ) -> Result<Value, CdpError> {
+    let started_at = Instant::now();
+    let stale = |reason| InputDispatcher::stale_target(client, reason, started_at);
+    let Some(close_id) = target_id_to_close.filter(|id| !id.is_empty()) else {
+        return Ok(stale("Closing a tab requires an explicit targetId"));
+    };
+    let expected_epoch = target_epoch.unwrap_or_else(|| client.tab_epoch());
+    if expected_epoch != client.tab_epoch() {
+        return Ok(stale("The tab epoch changed"));
+    }
     if !client.is_connected() {
+        if target_epoch.is_some() {
+            return Ok(stale("The tab to close is missing or closed"));
+        }
         return Ok(json!({
             "ok": false,
             "connected": false,
@@ -515,67 +543,72 @@ pub(crate) fn close_tab(
             "locale": current_lang().as_str(),
         }));
     }
-    client.capture.lock().unwrap().notify_activity();
-
-    let before_tabs = list_tabs(client, true)?;
-    let close_id = target_id_to_close
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .or_else(|| client.active_target_id());
-
-    let close_idx = close_id
-        .as_deref()
-        .and_then(|id| before_tabs.iter().position(|t| t.target_id == id));
-    let was_active = close_id.as_deref().is_some()
-        && client.active_target_id().as_deref() == close_id.as_deref();
-
-    if let Some(cid) = close_id.as_deref() {
-        client.tabs.lock().unwrap().mark_recently_closed(cid);
-        let need_stop_sc = client
-            .capture
-            .lock()
-            .unwrap()
-            .screencast_target_id
-            .as_deref()
-            == Some(cid);
-        if need_stop_sc {
-            client.stop_screencast();
+    // Validate once before the refresh and again against the tab set at reservation.
+    let generation = client.transport_generation();
+    let before_tabs = match list_tabs(client, true) {
+        Err(_) if client.tab_epoch() != expected_epoch => {
+            return Ok(stale("The tab epoch changed"))
         }
+        tabs => tabs?,
+    };
+    let Some(close_idx) = before_tabs.iter().position(|tab| tab.target_id == close_id) else {
+        return Ok(stale("The tab to close is missing or closed"));
+    };
+    let reservation = client.with_current_tabs(generation, |tabs| {
+        if tabs.tab_epoch != expected_epoch {
+            return Err("The tab epoch changed");
+        }
+        if tabs.is_recently_closed(close_id)
+            || !tabs.cached_tabs.iter().any(|tab| tab.target_id == close_id)
         {
-            let mut ts = client.tabs.lock().unwrap();
-            ts.evict_session(cid);
-            if was_active {
-                ts.active_target_id = None;
-                ts.tab_epoch += 1;
-            }
+            return Err("The tab to close is missing or closed");
         }
-        {
-            let mut cap = client.capture.lock().unwrap();
-            cap.clear_screencast_if_target(cid);
-            cap.clear_frame_if_target(cid);
-        }
+        tabs.mark_recently_closed(close_id);
+        Ok(tabs.active_target_id.as_deref() == Some(close_id))
+    });
+    let was_active = match reservation {
+        Ok(Ok(was_active)) => was_active,
+        Ok(Err(reason)) => return Ok(stale(reason)),
+        Err(_) => return Ok(stale("The Chrome connection changed")),
+    };
 
-        // Close in Chrome only if target actually existed (prevents double-close hitting innocent tabs!)
-        if close_idx.is_some() {
-            if let Err(err) = client.send_cdp(
-                "Target.closeTarget",
-                json!({ "targetId": cid }),
-                None,
-                Duration::from_secs(5),
-            ) {
-                if !err.is_target_gone() {
-                    return Err(err);
-                }
+    let result = client
+        .send_cdp_at_generation(
+            Some(generation),
+            "Target.closeTarget",
+            json!({ "targetId": close_id }),
+            None,
+            Duration::from_secs(5),
+        )
+        .and_then(|reply| {
+            if reply["success"] == false {
+                Err(CdpError::new("Chrome did not close the tab"))
+            } else {
+                Ok(reply)
             }
+        });
+    if let Err(err) = result {
+        if !err.is_target_gone() {
+            let _ = client.with_current_tabs(generation, |tabs| {
+                tabs.recently_closed.remove(close_id);
+                tabs.invalidate_tab_cache();
+            });
+            return Err(err);
         }
     }
+    client.with_current_tabs(generation, |tabs| {
+        tabs.mark_target_gone(close_id, true);
+        let mut capture = client.capture.lock().unwrap();
+        capture.clear_screencast_if_target(close_id);
+        capture.clear_frame_if_target(close_id);
+    })?;
+    client.capture.lock().unwrap().notify_activity();
 
     // Refresh surviving targets (retry briefly while Chrome tears down renderer)
     let mut remaining = Vec::new();
-    for attempt in 0..4 {
-        client.tabs.lock().unwrap().invalidate_tab_cache();
+    for attempt in 0..2 {
         remaining = list_tabs(client, true)?;
-        if !remaining.is_empty() || attempt >= 1 {
+        if !remaining.is_empty() || attempt == 1 {
             break;
         }
         thread::sleep(Duration::from_millis(35));
@@ -583,29 +616,33 @@ pub(crate) fn close_tab(
 
     if remaining.is_empty() {
         // Respect closing the last tab / Chrome window without spawning `about:blank`.
-        client.stop_screencast();
-        client.tabs.lock().unwrap().clear_no_tabs();
-        client.capture.lock().unwrap().clear_latest_frame();
+        client.with_current_tabs(generation, |tabs| {
+            if tabs.active_target_id.is_none() && tabs.cached_tabs.is_empty() {
+                tabs.clear_no_tabs();
+                client.capture.lock().unwrap().clear_latest_frame();
+            }
+        })?;
     } else {
-        let cur_active = client.active_target_id();
-        let active_still_valid = cur_active
-            .as_deref()
-            .map(|id| remaining.iter().any(|t| t.target_id == id))
-            .unwrap_or(false);
-        if was_active || !active_still_valid {
-            let next_idx = close_idx
-                .map(|idx| idx.min(remaining.len() - 1))
-                .unwrap_or(0);
-            let next_tid = remaining[next_idx].target_id.clone();
-            let _ = client.send_cdp(
+        let (active, epoch) = client.with_current_tabs(generation, |tabs| {
+            (tabs.active_target_id.clone(), tabs.tab_epoch)
+        })?;
+        let active_still_valid = remaining
+            .iter()
+            .any(|tab| active.as_deref() == Some(&tab.target_id));
+        if !active_still_valid || (was_active && epoch == expected_epoch + 1) {
+            let next_tid = &remaining[close_idx.min(remaining.len() - 1)].target_id;
+            let activation = client.send_cdp_at_generation(
+                Some(generation),
                 "Target.activateTarget",
                 json!({ "targetId": next_tid }),
                 None,
                 Duration::from_secs(3),
             );
-            let mut ts = client.tabs.lock().unwrap();
-            ts.active_target_id = Some(next_tid);
-            ts.tab_epoch += 1;
+            client.with_current_tabs(generation, |tabs| {
+                if activation.is_ok() && tabs.tab_epoch == epoch {
+                    tabs.set_active_target(next_tid, true);
+                }
+            })?;
         }
     }
 
@@ -630,9 +667,14 @@ pub(crate) fn close_tab(
     }
 
     client.notify_frame_waiters();
-    let (epoch, pause_epoch, dialog) = {
+    let (active_tid, epoch, pause_epoch, dialog) = {
         let ts = client.tabs.lock().unwrap();
-        (ts.tab_epoch, ts.pause_epoch, ts.active_dialog_value())
+        (
+            ts.active_target_id.clone(),
+            ts.tab_epoch,
+            ts.pause_epoch,
+            ts.active_dialog_value(),
+        )
     };
     let seq = client.capture.lock().unwrap().frame_seq;
     let t_hash = hash_tabs(&remaining);
@@ -643,7 +685,7 @@ pub(crate) fn close_tab(
         "paused": paused,
         "pauseEpoch": pause_epoch,
         "screencastPausedIdle": false,
-        "noTabs": remaining.is_empty(),
+        "noTabs": remaining.is_empty() && active_tid.is_none(),
         "activeTargetId": active_tid,
         "dialog": dialog,
         "epoch": epoch,

@@ -1,13 +1,18 @@
 use crate::cdp::client::{CdpClient, InputBatchParams, InputEvent, PollFrameParams};
 use crate::config::{Config, RELAY_VERSION};
-use crate::relay::ipc::probe_relay_ping;
+use crate::local_io::{
+    create_private_directory, effective_uid, owned_directory, read_bounded_line, socket_parent,
+};
+use crate::relay::ipc::{probe_relay_ping, verify_same_user};
 use crate::stream::dedup::hash_tabs;
 use serde_json::{json, Value};
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(test)]
+use std::io::BufRead;
+use std::io::{self, BufReader, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -85,6 +90,7 @@ struct OwnedPath<'a> {
 }
 
 fn remove_matching_path(path: &Path, expected: &Metadata) -> io::Result<()> {
+    owned_directory(socket_parent(path), false)?;
     match fs::symlink_metadata(path) {
         Ok(current)
             if current.file_type() == expected.file_type()
@@ -127,9 +133,8 @@ pub fn run_relay_daemon(cfg: &Config) -> Result<(), String> {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
-    fs::create_dir_all(&cfg.data_dir)
-        .map_err(|e| format!("Failed creating data dir {}: {e}", cfg.data_dir.display()))?;
-    let _ = fs::set_permissions(&cfg.data_dir, fs::Permissions::from_mode(0o700));
+    create_private_directory(&cfg.data_dir)
+        .map_err(|e| format!("Could not prepare relay data directory: {e}"))?;
 
     let cdp = CdpClient::new_with_candidates(cfg.port_files.clone(), cfg.debug_port);
     match serve_relay_socket(
@@ -143,7 +148,7 @@ pub fn run_relay_daemon(cfg: &Config) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(ServeError::Owned) => {
             let deadline = Instant::now() + Duration::from_secs(1);
-            while probe_relay_ping(&cfg.relay_sock).is_none() && Instant::now() < deadline {
+            while probe_relay_ping(&cfg.relay_sock).is_err() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(40));
             }
             Ok(())
@@ -164,7 +169,10 @@ fn lock_endpoint(sock_path: &Path) -> Result<File, ServeError> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&lock_path)
         .map_err(|err| ServeError::Failed(format!("Failed opening relay ownership lock: {err}")))?;
-    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+    if !file
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.uid() == effective_uid())
+    {
         return Err(ServeError::Failed(
             "Relay ownership lock must be a regular file".into(),
         ));
@@ -186,6 +194,7 @@ fn lock_endpoint(sock_path: &Path) -> Result<File, ServeError> {
 }
 
 fn write_pid_file_safely(path: &Path) -> Option<(OwnedPath<'_>, File)> {
+    owned_directory(socket_parent(path), false).ok()?;
     // Unlink the old entry, then use O_CREAT|O_EXCL to avoid following symlinks.
     let _ = fs::remove_file(path);
     let mut file = OpenOptions::new()
@@ -230,23 +239,24 @@ fn serve_relay_socket_with_limits(
     use_global_signals: bool,
     limits: RelayLimits,
 ) -> Result<(), ServeError> {
-    if let Some(parent) = sock_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .map_err(|err| {
-                ServeError::Failed(format!("Failed creating relay socket directory: {err}"))
-            })?;
-    }
+    owned_directory(socket_parent(sock_path), true).map_err(|err| {
+        ServeError::Failed(format!("Could not prepare relay socket directory: {err}"))
+    })?;
     let _endpoint_lock = lock_endpoint(sock_path)?;
     match fs::symlink_metadata(sock_path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            if probe_relay_ping(sock_path).is_some() {
-                return Err(ServeError::Owned);
+        Ok(metadata) if metadata.file_type().is_socket() && metadata.uid() == effective_uid() => {
+            match probe_relay_ping(sock_path) {
+                Ok(_) => return Err(ServeError::Owned),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                    ) => {}
+                Err(err) => {
+                    return Err(ServeError::Failed(format!(
+                        "Could not verify the existing relay socket: {err}"
+                    )))
+                }
             }
             remove_matching_path(sock_path, &metadata).map_err(|err| {
                 ServeError::Failed(format!("Failed removing stale relay socket: {err}"))
@@ -254,7 +264,7 @@ fn serve_relay_socket_with_limits(
         }
         Ok(_) => {
             return Err(ServeError::Failed(
-                "Relay endpoint exists and is not a Unix socket".into(),
+                "Relay endpoint must be a Unix socket owned by the current user".into(),
             ))
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -265,16 +275,12 @@ fn serve_relay_socket_with_limits(
         }
     }
 
-    let listener = UnixListener::bind(sock_path).map_err(|e| {
-        ServeError::Failed(format!(
-            "Failed binding relay socket {}: {e}",
-            sock_path.display()
-        ))
-    })?;
+    let listener = UnixListener::bind(sock_path)
+        .map_err(|e| ServeError::Failed(format!("Failed binding relay socket: {e}")))?;
     let metadata = fs::symlink_metadata(sock_path).map_err(|err| {
         ServeError::Failed(format!("Failed identifying bound relay socket: {err}"))
     })?;
-    if !metadata.file_type().is_socket() {
+    if !metadata.file_type().is_socket() || metadata.uid() != effective_uid() {
         return Err(ServeError::Failed(
             "Bound relay endpoint is no longer a Unix socket".into(),
         ));
@@ -283,12 +289,8 @@ fn serve_relay_socket_with_limits(
         path: sock_path,
         metadata,
     };
-    fs::set_permissions(sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-        ServeError::Failed(format!(
-            "Failed setting 0600 on {}: {e}",
-            sock_path.display()
-        ))
-    })?;
+    fs::set_permissions(sock_path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| ServeError::Failed(format!("Failed setting 0600 on the relay socket: {e}")))?;
     listener
         .set_nonblocking(true)
         .map_err(|err| ServeError::Failed(format!("Failed configuring relay listener: {err}")))?;
@@ -315,6 +317,9 @@ fn serve_relay_socket_with_limits(
 
         match listener.accept() {
             Ok((mut stream, _)) => {
+                if verify_same_user(&stream).is_err() {
+                    continue;
+                }
                 let Some(slot) = RelaySlot::acquire(&active_clients, limits.clients) else {
                     if stream.set_nonblocking(true).is_ok() {
                         let _ = writeln!(
@@ -399,27 +404,37 @@ fn handle_client_conn(
     let mut line = Vec::new();
 
     loop {
-        line.clear();
-        let read = reader
-            .by_ref()
-            .take(limits.request_bytes as u64 + 1)
-            .read_until(b'\n', &mut line);
-        match read {
-            Ok(0) | Err(_) => break,
+        match read_bounded_line(&mut reader, &mut line, limits.request_bytes) {
+            Ok(0) => break,
             Ok(_) => {}
+            Err(err) => {
+                if err.kind() == io::ErrorKind::InvalidData {
+                    writer.write_response(
+                        json!({ "id": null, "error": "Request exceeds maximum allowed size" }),
+                    );
+                    let _ = reader.get_ref().shutdown(Shutdown::Both);
+                }
+                break;
+            }
         }
-        if line.len() > limits.request_bytes && line.last() != Some(&b'\n') {
-            writer.write_response(
-                json!({ "id": null, "error": "Request exceeds maximum allowed size" }),
-            );
-            let _ = reader.get_ref().shutdown(Shutdown::Both);
-            break;
-        }
-        let Ok(req) = serde_json::from_slice::<Value>(&line) else {
+        let Ok(Value::Object(mut req)) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        let id = req.remove("id").unwrap_or(Value::Null);
+        let params = req.remove("params").unwrap_or(Value::Null);
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         *last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        // The client reader has reserved execution capacity for connection controls.
+        let is_control = |action| matches!(action, "disconnect" | "pause" | "resume");
+        if is_control(method)
+            || (method == "input"
+                && params["events"].as_array().is_some_and(|events| {
+                    events.len() == 1 && events[0]["action"].as_str().is_some_and(is_control)
+                }))
+        {
+            writer.write_response(rpc_response(&cdp, &data_dir, method, params, id));
+            continue;
+        }
         let Some(slot) = RelaySlot::acquire(&in_flight_rpcs, limits.rpcs) else {
             writer.write_response(
                 json!({ "id": id, "error": "Relay busy: too many concurrent requests" }),
@@ -438,11 +453,7 @@ fn handle_client_conn(
             .spawn(move || {
                 let _slot = slot;
                 let method = req.get("method").and_then(Value::as_str).unwrap_or("");
-                let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
-                let response = match dispatch_rpc(&cdp, &data_dir, method, params) {
-                    Ok(result) => json!({ "id": id, "result": result }),
-                    Err(err) => json!({ "id": id, "error": err }),
-                };
+                let response = rpc_response(&cdp, &data_dir, method, params, id);
                 *activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
                 rpc_writer.write_response(response);
             });
@@ -451,6 +462,19 @@ fn handle_client_conn(
                 json!({ "id": failed_id, "error": "Relay busy: unable to start request worker" }),
             );
         }
+    }
+}
+
+fn rpc_response(
+    cdp: &Arc<CdpClient>,
+    data_dir: &Path,
+    method: &str,
+    params: Value,
+    id: Value,
+) -> Value {
+    match dispatch_rpc(cdp, data_dir, method, params) {
+        Ok(result) => json!({ "id": id, "result": result }),
+        Err(err) => json!({ "id": id, "error": err }),
     }
 }
 
@@ -547,9 +571,7 @@ fn dispatch_rpc(
             let url = params.get("url").and_then(|v| v.as_str()).map(String::from);
 
             match action {
-                "close" => cdp
-                    .close_tab(target_id.as_deref(), None)
-                    .map_err(|e| e.message),
+                "close" => close_requested_tab(cdp, &params),
                 "switch" => cdp
                     .dispatch_input_batch(InputBatchParams {
                         target_id: target_id.clone(),
@@ -632,28 +654,19 @@ fn dispatch_rpc(
             })
             .map_err(|e| e.message)
         }
-        "close_tab" => {
-            let tid = params.get("targetId").and_then(|v| v.as_str());
-            let qp = params.get("qualityPreset").and_then(|v| v.as_str());
-            cdp.close_tab(tid, qp).map_err(|e| e.message)
-        }
-        "pause" => {
-            cdp.pause();
+        "close_tab" => close_requested_tab(cdp, &params),
+        "pause" | "resume" => {
+            if method == "pause" {
+                cdp.pause();
+            } else {
+                cdp.resume();
+            }
+            let (connected, paused, pause_epoch) = cdp.pause_status();
             Ok(json!({
                 "ok": true,
-                "connected": cdp.is_connected(),
-                "paused": true,
-                "pauseEpoch": cdp.pause_epoch(),
-                "portFile": cdp.public_port_file(),
-            }))
-        }
-        "resume" => {
-            cdp.resume();
-            Ok(json!({
-                "ok": true,
-                "connected": cdp.is_connected(),
-                "paused": false,
-                "pauseEpoch": cdp.pause_epoch(),
+                "connected": connected,
+                "paused": paused,
+                "pauseEpoch": pause_epoch,
                 "portFile": cdp.public_port_file(),
             }))
         }
@@ -663,21 +676,18 @@ fn dispatch_rpc(
                 .map_or("revoke", |mode| mode.as_str().unwrap_or(""));
             match mode {
                 "standby" => cdp.pause(),
-                "revoke" => {
-                    cdp.stop_screencast();
-                    cdp.disconnect();
-                }
+                "revoke" => cdp.disconnect(),
                 _ => return Err("Invalid disconnect mode. Expected standby or revoke.".into()),
             }
-            let standby = mode == "standby";
+            let (connected, paused, pause_epoch) = cdp.pause_status();
             Ok(json!({
                 "ok": true,
-                "connected": cdp.is_connected(),
+                "connected": connected,
                 "connectionMode": cdp.connection_mode(),
-                "paused": standby,
-                "standby": standby,
+                "paused": paused,
+                "standby": mode == "standby" && paused,
                 "mode": mode,
-                "pauseEpoch": cdp.pause_epoch(),
+                "pauseEpoch": pause_epoch,
                 "screencastPausedIdle": false,
                 "portFile": cdp.public_port_file(),
                 "locale": crate::i18n::current_lang().as_str(),
@@ -685,6 +695,17 @@ fn dispatch_rpc(
         }
         other => Err(format!("Unknown relay method: {other}")),
     }
+}
+
+fn close_requested_tab(cdp: &Arc<CdpClient>, params: &Value) -> Result<Value, String> {
+    let target_id = params["targetId"].as_str();
+    let epoch = match &params["targetEpoch"] {
+        Value::Null => None,
+        value => Some(value.as_u64().ok_or("Invalid targetEpoch for close_tab")?),
+    };
+    let quality = params["qualityPreset"].as_str();
+    cdp.close_tab(target_id, epoch, quality)
+        .map_err(|err| err.message)
 }
 
 #[cfg(test)]
@@ -738,7 +759,7 @@ mod tests {
     impl TestEndpoint {
         fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let dir = std::env::temp_dir().join(format!(
+            let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
                 "csm-relay-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
@@ -917,19 +938,15 @@ mod tests {
         let endpoint = TestEndpoint::new();
         let personal = TcpListener::bind("127.0.0.1:0").unwrap();
         let port_file = endpoint.dir.join("DevToolsActivePort");
-        fs::write(
-            &port_file,
-            format!(
-                "{}\n/devtools/browser/personal\n",
-                personal.local_addr().unwrap().port()
-            ),
-        )
-        .unwrap();
-        // If discovery fails, make profile preparation fail before any process can be spawned.
         let remote_profile = endpoint.dir.join("remote-profile");
-        fs::write(&remote_profile, "mock profile").unwrap();
+        fs::create_dir(&remote_profile).unwrap();
         let remote = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = remote.local_addr().unwrap().port();
+        fs::write(
+            remote_profile.join("DevToolsActivePort"),
+            format!("{port}\n/devtools/browser/remote\n"),
+        )
+        .unwrap();
         let url = format!("ws://127.0.0.1:{port}/devtools/browser/remote");
         let served_url = url.clone();
         let responder = thread::spawn(move || {
@@ -957,7 +974,7 @@ mod tests {
         });
         let (dialed, urls) = mpsc::channel();
         let cdp = CdpClient::with_factory(
-            port_file,
+            port_file.clone(),
             port,
             None,
             Arc::new(move |endpoint, _, on_event| {
@@ -966,6 +983,16 @@ mod tests {
             }),
             false,
         );
+        assert!(cdp.ensure_connected_with_mode("personal").is_err());
+        assert!(urls.try_recv().is_err());
+        fs::write(
+            &port_file,
+            format!(
+                "{}\n/devtools/browser/personal\n",
+                personal.local_addr().unwrap().port()
+            ),
+        )
+        .unwrap();
         let personal = dispatch_rpc(
             &cdp,
             &endpoint.dir,
@@ -988,7 +1015,6 @@ mod tests {
         assert_eq!(launched["activeTargetId"], "t1");
         assert_eq!(launched["connected"], true);
         assert_eq!(urls.recv().unwrap(), url);
-        assert_eq!(fs::read_to_string(remote_profile).unwrap(), "mock profile");
         assert_eq!(cdp.status_snapshot(1, "test")["connectionMode"], "remote");
         let poll = cdp
             .poll_frame(
@@ -1105,7 +1131,7 @@ mod tests {
         let mut offending = endpoint.open_connection();
         let request = json!({ "id": 1, "method": "ping" }).to_string();
         // A newline is the delimiter, so exactly 64 request bytes are accepted.
-        writeln!(offending.get_mut(), "{request:64}").unwrap();
+        writeln!(offending.get_mut(), "{request:63}").unwrap();
         assert_eq!(read_response(&mut offending)["id"], 1);
         offending.get_mut().write_all(&[b'X'; 65]).unwrap();
         assert_eq!(
@@ -1167,6 +1193,57 @@ mod tests {
         assert_eq!(result["result"]["connected"], true);
         drop(connection);
         server.stop();
+    }
+
+    #[test]
+    fn saturated_rpc_slots_do_not_block_connection_controls_or_revoke() {
+        let cdp = mock_cdp();
+        cdp.ensure_connected().unwrap();
+        let limits = RelayLimits::default();
+        let rpcs = Arc::new(AtomicUsize::new(0));
+        let slots: Vec<_> = (0..limits.rpcs)
+            .map(|_| RelaySlot::acquire(&rpcs, limits.rpcs).unwrap())
+            .collect();
+        let clients = Arc::new(AtomicUsize::new(0));
+        let slot = RelaySlot::acquire(&clients, limits.clients).unwrap();
+        let (server, peer) = UnixStream::pair().unwrap();
+        let worker_cdp = Arc::clone(&cdp);
+        let worker_rpcs = Arc::clone(&rpcs);
+        let worker = thread::spawn(move || {
+            handle_client_conn(
+                server,
+                worker_cdp,
+                Arc::from(Path::new(".")),
+                worker_rpcs,
+                Arc::new(Mutex::new(Instant::now())),
+                limits,
+                slot,
+            );
+        });
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut peer = BufReader::new(peer);
+        send_request(&mut peer, 1, "ping");
+        assert_eq!(
+            read_response(&mut peer)["error"],
+            "Relay busy: too many concurrent requests"
+        );
+        for (id, control, paused, connected) in [
+            (2, "pause", true, true),
+            (3, "resume", false, true),
+            (4, "disconnect", false, false),
+        ] {
+            send_request(&mut peer, id, control);
+            let reply = read_response(&mut peer);
+            assert_eq!(reply["id"], id);
+            assert_eq!(reply["result"]["ok"], true);
+            assert_eq!(reply["result"]["paused"], paused);
+            assert_eq!(reply["result"]["connected"], connected);
+        }
+        assert!(!cdp.is_connected());
+        assert_eq!(rpcs.load(Ordering::SeqCst), 32);
+        drop(slots);
+        drop(peer);
+        worker.join().unwrap();
     }
 
     #[test]

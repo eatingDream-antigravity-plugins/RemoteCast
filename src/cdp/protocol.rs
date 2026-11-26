@@ -152,12 +152,12 @@ impl CdpTransport for WsTransport {
     }
 
     fn close(&self) {
-        if self.open.swap(false, Ordering::SeqCst) {
-            if let Ok(mut guard) = self.writer.lock() {
-                let _ = write_client_frame(&mut *guard, 0x8, &[]);
-                let _ = guard.shutdown(Shutdown::Both);
-            }
+        let was_open = self.open.swap(false, Ordering::SeqCst);
+        let mut writer = self.writer.lock().unwrap_or_else(|err| err.into_inner());
+        if was_open {
+            let _ = write_client_frame(&mut *writer, 0x8, &[]);
         }
+        let _ = writer.shutdown(Shutdown::Both);
     }
 }
 
@@ -422,6 +422,44 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn close_shuts_down_read_side_after_a_websocket_write_error() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        // A connected socket pair supplies real write and shutdown behavior without a listener.
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let stream = TcpStream::from(OwnedFd::from(stream));
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let transport = WsTransport {
+            writer: Arc::new(Mutex::new(stream)),
+            open: Arc::new(AtomicBool::new(true)),
+        };
+        // Preserve the read side while causing a real write failure.
+        transport
+            .writer
+            .lock()
+            .unwrap()
+            .shutdown(Shutdown::Write)
+            .unwrap();
+        assert!(transport.send_text("write fails").is_err());
+        assert!(!transport.is_open());
+        let mut read_side = transport.writer.lock().unwrap().try_clone().unwrap();
+        read_side
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        transport.close();
+        transport.close();
+
+        // The local read must finish even while the peer stays open.
+        let _ = peer.write_all(b"new bytes");
+        let result = read_side.read(&mut [0]);
+        assert!(
+            matches!(result, Ok(0))
+                || result.is_err_and(|err| err.kind() == std::io::ErrorKind::NotConnected)
+        );
+    }
 
     fn write_server_frame(stream: &mut TcpStream, fin: bool, opcode: u8, payload: &[u8]) {
         let mut head = Vec::new();

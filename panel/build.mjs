@@ -22,6 +22,7 @@ function minifyCss(css) {
     .replace(/(^|[:\s(,])0+\.(\d)/g, "$1.$2")
     .replace(/([:\s(,])0(?:px|em|rem)\b/g, "$10")
     .replace(/#([0-9a-fA-F])\1([0-9a-fA-F])\2([0-9a-fA-F])\3\b/g, "#$1$2$3")
+    .replace(/@media\s+\(/g, "@media(")
     .trim();
 }
 
@@ -34,11 +35,11 @@ const KEYWORDS_AND_GLOBALS = new Set(
 
 // Internal class-only properties/methods (ONLY appear after `.` or as class method names, never standalone vars).
 const CLASS_ONLY_PROPS = new Set(
-  "calibrated lastNetRttMs lastKbps fastStreak slowStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
+  "calibrated lastNetRttMs lastKbps fastStreak slowStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown _i _c _o _n _p _up _ci _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
 );
 // Internal root/payload identifiers owned exclusively by our bundle (never present on DOM/MCP payloads).
 const INTERNAL_PROPS = new Set(
-  "effectiveTier ewmaRttMs App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText rttBand parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState resolveStageAspect setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle settled nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive tierVal clamp".split(" ")
+  "LATEST_PROTOCOL_VERSION REP nFin eb effectiveTier ewmaRttMs App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText rttBand parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState resolveStageAspect setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle settled nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive tierVal clamp".split(" ")
 );
 
 function tokenizeJs(src) {
@@ -301,6 +302,21 @@ function minifyJsTokens(src) {
     if (raw[i3]?.v !== "=>") continue;
     raw[idx] = { k: "ws", nl: false };
     raw[i2] = { k: "ws", nl: false };
+  }
+
+  // Fold adjacent double-quoted string concatenations (`"a" + "b"` -> `"ab"`)
+  for (let idx = 0; idx < raw.length; idx++) {
+    const t = raw[idx];
+    if (t.k !== "lit" || t.v[0] !== '"') continue;
+    let p1 = idx + 1;
+    while (p1 < raw.length && raw[p1].k === "ws") p1++;
+    if (raw[p1]?.v !== "+") continue;
+    let p2 = p1 + 1;
+    while (p2 < raw.length && raw[p2].k === "ws") p2++;
+    if (raw[p2]?.k !== "lit" || raw[p2].v[0] !== '"') continue;
+    t.v = t.v.slice(0, -1) + raw[p2].v.slice(1);
+    raw.splice(idx + 1, p2 - idx);
+    idx--;
   }
 
   // Exclude identifiers inside `{ x }` or `{ a, x }` object literals/destructuring,
@@ -606,18 +622,6 @@ function minifyJsTokens(src) {
     if (genNames.length > 600) break;
   }
 
-  // Assign dedicated 1-char property names to CLASS_ONLY_PROPS (separate namespace from variables)
-  const classPropRename = new Map();
-  const classAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
-  const reservedProps = new Set(["mode", "close", "reset", "on", "toString", "valueOf"]);
-  let cpi = 0;
-  for (const [prop] of [...classPropCounts.entries()].sort((a, b) => b[1] * b[0].length - a[1] * a[0].length)) {
-    while (cpi < classAlphabet.length && reservedProps.has(classAlphabet[cpi])) cpi++;
-    if (cpi < classAlphabet.length && classAlphabet[cpi].length < prop.length) {
-      classPropRename.set(prop, classAlphabet[cpi++]);
-    }
-  }
-
   // Sort root identifiers + hoisted globals/strings/long-dot-properties together so highest-gain items get 1-char names first
   const hoistGlobals = new Set("document window Math Date Array Number String Object Boolean encodeURIComponent Promise Error Set Map JSON globalThis requestAnimationFrame cancelAnimationFrame ResizeObserver IntersectionObserver getComputedStyle null undefined".split(" "));
   const globalCounts = new Map();
@@ -629,7 +633,7 @@ function minifyJsTokens(src) {
     const p = prevNonWs(idx), nx = nextNonWs(idx);
     const afterDot = p?.v === "." || p?.v === "?.";
     const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
-    if (t.k === "id" && afterDot && t.v.length >= 5 && !INTERNAL_PROPS.has(t.v) && !CLASS_ONLY_PROPS.has(t.v)) {
+    if (t.k === "id" && afterDot && t.v.length >= 4 && !INTERNAL_PROPS.has(t.v) && !CLASS_ONLY_PROPS.has(t.v)) {
       const pp = prevNonWs(raw.indexOf(p));
       if (pp && pp.v !== "new" && pp.v !== "import" && pp.v !== "super") {
         const quoted = JSON.stringify(t.v);
@@ -663,17 +667,23 @@ function minifyJsTokens(src) {
 
   const strMap = new Map();
   const strDecls = [];
-  const combined = [
-    ...[...rootCounts.entries()].map(([k, cnt]) => ({ k, cnt, gain: (k.length - 1) * cnt, kind: "id" })),
-    ...hoistCandidates.map(([s, cnt, gain, pCnt]) => ({ k: s, cnt, gain, pCnt, kind: "hoist" })),
-  ].sort((a, b) => b.gain - a.gain);
-  let gi = 0;
-  for (const item of combined) {
-    if (gi >= genNames.length) break;
-    const alias = genNames[gi];
+  const oneCharNames = genNames.filter((n) => n.length === 1);
+  const twoCharNames = genNames.filter((n) => n.length > 1);
+  const allItems = [
+    ...[...rootCounts.entries()].map(([k, cnt]) => ({ k, cnt, marginal: cnt, kind: "id" })),
+    ...hoistCandidates.map(([s, cnt, gain, pCnt]) => ({ k: s, cnt, pCnt, marginal: cnt + 1, gain, kind: "hoist" })),
+  ].sort((a, b) => b.marginal - a.marginal);
+
+  let i1 = 0, i2 = 0;
+  for (const item of allItems) {
+    const canUse1 = i1 < oneCharNames.length;
     if (item.kind === "id") {
-      if (alias.length < item.k.length) { rootScope.rename.set(item.k, alias); gi++; }
+      if (item.k.length <= 1) continue;
+      if (canUse1) { rootScope.rename.set(item.k, oneCharNames[i1++]); }
+      else if (item.k.length > 2 && i2 < twoCharNames.length) { rootScope.rename.set(item.k, twoCharNames[i2++]); }
     } else {
+      const alias = canUse1 ? oneCharNames[i1] : twoCharNames[i2];
+      if (!alias) continue;
       const pCnt = item.pCnt || 0;
       const sCnt = item.cnt - pCnt;
       const origLen = item.k === "undefined" ? 6 : item.k.length;
@@ -682,8 +692,25 @@ function minifyJsTokens(src) {
       if (netGain > 0) {
         strMap.set(item.k, alias);
         strDecls.push(item.k === "undefined" ? alias : `${alias}=${item.k}`);
-        gi++;
+        if (canUse1) i1++; else i2++;
       }
+    }
+  }
+
+  // Assign dedicated 1-char property names to CLASS_ONLY_PROPS AFTER rootScope.rename so they NEVER collide with INTERNAL_PROPS
+  const classPropRename = new Map();
+  const classAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
+  const reservedProps = new Set(["mode", "close", "reset", "on", "toString", "valueOf"]);
+  for (const ip of INTERNAL_PROPS) {
+    const ren = rootScope.rename.get(ip);
+    if (ren) reservedProps.add(ren);
+    reservedProps.add(ip);
+  }
+  let cpi = 0;
+  for (const [prop] of [...classPropCounts.entries()].sort((a, b) => b[1] * b[0].length - a[1] * a[0].length)) {
+    while (cpi < classAlphabet.length && reservedProps.has(classAlphabet[cpi])) cpi++;
+    if (cpi < classAlphabet.length && classAlphabet[cpi].length < prop.length) {
+      classPropRename.set(prop, classAlphabet[cpi++]);
     }
   }
 
@@ -965,10 +992,10 @@ const jsBytes = Buffer.byteLength(jsCode, "utf8");
 const cssBytes = Buffer.byteLength(cssCode, "utf8");
 const kb = totalBytes / 1024;
 console.log(`Built ${outHtml} (${totalBytes} B / ${kb.toFixed(1)} KiB; js=${jsBytes} B, css=${cssBytes} B, engine=${engine})`);
-if (totalBytes >= 46_080) {
-  console.error(`ERROR: panel bundle ${totalBytes} B exceeds 46,080 B (45 KiB) hard gate`);
+if (totalBytes > 43_500) {
+  console.error(`ERROR: panel bundle ${totalBytes} B exceeds 43,500 B hard gate`);
   process.exit(1);
 }
-if (totalBytes > 44_000) {
-  console.warn(`WARN: panel bundle ${totalBytes} B exceeds 44,000 B warning threshold`);
+if (totalBytes > 42_500) {
+  console.warn(`WARN: panel bundle ${totalBytes} B exceeds 42,500 B warning threshold`);
 }

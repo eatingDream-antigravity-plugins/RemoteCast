@@ -25,6 +25,10 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
+      - name: Verify deterministic panel build
+        run: |
+          node panel/build.mjs
+          git diff --exit-code panel/dist/panel.html
       - name: Panel tests
         run: node --test panel/net-policy.test.mjs
 

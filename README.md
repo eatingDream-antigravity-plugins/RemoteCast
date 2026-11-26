@@ -18,10 +18,9 @@ English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatin
 
 </div>
 
-## What it is / What it is not
+## Overview
 
-- **What it is**: A native Rust loopback relay and SEP-1865 MCP App that streams your local Google Chrome tabs into Antigravity with interactive click, type, scroll, IME, and tab controls.
-- **What it is not**: A remote desktop server, cloud proxy, or headless scraping engine — traffic stays strictly on localhost (`127.0.0.1` / `::1`) and never auto-dials Chrome on load.
+Chrome Stream is a native Rust relay and SEP-1865 MCP App. It streams local Chrome tabs into Antigravity and supports interactive input and tab controls. Chrome debugging traffic stays on loopback (`127.0.0.1` and `::1`).
 
 ## Features
 
@@ -44,8 +43,8 @@ Reload Antigravity after installation.
 
 ### 2. Connect Chrome
 
-- **Personal Chrome**: Enable remote debugging once at `chrome://inspect/#remote-debugging`, open **Chrome Stream**, click **Connect Personal Chrome**, and click **Allow** once in Chrome. Use **Standby** (not Revoke) when away from your desk so you never need to re-click **Allow**.
-- **Remote Chrome (No Allow)**: Click **Launch Remote Chrome (No Allow)** in the offline card to start a dedicated loopback Chrome profile (`0700` isolated directory) immediately.
+- **Personal Chrome** uses Chrome's `DevToolsActivePort` files exclusively. Enable remote debugging at `chrome://inspect/#remote-debugging`, open **Chrome Stream**, select **Connect Personal Chrome**, and confirm **Allow** in Chrome. Use **Standby** to keep an authorized connection open.
+- **Remote Chrome (No Allow)** launches an isolated profile with `0700` permissions on `127.0.0.1`. It reuses a running browser only when its live debugging endpoint matches the isolated profile. If the port is occupied, set `CHROME_STREAM_DEBUG_PORT` to a free port or use Personal mode.
 
 ## For AI Agents
 
@@ -60,9 +59,10 @@ Point your coding agent directly to the machine-readable guides for complete MCP
 ## Safety & Privacy
 
 - **Loopback-only (`127.0.0.1` / `::1`)**: Rejects non-loopback endpoints; never exposes Chrome debugging ports to a network interface.
-- **User-only `0600` local relay & `0700` remote profile**: Ownership-locked Unix socket and private profile directory protect local sessions against concurrent starts or stale cleanup.
+- **Local access controls** use a `0600` Unix socket, verify the peer user ID, and validate directory ownership and write permissions before using the socket or the `0700` Chrome profile.
 - **Explicit connect & 12 s idle stop**: Opening the stage never auto-dials Chrome; screen capture pauses automatically after 12 seconds of inactivity and wakes on interaction.
-- **Redacted outputs & zero outbound traffic**: Strips local paths, hostnames, and internal WebSocket tokens before returning tool results; the panel enforces `default-src 'none'` with zero external requests.
+- **Sanitized diagnostics**. `chrome-stream-mcp doctor --json` omits local filesystem paths and raw DevTools WebSocket URLs by default.
+- **MCP Apps capability**. The `resources/read` response includes live bootstrap tabs and pixels only after the host negotiates the MCP App MIME type. Other hosts receive static panel HTML.
 
 ## Documentation
 

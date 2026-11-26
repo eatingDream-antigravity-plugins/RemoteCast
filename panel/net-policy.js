@@ -1,21 +1,17 @@
 // Client-side adaptive bandwidth (EWMA + asymmetric hysteresis), input coalescing, locale & epoch helpers.
 const TIERS = ["ultra", "low", "medium", "high"];
-const REP = new Set("Backspace Delete ArrowUp ArrowDown ArrowLeft ArrowRight PageUp PageDown Tab".split(" "));
-const TERR = /no target with given id|target closed|session with given id not found|inspected target navigated or closed|target.*destroyed/i;
-
-export const isTargetErrorText = (m) => TERR.test(String(m || ""));
+export const REP = new Set("Backspace Delete ArrowUp ArrowDown ArrowLeft ArrowRight PageUp PageDown Tab".split(" "));
+export const isTargetErrorText = (m) => /no target with given id|target closed|session with given id not found|inspected target navigated or closed|target.*destroyed/i.test(String(m || ""));
 export const rttBand = (ms) => { const n = Number(ms); return !Number.isFinite(n) || n <= 0 ? "ok" : n >= 200 ? "er" : n >= 80 ? "wn" : "ok"; };
 export const parsePanelLocaleTag = (raw) => {
   const s = String(raw || "").trim().toLowerCase().replace(/_/g, "-");
-  return !s || s === "c" || s === "posix" || s === "utf-8" ? null : s === "zh" || s.startsWith("zh-") || s.includes("-hans") || s.includes("-hant") ? "zh-CN" : "en";
+  return !s || /^(c|posix|utf-8)$/.test(s) ? null : /^zh($|-)|-(hans|hant)/.test(s) ? "zh-CN" : "en";
 };
-export const resolvePanelLang = ({ saved = "", hostLocale = "", navLang = "", bootLocale = "" } = {}) => {
-  for (const c of [saved, hostLocale, navLang, bootLocale]) { const r = parsePanelLocaleTag(c); if (r) return r; }
-  return "en";
-};
+export const resolvePanelLang = ({ saved = "", hostLocale = "", navLang = "", bootLocale = "" } = {}) =>
+  [saved, hostLocale, navLang, bootLocale].map(parsePanelLocaleTag).find(Boolean) || "en";
 
 const tierVal = (r, u, l, m, h) => (r >= 750 ? u : r >= 350 ? l : r >= 140 ? m : h);
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), nFin = Number.isFinite, eb = (c) => (c > 0 ? Math.min(4, 1 << Math.min(c, 2)) : 1);
 
 export class AdaptiveBandwidthController {
   constructor(m = "auto") {
@@ -23,27 +19,27 @@ export class AdaptiveBandwidthController {
     s.calibrated = false; s.ewmaRttMs = s.lastNetRttMs = s.lastKbps = s.fastStreak = s.slowStreak = s.lastUpgradeAt = 0;
   }
   setMode(m) {
-    const s = this; s.mode = m === "auto" || TIERS.includes(m) ? m : "auto"; s.fastStreak = s.slowStreak = 0;
-    s.effectiveTier = s.mode !== "auto" ? s.mode : s.calibrated ? s._t(s.ewmaRttMs, 0, 0) : "low";
+    this.mode = m === "auto" || TIERS.includes(m) ? m : "auto"; this.fastStreak = this.slowStreak = 0;
+    this.effectiveTier = this.mode !== "auto" ? this.mode : this.calibrated ? this._t(this.ewmaRttMs, 0, 0) : "low";
   }
   getEffectiveQuality() { return this.mode === "auto" ? this.effectiveTier : this.mode; }
   _t(r, b, n) { return r >= 750 || (b >= 14000 && n >= 850) ? "ultra" : r >= 350 || (b >= 14000 && n >= 420) ? "low" : r >= 140 ? "medium" : "high"; }
-  recordSample({ totalMs, serverMs = 0, imageBytes = 0, now = Date.now() }) {
-    const s = this, net = Math.max(1, Math.round((Number(totalMs) || 0) - Math.max(0, Number(serverMs) || 0)));
+  recordSample({ totalMs: tm, serverMs: sm = 0, imageBytes: ib = 0, now: nw = Date.now() }) {
+    const s = this, net = Math.max(1, Math.round((Number(tm) || 0) - Math.max(0, Number(sm) || 0)));
     s.lastNetRttMs = net;
     const r = !s.calibrated || s.ewmaRttMs <= 0 ? net : Math.round(s.ewmaRttMs * 0.75 + net * 0.25);
     s.ewmaRttMs = r;
-    if (imageBytes > 1000 && net > 0) s.lastKbps = Math.round((imageBytes * 8) / net);
+    if (ib > 1000 && net > 0) s.lastKbps = Math.round((ib * 8) / net);
     const prev = s.effectiveTier;
     if (s.mode === "auto") {
-      const want = s._t(r, imageBytes, net);
-      if (!s.calibrated) { s.calibrated = true; s.effectiveTier = want; s.fastStreak = s.slowStreak = 0; s.lastUpgradeAt = now; }
+      const want = s._t(r, ib, net);
+      if (!s.calibrated) { s.calibrated = true; s.effectiveTier = want; s.fastStreak = s.slowStreak = 0; s.lastUpgradeAt = nw; }
       else {
-        const ci = TIERS.indexOf(prev), di = TIERS.indexOf(want);
-        if (di < ci) { s.fastStreak = 0; if (++s.slowStreak >= 2) { s.effectiveTier = want; s.slowStreak = 0; } }
-        else if (di > ci && r < (prev === "ultra" ? 520 : prev === "low" ? 240 : 100)) {
+        const ci = TIERS.indexOf(prev), di = TIERS.indexOf(want), ri = TIERS.indexOf(s._t(net, ib, net)), up = prev === "ultra" ? 520 : prev === "low" ? 240 : 100;
+        if (di < ci && ri < ci) { s.fastStreak = 0; if (++s.slowStreak >= 2) { s.effectiveTier = TIERS[Math.max(di, ri)]; s.slowStreak = 0; } }
+        else if (di > ci && ri > ci && r < up && net < up) {
           s.slowStreak = 0;
-          if (++s.fastStreak >= 3 && now - s.lastUpgradeAt >= 4000) { s.effectiveTier = TIERS[ci + 1]; s.fastStreak = 0; s.lastUpgradeAt = now; }
+          if (++s.fastStreak >= 3 && nw - s.lastUpgradeAt >= 4000) { s.effectiveTier = TIERS[ci + 1]; s.fastStreak = 0; s.lastUpgradeAt = nw; }
         } else s.fastStreak = s.slowStreak = 0;
       }
     } else s.calibrated = true;
@@ -51,20 +47,18 @@ export class AdaptiveBandwidthController {
     return { netRttMs: net, ewmaRttMs: r, effectiveTier, tierChanged: prev !== effectiveTier };
   }
   getNetworkGrade() { return !this.calibrated ? "good" : this.ewmaRttMs >= 350 ? "weak" : this.ewmaRttMs >= 140 ? "mid" : "good"; }
-  computePollTiming({ idleMs = 0, inputBusy = false, screencastIdle = false, hidden = false, errCount = 0, settled = false } = {}) {
-    const r = this.ewmaRttMs, mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1, p = (waitMs, nextDelayMs) => ({ waitMs, nextDelayMs });
-    if (hidden) return p(0, Math.min(30000, tierVal(r, 12000, 8000, 4000, 2000) * mult));
-    if (screencastIdle && !inputBusy) return p(0, Math.min(20000, 4000 * mult));
-    if (inputBusy) return p(r > 350 ? 220 : 140, clamp(Math.round(r * 0.3), 75, 220));
-    if (errCount > 0) return p(0, Math.min(16000, (idleMs < 3500 ? 1000 : idleMs < 12000 ? 1500 : 2000) * mult));
-    if (settled && idleMs >= 1000) return p(1400, r > 700 ? 600 : r > 350 ? 350 : 180);
-    if (idleMs < 3500) return p(r > 350 ? 280 : 180, r > 700 ? 300 : r > 350 ? 160 : 50);
-    if (idleMs < 12000) return p(1350, r > 700 ? 800 : r > 350 ? 450 : 240);
-    return p(1400, r > 700 ? 2400 : r > 350 ? 1600 : 1100);
+  computePollTiming({ idleMs: im = 0, inputBusy: ib = false, screencastIdle: si = false, hidden: h = false, errCount: ec = 0, settled: st = false } = {}) {
+    const r = this.ewmaRttMs, m = eb(ec), p = (waitMs, d) => ({ waitMs, nextDelayMs: d });
+    if (h) return p(0, Math.min(30000, tierVal(r, 12000, 8000, 4000, 2000) * m));
+    if (si && !ib) return p(0, Math.min(20000, 4000 * m));
+    if (ib) return p(r > 350 ? 220 : 140, clamp(Math.round(r * 0.3), 75, 220));
+    if (ec > 0) return p(0, Math.min(16000, (im < 3500 ? 1000 : im < 12000 ? 1500 : 2000) * m));
+    const t3 = (a, b, c) => (r > 700 ? a : r > 350 ? b : c);
+    return st && im >= 1000 ? p(1400, t3(600, 350, 180)) : im < 3500 ? p(r > 350 ? 280 : 180, t3(300, 160, 50)) : im < 12000 ? p(1350, t3(800, 450, 240)) : p(1400, t3(2400, 1600, 1100));
   }
-  computeOfflinePollDelay({ hidden = false, errCount = 0 } = {}) {
-    const r = this.ewmaRttMs, mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1;
-    return Math.min(30000, (hidden ? tierVal(r, 10000, 7500, 5000, 3000) : tierVal(r, 8000, 6000, 4500, 3000)) * mult);
+  computeOfflinePollDelay({ hidden: h = false, errCount: ec = 0 } = {}) {
+    const r = this.ewmaRttMs;
+    return Math.min(30000, (h ? tierVal(r, 10000, 7500, 5000, 3000) : tierVal(r, 8000, 6000, 4500, 3000)) * eb(ec));
   }
   getWheelCoalesceMs() { return 75; }
   getTypeBatchMs() { return this.ewmaRttMs > 350 ? 60 : this.ewmaRttMs > 180 ? 30 : 0; }
@@ -75,18 +69,19 @@ export const coalesceInputEvents = (raw) => {
   for (const e of raw || []) {
     if (!e?.action) continue;
     const p = out[out.length - 1], a = e.action;
-    if (a === "close_tab") { const id = e.targetId || ""; if (id && seen.has(id)) continue; if (id) seen.add(id); out.push({ ...e }); continue; }
+    if (a === "close_tab") { const k = `${e.targetId || ""}:${e.targetEpoch || 0}`; if (e.targetId && seen.has(k)) continue; e.targetId && seen.add(k); out.push({ ...e }); continue; }
     if (p?.action === "switch_tab" && a === "switch_tab") { p.targetId = e.targetId; continue; }
-    if (p?.action === "mousemove" && a === "mousemove" && (p.buttons || 0) === (e.buttons || 0)) {
-      p.x = e.x; p.y = e.y; if (e.modifiers !== undefined) p.modifiers = e.modifiers; else delete p.modifiers; continue;
+    const pa = p && p.action === a && (p.targetId || "") === (e.targetId || "") && (p.targetEpoch || 0) === (e.targetEpoch || 0) ? a : "";
+    if (pa === "mousemove" && (p.buttons || 0) === (e.buttons || 0)) {
+      p.x = e.x; p.y = e.y; e.modifiers !== undefined ? (p.modifiers = e.modifiers) : delete p.modifiers; continue;
     }
-    if (p?.action === "type" && !p.pressEnter && a === "type" && !e.pressEnter) { p.text = (p.text || "") + (e.text || ""); continue; }
-    if (p?.action === "scroll" && a === "scroll") {
+    if (pa === "type" && !p.pressEnter && !e.pressEnter) { p.text = (p.text || "") + (e.text || ""); continue; }
+    if (pa === "scroll") {
       p.deltaX = clamp((p.deltaX || 0) + (e.deltaX || 0), -1600, 1600);
       p.deltaY = clamp((p.deltaY || 0) + (e.deltaY || 0), -1600, 1600);
       p.x = e.x; p.y = e.y; continue;
     }
-    if (p?.action === "key" && a === "key" && p.key === e.key && (p.modifiers || 0) === (e.modifiers || 0) && REP.has(e.key)) {
+    if (pa === "key" && p.key === e.key && (p.modifiers || 0) === (e.modifiers || 0) && REP.has(e.key)) {
       const n = (Number(p.repeat) || 1) + (Number(e.repeat) || 1);
       if (n <= 20) { p.repeat = n; continue; }
     }
@@ -95,18 +90,17 @@ export const coalesceInputEvents = (raw) => {
   return out;
 };
 
-export const shouldApplyFrameResponse = ({ reqEpoch, currentEpoch, currentTargetId, payload: d }) => {
+export const shouldApplyFrameResponse = ({ reqEpoch: re, currentEpoch: ce, currentTargetId: ct, payload: d }) => {
   const r = (apply, reason) => ({ apply, reason });
-  if (!d || typeof d !== "object") return r(false, "empty");
-  if (reqEpoch !== currentEpoch) return r(false, "stale_epoch");
-  if (d.activeTargetId && currentTargetId && d.activeTargetId !== currentTargetId && !d.recovered && !d.popupSwitched && !(Array.isArray(d.tabs) && !d.tabs.some((t) => t.targetId === currentTargetId))) return r(false, "stale_target");
-  return r(true, "ok");
+  return !d || typeof d !== "object" ? r(false, "empty")
+    : re !== ce ? r(false, "stale_epoch")
+    : d.activeTargetId && ct && d.activeTargetId !== ct && !d.recovered && !d.popupSwitched && !(Array.isArray(d.tabs) && !d.tabs.some((t) => t.targetId === ct)) ? r(false, "stale_target")
+    : r(true, "ok");
 };
 
 export const applyOptimisticTabClose = (tabs, aid, cid) => {
-  const ls = Array.isArray(tabs) ? tabs : [], i = ls.findIndex((t) => t.targetId === cid);
-  const nt = ls.filter((t) => t.targetId !== cid), wa = aid === cid;
-  return { tabs: nt, activeTargetId: wa || !nt.some((t) => t.targetId === aid) ? (nt.length ? nt[i >= 0 ? Math.min(i, nt.length - 1) : 0].targetId : null) : aid, wasActive: wa };
+  const ls = Array.isArray(tabs) ? tabs : [], i = ls.findIndex((t) => t.targetId === cid), nt = ls.filter((t) => t.targetId !== cid), wa = aid === cid;
+  return { tabs: nt, activeTargetId: wa || !nt.some((t) => t.targetId === aid) ? (nt[i >= 0 ? Math.min(i, nt.length - 1) : 0]?.targetId ?? null) : aid, wasActive: wa };
 };
 
 export const isNoTabsPayload = (d) => !!(d?.noTabs || (Array.isArray(d?.tabs) && !d.tabs.length && !d?.activeTargetId));
@@ -116,23 +110,23 @@ export const applyFramePayloadState = (S, d, reqEpoch = S.ep, totalMs = 0) => {
   if (!shouldApplyFrameResponse({ reqEpoch, currentEpoch: S.ep, currentTargetId: S.aid, payload: d }).apply) return null;
   S.on = true;
   const srvEp = Number(d.epoch);
-  if (Number.isFinite(srvEp) && srvEp > 0) S.tep = srvEp;
-  if (d.connectionMode) S.cm = d.connectionMode;
+  nFin(srvEp) && srvEp > 0 && (S.tep = srvEp);
+  d.connectionMode && (S.cm = d.connectionMode);
   if (typeof d.paused === "boolean") {
-    const pe = Number(d.pauseEpoch), ok = Number.isFinite(pe), cur = Number(S.pe) || 0;
-    if (ok ? pe > cur || (!totalMs && pe >= cur) : !totalMs) { if (ok) S.pe = pe; S.pa = d.paused; S.st = !d.paused; }
+    const pe = Number(d.pauseEpoch), ok = nFin(pe), cur = Number(S.pe) || 0;
+    (ok ? pe > cur || (!totalMs && pe >= cur) : !totalMs) && (ok && (S.pe = pe), S.pa = d.paused, S.st = !d.paused);
   }
   S.id = !S.pa && !!d.screencastPausedIdle; S.dlg = d.dialog || null; S.nv = false;
   const nt = S.nt = isNoTabsPayload(d);
-  if (nt) { S.aid = null; S.tabs = []; S.pg = {}; S.dlg = null; S.seq = 0; S.fh = ""; S.cr = false; }
-  else { if (Array.isArray(d.tabs)) S.tabs = d.tabs; if (d.activeTargetId) S.aid = d.activeTargetId; if (d.page) S.pg = d.page; }
-  if (d.popupSwitched) { S.seq = 0; S.fh = ""; S.cr = false; }
-  if (d.tabsHash) S.th = d.tabsHash;
-  if (typeof d.crisp === "boolean") S.cr = d.crisp;
-  if (d.format) S.fm = d.format;
+  nt ? (S.aid = S.dlg = null, S.tabs = [], S.pg = {}, S.seq = 0, S.fh = "", S.cr = false)
+    : (Array.isArray(d.tabs) && (S.tabs = d.tabs), d.activeTargetId && (S.aid = d.activeTargetId), d.page && (S.pg = d.page));
+  d.popupSwitched && (S.seq = 0, S.fh = "", S.cr = false);
+  d.tabsHash && (S.th = d.tabsHash);
+  typeof d.crisp === "boolean" && (S.cr = d.crisp);
+  d.format && (S.fm = d.format);
   const sp = !nt && !!d.changed && isSafeImageUrl(d.imageDataUrl);
-  if (sp) { S.seq = d.seq || S.seq + 1; S.fh = d.frameHash || S.fh; S.by = d.imageBytes || S.by; S.uc = false; }
-  else { S.uc = !!(d.unchanged || !d.changed); if (d.seq) S.seq = Math.max(S.seq, d.seq); if (d.frameHash) S.fh = d.frameHash; }
+  sp ? (S.seq = d.seq || S.seq + 1, S.fh = d.frameHash || S.fh, S.by = d.imageBytes || S.by, S.uc = false)
+    : (S.uc = !!(d.unchanged || !d.changed), d.seq && (S.seq = Math.max(S.seq, d.seq)), d.frameHash && (S.fh = d.frameHash));
   return sp;
 };
 
@@ -148,23 +142,22 @@ export const setupRevealObservers = (o = {}) => {
   const RO = o.ResizeObs ?? g.ResizeObserver, IO = o.IntersectionObs ?? g.IntersectionObserver, offs = [], rt = dc?.documentElement;
   let lt = -1e15;
   const trig = () => { const t = nw(); if (t - lt < tm) return false; lt = t; o.onReveal?.(); return true; };
-  const add = (tg, ev, fn, op) => { if (tg?.addEventListener) { tg.addEventListener(ev, fn, op); offs.push(() => tg.removeEventListener?.(ev, fn, op)); } };
+  const add = (tg, ev, fn, op) => { tg?.addEventListener && (tg.addEventListener(ev, fn, op), offs.push(() => tg.removeEventListener?.(ev, fn, op))); };
+  const obs = (ob) => { ob.observe(rt); offs.push(() => ob.disconnect?.()); };
   if (RO && rt) {
     let wc = !(rt.clientWidth > 0 && rt.clientHeight > 0);
-    const ro = new RO((es) => { const r = es?.[0]?.contentRect, v = (r ? r.width : rt.clientWidth || 0) > 0 && (r ? r.height : rt.clientHeight || 0) > 0; if (wc && v) trig(); wc = !v; });
-    ro.observe(rt); offs.push(() => ro.disconnect?.());
+    obs(new RO((es) => { const r = es?.[0]?.contentRect, v = (r ? r.width : rt.clientWidth || 0) > 0 && (r ? r.height : rt.clientHeight || 0) > 0; wc && v && trig(); wc = !v; }));
   }
   if (IO && rt) {
     let wv = false;
-    const io = new IO((es) => { for (const e of es || []) { const v = !!e?.isIntersecting; if (!wv && v) trig(); wv = v; } }, { threshold: 0 });
-    io.observe(rt); offs.push(() => io.disconnect?.());
+    obs(new IO((es) => { for (const e of es || []) { const v = !!e?.isIntersecting; !wv && v && trig(); wv = v; } }, { threshold: 0 }));
   }
-  add(dc, "visibilitychange", () => { const vs = dc?.visibilityState; if (vs === "hidden") o.onHide?.(); else if (vs === "visible") trig(); });
+  add(dc, "visibilitychange", () => { const vs = dc?.visibilityState; vs === "hidden" ? o.onHide?.() : vs === "visible" && trig(); });
   add(wn, "focus", trig); add(wn, "pageshow", trig);
-  add(rt, "pointerenter", () => { if (nw() - getLF() > sm) trig(); }, { passive: true });
+  add(rt, "pointerenter", () => nw() - getLF() > sm && trig(), { passive: true });
   if (ap) {
     const pv = ap.onhostcontextchanged || null;
-    ap.onhostcontextchanged = (c) => { pv?.(c); if (c?.containerDimensions || c?.displayMode) trig(); };
+    ap.onhostcontextchanged = (c) => { pv?.(c); (c?.containerDimensions || c?.displayMode) && trig(); };
     offs.push(() => { ap.onhostcontextchanged = pv; });
   }
   return () => { while (offs.length) try { offs.pop()(); } catch {} };

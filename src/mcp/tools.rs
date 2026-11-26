@@ -201,11 +201,24 @@ pub fn dispatch_tool_with_cache(
     name: &str,
     args: Value,
 ) -> Value {
+    let revoking = match name {
+        "chrome_stream_disconnect" => args.get("mode").is_none_or(|mode| mode == "revoke"),
+        "chrome_stream_input" => args["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["action"] == "disconnect")),
+        _ => false,
+    };
+    let generation = swr_cache.map(|cache| {
+        if revoking {
+            cache.begin_revoke();
+        }
+        cache.generation()
+    });
     let mut out = match name {
         "chrome_stream_stage" => handle_stage(relay, swr_cache),
         "chrome_stream_connect" => handle_connect(relay, "connect", args, Duration::from_secs(70)),
         "chrome_stream_frame" => handle_frame(relay, args),
-        "chrome_stream_input" => handle_input(relay, args),
+        "chrome_stream_input" => handle_input(relay, args, revoking),
         "chrome_stream_disconnect" => handle_disconnect(relay, args),
         "chrome_stream_launch_remote" => {
             handle_connect(relay, "launch_remote", args, Duration::from_secs(85))
@@ -218,9 +231,14 @@ pub fn dispatch_tool_with_cache(
 
     if let Some(sc) = out.get_mut("structuredContent") {
         redact_relay_payload(sc);
-        if let Some(cache) = swr_cache {
-            if name != "chrome_stream_stage" {
-                cache.update_from_tool_result(sc);
+    }
+    let sc = out.get("structuredContent");
+    if let Some((cache, generation)) = swr_cache.zip(generation) {
+        if revoking {
+            cache.finish_revoke(sc.filter(|sc| sc["ok"] == true && sc["connected"] == false));
+        } else if name != "chrome_stream_stage" {
+            if let Some(sc) = sc.filter(|sc| sc["unconfirmed"] != true) {
+                cache.update_from_tool_result(generation, sc);
             }
         }
     }
@@ -243,44 +261,26 @@ fn safe_status(relay: &Arc<dyn RelayBackend>) -> Value {
 
 fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCache>>) -> Value {
     let lang = current_lang();
-    let mut status = if let Some(cache) = swr_cache {
-        match cache.get_swr(Duration::from_millis(1200)) {
-            Some(snap) => stage_status_from_snapshot(&snap),
-            None => match relay.call("status", json!({}), Duration::from_secs(3)) {
-                Ok(mut s) => {
-                    redact_relay_payload(&mut s);
-                    s
-                }
-                Err(err) => {
-                    let msg = match lang {
-                        Lang::En => format!("Chrome Stream relay unavailable: {err}"),
-                        Lang::ZhCn => format!("Chrome Stream 本地服务暂不可用：{err}"),
-                    };
-                    return json!({
-                        "isError": false,
-                        "content": [{ "type": "text", "text": msg }],
-                        "structuredContent": { "connected": false, "locale": lang.as_str(), "error": err }
-                    });
-                }
-            },
-        }
-    } else {
-        match relay.call("status", json!({}), Duration::from_secs(5)) {
-            Ok(mut s) => {
-                redact_relay_payload(&mut s);
-                s
-            }
-            Err(err) => {
-                let msg = match lang {
-                    Lang::En => format!("Chrome Stream relay unavailable: {err}"),
-                    Lang::ZhCn => format!("Chrome Stream 本地服务暂不可用：{err}"),
-                };
-                return json!({
-                    "isError": false,
-                    "content": [{ "type": "text", "text": msg }],
-                    "structuredContent": { "connected": false, "locale": lang.as_str(), "error": err }
-                });
-            }
+    let status = swr_cache
+        .and_then(|cache| cache.stage_status(Duration::from_millis(1200)))
+        .map(Ok)
+        .unwrap_or_else(|| {
+            relay
+                .call("status", json!({}), Duration::from_secs(3))
+                .map(|status| stage_status_from_snapshot(&status))
+        });
+    let mut status = match status {
+        Ok(status) => status,
+        Err(_) => {
+            let text = match lang {
+                Lang::En => "Chrome Stream relay unavailable.",
+                Lang::ZhCn => "Chrome Stream 本地中继暂不可用。",
+            };
+            return json!({
+                "isError": false,
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": { "connected": false, "locale": lang.as_str(), "error": text }
+            });
         }
     };
     status["locale"] = json!(lang.as_str());
@@ -590,7 +590,7 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
     }
 }
 
-fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
+fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value, revoking: bool) -> Value {
     let t_start = Instant::now();
     match relay.call("input", args, Duration::from_secs(30)) {
         Ok(mut res) => {
@@ -602,6 +602,9 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 "content": [{ "type": "text", "text": label }],
                 "structuredContent": res
             })
+        }
+        Err(err) if revoking => {
+            unconfirmed_control(current_lang(), sanitized_control_error("input", &err))
         }
         Err(err) => {
             let st = safe_status(relay);
@@ -668,28 +671,120 @@ fn handle_disconnect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
             })
         }
     };
-    match relay.call("disconnect", args, Duration::from_secs(10)) {
-        Ok(mut res) => {
-            let text = match (lang, standby) {
-                (Lang::En, true) => "Screencast paused. Chrome authorization stays active.",
-                (Lang::ZhCn, true) => "已暂停画面传输，并保留 Chrome 授权。",
-                (Lang::En, false) => "Disconnected from Chrome.",
-                (Lang::ZhCn, false) => "已断开本机 Chrome 连接。",
-            };
-            res["locale"] = json!(lang.as_str());
-            json!({
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": res
-            })
+    // Older relays implement pause and interpret disconnect as an unconditional revoke.
+    let method = if standby { "pause" } else { "disconnect" };
+    let mut res = match relay.call(method, json!({}), Duration::from_secs(10)) {
+        Ok(res) if res.is_object() => res,
+        Ok(_) => {
+            return unconfirmed_control(
+                lang,
+                "The relay returned an invalid connection control response",
+            )
         }
-        Err(err) if !standby => json!({
-            "isError": false,
-            "content": [{ "type": "text", "text": format!("Disconnect note: {err}") }],
-            "structuredContent": { "ok": true, "connected": false, "locale": lang.as_str() }
-        }),
-        Err(err) => json!({
-            "isError": true,
-            "content": [{ "type": "text", "text": err }]
-        }),
+        Err(err) => return unconfirmed_control(lang, sanitized_control_error(method, &err)),
+    };
+    if !standby && (res["ok"] != true || res["connected"] != false) {
+        return unconfirmed_control(
+            lang,
+            "The relay did not confirm revoking the Chrome connection",
+        );
+    }
+    let standby_active =
+        standby && res["ok"] == true && res["connected"] == true && res["paused"] == true;
+    let text = match (lang, standby, standby_active, res["connected"].as_bool()) {
+        (Lang::En, false, _, _) => "Disconnected from Chrome.",
+        (Lang::ZhCn, false, _, _) => "已断开本机 Chrome 连接。",
+        (Lang::En, true, true, _) => "Screencast paused. Chrome authorization stays active.",
+        (Lang::ZhCn, true, true, _) => "已暂停画面传输，并保留 Chrome 授权。",
+        (Lang::En, true, false, Some(false)) => "Chrome is disconnected.",
+        (Lang::ZhCn, true, false, Some(false)) => "Chrome 当前已断开。",
+        (Lang::En, true, false, _) => "The relay did not confirm standby.",
+        (Lang::ZhCn, true, false, _) => "中继未确认进入待机。",
+    };
+    res["locale"] = json!(lang.as_str());
+    res["mode"] = json!(if standby { "standby" } else { "revoke" });
+    res["standby"] = json!(standby_active);
+    if standby {
+        res["ok"] = json!(standby_active);
+    }
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": res
+    })
+}
+
+fn unconfirmed_control(lang: Lang, error: &str) -> Value {
+    json!({
+        "isError": true,
+        "content": [{ "type": "text", "text": error }],
+        "structuredContent": { "ok": false, "unconfirmed": true, "error": error, "locale": lang.as_str() }
+    })
+}
+
+// Relay errors can contain local paths and WebSocket tokens, including on older versions.
+fn sanitized_control_error(method: &str, err: &str) -> &'static str {
+    if err == format!("Relay timeout on {method}") {
+        "The relay timed out while processing the Chrome connection control"
+    } else if err.starts_with("Relay busy:") {
+        "The relay is busy"
+    } else if err.starts_with("Local CDP relay connection closed") {
+        "The local relay connection closed"
+    } else {
+        "Chrome connection control failed. Query live status or retry."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ControlRelay(Result<Value, String>, &'static str);
+
+    impl RelayBackend for ControlRelay {
+        fn call(&self, method: &str, _params: Value, _timeout: Duration) -> Result<Value, String> {
+            assert_eq!(method, self.1);
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn failed_revoke_reports_unconfirmed_and_omits_raw_relay_details() {
+        let relay: Arc<dyn RelayBackend> = Arc::new(ControlRelay(
+            Err("Unable to connect to /tmp/example/relay.sock, ws://127.0.0.1:9222/devtools/browser/example".into()),
+            "disconnect",
+        ));
+        let result = handle_disconnect(&relay, json!({ "mode": "revoke" }));
+        assert_eq!(result["isError"], true);
+        let status = &result["structuredContent"];
+        assert_eq!(status["ok"], false);
+        assert_eq!(status["unconfirmed"], true);
+        assert!(status.get("connected").is_none());
+        assert!(status["error"].is_string());
+        let rendered = result.to_string();
+        assert!(!rendered.contains("/tmp/example"));
+        assert!(!rendered.contains("ws://"));
+    }
+
+    #[test]
+    fn standby_uses_legacy_pause_and_checks_connection_and_pause_state() {
+        for (connected, paused) in [(true, true), (false, true), (true, false)] {
+            let relay: Arc<dyn RelayBackend> = Arc::new(ControlRelay(
+                Ok(
+                    json!({ "ok": true, "connected": connected, "paused": paused, "pauseEpoch": 3 }),
+                ),
+                "pause",
+            ));
+            let result = handle_disconnect(&relay, json!({ "mode": "standby" }));
+            let status = &result["structuredContent"];
+            assert_eq!(status["connected"], connected);
+            assert_eq!(status["paused"], paused);
+            assert_eq!(status["standby"], connected && paused);
+            assert_eq!(status["ok"], connected && paused);
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert_eq!(
+                text.contains("authorization stays active") || text.contains("保留 Chrome 授权"),
+                connected && paused
+            );
+        }
     }
 }

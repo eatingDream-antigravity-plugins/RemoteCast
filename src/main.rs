@@ -1,15 +1,16 @@
 mod cdp;
 mod config;
 mod i18n;
+mod local_io;
 mod mcp;
 mod relay;
 mod stream;
 
-use crate::cdp::discovery::{discover_port_file, probe_debug_port_ws_url};
+use crate::cdp::discovery::{discover_port_file, probe_debug_port_ws_url, PortFileStatus};
 use crate::config::{Config, APP_VERSION};
 use crate::i18n::{current_lang, Lang};
 use crate::relay::ipc::{probe_relay_ping, RelayBackend, RelayClient};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -50,15 +51,7 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
         probe_debug_port_ws_url(cfg.debug_port)
     };
 
-    let sock_exists = cfg.relay_sock.exists();
-    let sock_mode = fs::metadata(&cfg.relay_sock)
-        .ok()
-        .map(|m| format!("{:04o}", m.permissions().mode() & 0o777));
-    let relay_ping = if sock_exists {
-        probe_relay_ping(&cfg.relay_sock)
-    } else {
-        None
-    };
+    let relay_ping = probe_relay_ping(&cfg.relay_sock).ok();
     let relay_status = if relay_ping.is_some() {
         RelayClient::connect_only(cfg.relay_sock.clone())
             .call("status", json!({}), Duration::from_secs(2))
@@ -66,32 +59,13 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
     } else {
         None
     };
-
-    let panel_meta = fs::metadata(&cfg.panel_html).ok();
-    let report = json!({
-        "version": APP_VERSION,
-        "locale": lang.as_str(),
-        "chrome": {
-            "portFile": port_file,
-            "candidatesChecked": cfg.port_files.len(),
-            "fallbackDebugPort": cfg.debug_port,
-            "fallbackWsUrl": debug_port_ws,
-            "reachable": port_file.valid || debug_port_ws.is_some(),
-        },
-        "relay": {
-            "socketPath": cfg.relay_sock.to_string_lossy(),
-            "socketExists": sock_exists,
-            "socketMode": sock_mode,
-            "alive": relay_ping.is_some(),
-            "ping": relay_ping,
-            "status": relay_status,
-        },
-        "panel": {
-            "path": cfg.panel_html.to_string_lossy(),
-            "exists": panel_meta.is_some(),
-            "bytes": panel_meta.as_ref().map(|m| m.len()).unwrap_or(0),
-        }
-    });
+    let report = doctor_report(
+        cfg,
+        &port_file,
+        debug_port_ws.is_some(),
+        relay_ping.as_ref(),
+        relay_status.as_ref(),
+    );
 
     if as_json {
         println!(
@@ -119,7 +93,7 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
                     "  Relay Sock : {} ({}, mode={})",
                     if relay_ok { "ALIVE" } else { "STOPPED" },
                     cfg.relay_sock.display(),
-                    sock_mode.as_deref().unwrap_or("-")
+                    report["relay"]["socketMode"].as_str().unwrap_or("-")
                 );
                 if let Some(st) = &relay_status {
                     println!(
@@ -150,7 +124,7 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
                     "  本地中继   : {} ({}, 权限={})",
                     if relay_ok { "运行中" } else { "未运行" },
                     cfg.relay_sock.display(),
-                    sock_mode.as_deref().unwrap_or("-")
+                    report["relay"]["socketMode"].as_str().unwrap_or("-")
                 );
                 if let Some(st) = &relay_status {
                     println!(
@@ -170,6 +144,46 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn doctor_report(
+    cfg: &Config,
+    port_file: &PortFileStatus,
+    fallback_ready: bool,
+    relay_ping: Option<&Value>,
+    relay_status: Option<&Value>,
+) -> Value {
+    let socket = fs::symlink_metadata(&cfg.relay_sock).ok();
+    let panel = fs::metadata(&cfg.panel_html).ok();
+    let ping = relay_ping.map(|value| {
+        json!({
+            "ok": value["ok"].as_bool(),
+            "pid": value["pid"].as_u64(),
+            "connected": value["connected"].as_bool(),
+        })
+    });
+    json!({
+        "version": APP_VERSION,
+        "locale": current_lang().as_str(),
+        "chrome": {
+            "portFile": port_file.public_summary(),
+            "candidatesChecked": cfg.port_files.len(),
+            "fallbackDebugPort": cfg.debug_port,
+            "fallbackReady": fallback_ready,
+            "reachable": port_file.valid || fallback_ready,
+        },
+        "relay": {
+            "socketExists": socket.is_some(),
+            "socketMode": socket.map(|m| format!("{:04o}", m.permissions().mode() & 0o777)),
+            "alive": relay_ping.is_some(),
+            "ping": ping,
+            "status": relay_status.map(mcp::server::stage_status_from_snapshot),
+        },
+        "panel": {
+            "exists": panel.is_some(),
+            "bytes": panel.map(|m| m.len()).unwrap_or(0),
+        }
+    })
 }
 
 fn apply_cli_overrides(cfg: &mut Config, args: &[String]) {
@@ -236,5 +250,41 @@ fn main() -> ExitCode {
             print_usage();
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_json_uses_public_diagnostics_without_paths_or_websocket_urls() {
+        let mut cfg = Config::load();
+        cfg.relay_sock = "/diagnostic-fixture/relay.sock".into();
+        cfg.panel_html = "/diagnostic-fixture/panel.html".into();
+        let status = PortFileStatus {
+            exists: true,
+            valid: true,
+            stale: false,
+            port: Some(9222),
+            ws_url: Some("ws://127.0.0.1:9222/devtools/browser/fixture".into()),
+            updated_at: None,
+            path: "/diagnostic-fixture/DevToolsActivePort".into(),
+        };
+        let report = doctor_report(
+            &cfg,
+            &status,
+            true,
+            Some(&json!({ "ok": true, "pid": 123, "socketPath": cfg.relay_sock })),
+            Some(&json!({
+                "connected": true, "portFile": status,
+                "page": {"url": "file:///diagnostic-fixture/page.html"},
+            })),
+        );
+        assert_eq!(report["chrome"]["portFile"], status.public_summary());
+        assert_eq!(report["relay"]["status"]["connected"], true);
+        let rendered = report.to_string();
+        assert!(!rendered.contains("/diagnostic-fixture"));
+        assert!(!rendered.contains("ws://"));
     }
 }

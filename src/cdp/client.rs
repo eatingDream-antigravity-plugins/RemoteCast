@@ -174,6 +174,7 @@ struct TransportState {
     transport: Option<Arc<dyn CdpTransport>>,
     connecting: bool,
     connection_mode: Option<ConnectionMode>,
+    endpoint: Option<String>,
     connect_generation: u64,
     last_keepalive_at: Instant,
 }
@@ -184,6 +185,7 @@ impl TransportState {
             transport: None,
             connecting: false,
             connection_mode: None,
+            endpoint: None,
             connect_generation: 0,
             last_keepalive_at: Instant::now(),
         }
@@ -209,6 +211,9 @@ pub struct CdpClient {
     ws_url_override: Option<String>,
     ws_factory: TransportFactory,
     connect_lock: Mutex<()>,
+    revoke_gen: AtomicU64,
+    #[cfg(test)]
+    waiting_to_connect: std::sync::atomic::AtomicUsize,
     transport_state: Mutex<TransportState>,
     pub(crate) tabs: Mutex<TabStateStore>,
     pub(crate) capture: Mutex<FramePipeline>,
@@ -261,6 +266,9 @@ impl CdpClient {
             ws_url_override,
             ws_factory,
             connect_lock: Mutex::new(()),
+            revoke_gen: AtomicU64::new(0),
+            #[cfg(test)]
+            waiting_to_connect: std::sync::atomic::AtomicUsize::new(0),
             transport_state: Mutex::new(TransportState::new()),
             tabs: Mutex::new(TabStateStore::new()),
             capture: Mutex::new(FramePipeline::new()),
@@ -339,8 +347,9 @@ impl CdpClient {
         let pf = self.port_file_status();
         let mut summary = pf.public_summary();
         if !pf.valid {
-            let fb_ready = self.fallback_port_ready.load(Ordering::Relaxed)
-                || probe_debug_port_ws_url(self.debug_port).is_some();
+            let fb_ready = self.fallback_port_ready.load(Ordering::Relaxed);
+            #[cfg(not(test))]
+            let fb_ready = fb_ready || probe_debug_port_ws_url(self.debug_port).is_some();
             self.fallback_port_ready.store(fb_ready, Ordering::Relaxed);
             if fb_ready {
                 summary["valid"] = json!(true);
@@ -404,6 +413,13 @@ impl CdpClient {
         self.tabs.lock().unwrap().set_paused(false);
         self.capture.lock().unwrap().notify_activity();
         self.notify_frame_waiters();
+    }
+
+    pub(crate) fn pause_status(&self) -> (bool, bool, u64) {
+        let state = self.transport_state.lock().unwrap();
+        let tabs = self.tabs.lock().unwrap();
+        let connected = state.is_open();
+        (connected, connected && tabs.paused, tabs.pause_epoch)
     }
 
     pub fn active_target_id(&self) -> Option<String> {
@@ -694,10 +710,12 @@ impl CdpClient {
     pub fn disconnect(&self) {
         let old_transport = {
             let mut tr = self.transport_state.lock().unwrap();
+            self.revoke_gen.fetch_add(1, Ordering::SeqCst);
             tr.connect_generation += 1;
             tr.connecting = false;
             let old = tr.transport.take();
             tr.connection_mode = None;
+            tr.endpoint = None;
             self.reset_connection_state(old.is_some());
             old
         };
@@ -752,14 +770,26 @@ impl CdpClient {
         requested: Option<ConnectionMode>,
         launch_dir: Option<&Path>,
     ) -> Result<(), CdpError> {
+        let revoke_gen = self.revoke_gen.load(Ordering::SeqCst);
+        let revoked = || {
+            self.revoke_gen.load(Ordering::SeqCst) != revoke_gen
+                || self.disposed.load(Ordering::SeqCst)
+        };
+        #[cfg(test)]
+        self.waiting_to_connect.fetch_add(1, Ordering::SeqCst);
         let _connect_guard = self.connect_lock.lock().unwrap();
+        #[cfg(test)]
+        self.waiting_to_connect.fetch_sub(1, Ordering::SeqCst);
         let cancelled = || CdpError::new("CDP connection cancelled by disconnect");
         let discovery_generation = {
             let mut tr = self.transport_state.lock().unwrap();
-            if self.disposed.load(Ordering::SeqCst) {
+            if revoked() {
                 return Err(cancelled());
             }
-            if tr.is_open() && requested.is_none_or(|mode| tr.connection_mode == Some(mode)) {
+            if tr.is_open()
+                && requested.is_none_or(|mode| tr.connection_mode == Some(mode))
+                && launch_dir.is_none()
+            {
                 self.capture.lock().unwrap().notify_activity();
                 return Ok(());
             }
@@ -767,11 +797,10 @@ impl CdpClient {
             tr.connect_generation
         };
 
-        let endpoint = self.resolve_endpoint(requested, launch_dir);
+        let endpoint = self.resolve_endpoint(requested, launch_dir, revoked);
         let (generation, old_transport, url, mode) = {
             let mut tr = self.transport_state.lock().unwrap();
-            if tr.connect_generation != discovery_generation || self.disposed.load(Ordering::SeqCst)
-            {
+            if tr.connect_generation != discovery_generation || revoked() {
                 return Err(cancelled());
             }
             let (url, mode) = match endpoint {
@@ -781,8 +810,18 @@ impl CdpClient {
                     return Err(err);
                 }
             };
+            if launch_dir.is_some()
+                && tr.is_open()
+                && tr.connection_mode == Some(mode)
+                && tr.endpoint.as_deref() == Some(url.as_str())
+            {
+                tr.connecting = false;
+                self.capture.lock().unwrap().notify_activity();
+                return Ok(());
+            }
             let old = tr.transport.take();
             tr.connection_mode = None;
+            tr.endpoint = None;
             if old.is_some() {
                 self.reset_connection_state(true);
             }
@@ -806,7 +845,7 @@ impl CdpClient {
         let connect_res = (self.ws_factory)(&url, CONNECT_TIMEOUT, on_event).map_err(CdpError::new);
         let transport = {
             let mut tr = self.transport_state.lock().unwrap();
-            if tr.connect_generation != generation || self.disposed.load(Ordering::SeqCst) {
+            if tr.connect_generation != generation || revoked() {
                 drop(tr);
                 if let Ok(late) = connect_res {
                     late.close();
@@ -817,6 +856,7 @@ impl CdpClient {
             let transport = connect_res?;
             tr.transport = Some(Arc::clone(&transport));
             tr.connection_mode = Some(mode);
+            tr.endpoint = Some(url);
             if mode == ConnectionMode::Remote {
                 self.fallback_port_ready.store(true, Ordering::Relaxed);
             }
@@ -838,9 +878,11 @@ impl CdpClient {
         &self,
         requested: Option<ConnectionMode>,
         launch_dir: Option<&Path>,
+        revoked: impl Fn() -> bool,
     ) -> Result<(String, ConnectionMode), CdpError> {
         if let Some(data_dir) = launch_dir {
-            let url = launcher::launch_remote(data_dir, self.debug_port).map_err(CdpError::new)?;
+            let url = launcher::launch_remote(data_dir, self.debug_port, revoked)
+                .map_err(CdpError::new)?;
             return Ok((url, ConnectionMode::Remote));
         }
         if let Some(url) = &self.ws_url_override {
@@ -869,6 +911,7 @@ impl CdpClient {
             tr.connecting = false;
             let had_transport = tr.transport.take().is_some();
             tr.connection_mode = None;
+            tr.endpoint = None;
             self.reset_connection_state(had_transport);
         }
         self.notify_frame_waiters();
@@ -914,23 +957,18 @@ impl CdpClient {
             return;
         };
         let ack = (method == "Page.screencastFrame")
-            .then(|| {
-                Some((
-                    Arc::clone(transport),
-                    msg.get("sessionId")?.as_str()?,
-                    msg.pointer("/params/sessionId")?.as_i64()?,
-                ))
-            })
-            .flatten();
+            .then(|| msg.pointer("/params/sessionId")?.as_i64())
+            .flatten()
+            .map(|frame_ack| (Arc::clone(transport), frame_ack));
         let wake = self.handle_target_event(method, &msg);
         drop(tr);
 
-        if let Some((transport, session_id, frame_ack)) = ack {
+        if let Some((transport, frame_ack)) = ack {
             self.send_on_transport(
                 transport.as_ref(),
                 "Page.screencastFrameAck",
                 json!({ "sessionId": frame_ack }),
-                Some(session_id),
+                msg.get("sessionId").and_then(Value::as_str),
             );
         }
         if wake {
@@ -965,24 +1003,19 @@ impl CdpClient {
                     .filter(|&n| n > 0)
                     .unwrap_or(800);
 
-                let target = {
-                    let mut ts = self.tabs.lock().unwrap();
-                    let tid = sid
-                        .and_then(|s| ts.target_for_session(s))
-                        .or_else(|| self.capture.lock().unwrap().screencast_target_id.clone());
-                    tid.filter(|t| {
-                        !ts.paused
-                            && ts.active_target_id.as_deref() == Some(t.as_str())
-                            && !ts.is_recently_closed(t)
-                    })
+                let mut tabs = self.tabs.lock().unwrap();
+                let Some(tid) = sid.and_then(|session| tabs.target_for_session(session)) else {
+                    return false;
                 };
-
-                target.is_some_and(|tid| {
-                    self.capture
-                        .lock()
-                        .unwrap()
-                        .ingest_motion_frame(&tid, data, vw, vh)
-                })
+                if tabs.paused
+                    || tabs.active_target_id.as_deref() != Some(&tid)
+                    || tabs.is_recently_closed(&tid)
+                {
+                    return false;
+                }
+                let mut capture = self.capture.lock().unwrap();
+                capture.screencast_target_id.as_deref() == Some(&tid)
+                    && capture.ingest_motion_frame(&tid, data, vw, vh)
             }
             "Page.javascriptDialogOpening" => {
                 let Some(p) = params else { return false };
@@ -1088,6 +1121,33 @@ impl CdpClient {
         session_id: Option<&str>,
         timeout: Duration,
     ) -> Result<Value, CdpError> {
+        self.send_cdp_at_generation(None, method, params, session_id, timeout)
+    }
+
+    pub(crate) fn transport_generation(&self) -> u64 {
+        self.transport_state.lock().unwrap().connect_generation
+    }
+
+    pub(crate) fn with_current_tabs<T>(
+        &self,
+        generation: u64,
+        apply: impl FnOnce(&mut TabStateStore) -> T,
+    ) -> Result<T, CdpError> {
+        let state = self.transport_state.lock().unwrap();
+        if state.connect_generation != generation || !state.is_open() {
+            return Err(CdpError::new("Chrome CDP connection changed"));
+        }
+        Ok(apply(&mut self.tabs.lock().unwrap()))
+    }
+
+    pub(crate) fn send_cdp_at_generation(
+        self: &Arc<Self>,
+        generation: Option<u64>,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, CdpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut payload = json!({ "id": id, "method": method, "params": params });
         if let Some(sid) = session_id {
@@ -1097,6 +1157,9 @@ impl CdpClient {
         let (tx, rx) = mpsc::channel();
         let transport = {
             let state = self.transport_state.lock().unwrap();
+            if generation.is_some_and(|generation| generation != state.connect_generation) {
+                return Err(CdpError::new("Chrome CDP connection changed"));
+            }
             let transport = state
                 .transport
                 .as_ref()
@@ -1193,9 +1256,10 @@ impl CdpClient {
     pub fn close_tab(
         self: &Arc<Self>,
         target_id_to_close: Option<&str>,
+        target_epoch: Option<u64>,
         quality_preset: Option<&str>,
     ) -> Result<Value, CdpError> {
-        targets::close_tab(self, target_id_to_close, quality_preset)
+        targets::close_tab(self, target_id_to_close, target_epoch, quality_preset)
     }
 
     pub fn poll_frame(self: &Arc<Self>, params: PollFrameParams) -> Result<Value, CdpError> {
@@ -1238,6 +1302,8 @@ pub mod tests {
         fail_eval_for: HashSet<String>,
         layout_metrics_vp: Option<(u32, u32)>,
         auto_screencast_b64: Option<String>,
+        empty_webp_shots: usize,
+        deferred_screenshot: Option<mpsc::Sender<u64>>,
         popup_after_mouse_press: bool,
     }
 
@@ -1264,6 +1330,8 @@ pub mod tests {
                     fail_eval_for: HashSet::new(),
                     layout_metrics_vp: None,
                     auto_screencast_b64: None,
+                    empty_webp_shots: 0,
+                    deferred_screenshot: None,
                     popup_after_mouse_press: false,
                 }),
                 on_event,
@@ -1315,8 +1383,20 @@ pub mod tests {
                 st.sent.push(msg);
 
                 match method.as_str() {
-                    "Target.setDiscoverTargets"
-                    | "Browser.getVersion"
+                    "Target.setDiscoverTargets" => {
+                        for tab in &st.tabs {
+                            post_events.push((
+                                "Target.targetCreated".into(),
+                                json!({ "targetInfo": {
+                                    "targetId": tab.target_id, "type": "page",
+                                    "title": tab.title, "url": tab.url,
+                                } }),
+                                None,
+                            ));
+                        }
+                        Ok(json!({}))
+                    }
+                    "Browser.getVersion"
                     | "Page.enable"
                     | "Page.handleJavaScriptDialog"
                     | "Page.screencastFrameAck"
@@ -1458,6 +1538,16 @@ pub mod tests {
                     }
 
                     "Page.captureScreenshot" => {
+                        if let Some(waiting) = st.deferred_screenshot.take() {
+                            waiting.send(id).unwrap();
+                            return Ok(());
+                        }
+                        if params["format"] == "webp" && st.empty_webp_shots > 0 {
+                            st.empty_webp_shots -= 1;
+                            drop(st);
+                            self.reply(id, json!({ "data": "" }));
+                            return Ok(());
+                        }
                         st.shot_counter += 1;
                         let n = st.shot_counter;
                         let tid = session_id
@@ -1623,6 +1713,37 @@ pub mod tests {
                 client.dispose();
             }
         }
+    }
+
+    #[test]
+    fn connect_requests_queued_before_revoke_cannot_reconnect() {
+        let (client, _, dials) = make_unconnected_mock_client(vec![]);
+        let lock = client.connect_lock.lock().unwrap();
+        let queued: Vec<_> = (0..2)
+            .map(|_| {
+                let client = Arc::clone(&client);
+                thread::spawn(move || client.ensure_connected())
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while client.waiting_to_connect.load(Ordering::SeqCst) != queued.len() {
+            assert!(Instant::now() < deadline, "connect requests did not queue");
+            thread::yield_now();
+        }
+        client.disconnect();
+        drop(lock);
+        for request in queued {
+            assert!(request
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .message
+                .contains("cancelled by disconnect"));
+        }
+        assert_eq!(dials.load(Ordering::SeqCst), 0);
+        assert!(!client.is_connected());
+        client.ensure_connected().unwrap();
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
     }
 
     fn assert_stale_input(result: &Value, active: &str, epoch: u64) {
@@ -2195,6 +2316,16 @@ pub mod tests {
             tab("t2", "Two", "https://two.test"),
             tab("t3", "Three", "https://three.test"),
         ]);
+        client
+            .dispatch_input_batch(InputBatchParams {
+                events: vec![InputEvent {
+                    action: "switch_tab".into(),
+                    target_id: Some("t2".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
         let f1 = client
             .poll_frame(PollFrameParams {
                 target_id: Some("t2".into()),
@@ -2206,13 +2337,14 @@ pub mod tests {
         assert_eq!(client.active_target_id().as_deref(), Some("t2"));
         assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
 
-        let r_non_active = client.close_tab(Some("t1"), None).unwrap();
+        let r_non_active = client.close_tab(Some("t1"), None, None).unwrap();
         assert_eq!(r_non_active["connected"], true);
         assert_eq!(r_non_active["activeTargetId"], "t2");
         assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
         assert_eq!(r_non_active["seq"], f1["seq"]);
 
-        let r_dup = client.close_tab(Some("t-nonexistent"), None).unwrap();
+        let r_dup = client.close_tab(Some("t-nonexistent"), None, None).unwrap();
+        assert_eq!(r_dup["staleTarget"], true);
         assert_eq!(r_dup["connected"], true);
         assert_eq!(r_dup["tabs"].as_array().unwrap().len(), 2);
         assert_eq!(r_dup["activeTargetId"], "t2");
@@ -2248,12 +2380,11 @@ pub mod tests {
             .unwrap()
             .sent
             .clone();
-        assert!(sent.iter().any(|m| m["method"] == "Page.stopScreencast"));
         assert!(sent
             .iter()
             .any(|m| m["method"] == "Target.activateTarget" && m["params"]["targetId"] == "t3"));
 
-        let r_last = client.close_tab(Some("t3"), None).unwrap();
+        let r_last = client.close_tab(Some("t3"), None, None).unwrap();
         assert_eq!(r_last["connected"], true);
         assert_eq!(r_last["noTabs"], true);
         assert!(r_last["activeTargetId"].is_null());
@@ -2565,6 +2696,164 @@ pub mod tests {
     }
 
     #[test]
+    fn duplicate_jpeg_does_not_delay_settle_and_empty_webp_is_retried() {
+        let (client, holder) = make_mock_client(vec![tab("t1", "Doc", "https://example.test")]);
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        let jpeg = base64_encode(b"unchanged-motion");
+        {
+            let mut state = mock.state.lock().unwrap();
+            state.auto_screencast_b64 = Some(jpeg.clone());
+            state.empty_webp_shots = 1;
+        }
+        let poll = |seq| PollFrameParams {
+            since_seq: seq,
+            quality_preset: "low".into(),
+            ..Default::default()
+        };
+        let motion = client.poll_frame(poll(0)).unwrap();
+        assert_eq!(motion["format"], "jpeg");
+        let seq = motion["seq"].as_u64().unwrap();
+        let sid = client.tabs.lock().unwrap().session_for("t1").unwrap();
+        thread::sleep(Duration::from_millis(390));
+        mock.push_event(
+            "Page.screencastFrame",
+            json!({ "data": jpeg, "sessionId": 2 }),
+            Some(&sid),
+        );
+
+        let first = client.poll_frame(poll(seq)).unwrap();
+        assert_eq!(first["crisp"], false);
+        // The first attempt was due even though a duplicate had just arrived.
+        assert_eq!(mock.state.lock().unwrap().empty_webp_shots, 0);
+        let recovered = client
+            .poll_frame(PollFrameParams {
+                wait_ms: 900,
+                ..poll(seq)
+            })
+            .unwrap();
+        assert_eq!(recovered["format"], "webp");
+        assert_eq!(recovered["crisp"], true);
+        let attempts = mock
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|msg| {
+                msg["method"] == "Page.captureScreenshot" && msg["params"]["format"] == "webp"
+            })
+            .count();
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn late_fallback_and_settle_screenshots_cannot_replace_a_new_frame() {
+        for force_refresh in [true, false] {
+            let (client, holder) = make_mock_client(vec![tab("t1", "Doc", "https://example.test")]);
+            let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+            mock.state.lock().unwrap().auto_screencast_b64 = Some(base64_encode(b"earlier"));
+            let poll = |since_seq| PollFrameParams {
+                since_seq,
+                quality_preset: "low".into(),
+                ..Default::default()
+            };
+            let initial = client.poll_frame(poll(0)).unwrap();
+            let seq = initial["seq"].as_u64().unwrap();
+            let (entered_tx, entered_rx) = mpsc::channel();
+            mock.state.lock().unwrap().deferred_screenshot = Some(entered_tx);
+            let waiting = Arc::clone(&client);
+            let params = PollFrameParams {
+                force_refresh,
+                wait_ms: 900,
+                ..poll(seq)
+            };
+            let pending = thread::spawn(move || waiting.poll_frame(params).unwrap());
+            let shot_id = entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+            let sid = client.tabs.lock().unwrap().session_for("t1").unwrap();
+            let fresh = base64_encode(b"new-motion");
+            mock.push_event(
+                "Page.screencastFrame",
+                json!({ "data": fresh, "sessionId": 2 }),
+                Some(&sid),
+            );
+            mock.reply(
+                shot_id,
+                json!({ "data": base64_encode(b"stale-screenshot") }),
+            );
+            let frame = pending.join().unwrap();
+            assert_eq!(
+                frame["imageDataUrl"],
+                format!("data:image/jpeg;base64,{fresh}")
+            );
+            assert_eq!(frame["seq"], seq + 1);
+            assert_eq!(frame["crisp"], false);
+        }
+    }
+
+    #[test]
+    fn polling_an_old_target_preserves_the_current_active_target_and_epoch() {
+        let (client, _) = make_mock_client(vec![
+            tab("t1", "One", "https://one.test"),
+            tab("t2", "Two", "https://two.test"),
+        ]);
+        let switched = client
+            .dispatch_input_batch(InputBatchParams {
+                events: vec![InputEvent {
+                    action: "switch_tab".into(),
+                    target_id: Some("t2".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        let frame = client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t1".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(frame["activeTargetId"], "t2");
+        assert_eq!(frame["epoch"], switched["epoch"]);
+        assert_eq!(client.active_target_id().as_deref(), Some("t2"));
+        assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn close_tab_rejects_missing_targets_and_stale_epochs_without_closing() {
+        let (client, holder) = make_mock_client(vec![tab("t1", "Doc", "https://example.test")]);
+        let epoch = client.tab_epoch();
+        let direct = client.close_tab(None, Some(epoch), None).unwrap();
+        assert_stale_input(&direct, "t1", epoch);
+        for (id, epoch_arg) in [
+            (None, epoch),
+            (Some("t1"), epoch - 1),
+            (Some("gone"), epoch),
+        ] {
+            let result = client
+                .dispatch_input_batch(InputBatchParams {
+                    target_epoch: Some(epoch_arg),
+                    events: vec![InputEvent {
+                        action: "close_tab".into(),
+                        target_id: id.map(String::from),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_stale_input(&result, "t1", epoch);
+        }
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        assert!(!mock
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .any(|msg| msg["method"] == "Target.closeTarget"));
+    }
+
+    #[test]
     fn applies_ultra_profile_and_scales_fallback_screenshot() {
         let (client, holder) = make_mock_client(vec![tab("t1", "Heavy", "https://heavy.test")]);
         client
@@ -2647,6 +2936,25 @@ pub mod tests {
         assert!(sent
             .iter()
             .any(|m| m["method"] == "Page.screencastFrameAck" && m["params"]["sessionId"] == 77));
+        drop(sent);
+        client
+            .poll_frame(PollFrameParams {
+                quality_preset: "low".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let before_unknown = client.capture.lock().unwrap().frame_seq;
+        mock.push_event(
+            "Page.screencastFrame",
+            json!({"data": base64_encode(b"unrouted"), "sessionId": 78}),
+            Some("missing-session"),
+        );
+        assert_eq!(client.capture.lock().unwrap().frame_seq, before_unknown);
+        assert!(mock.state.lock().unwrap().sent.iter().any(|msg| {
+            msg["method"] == "Page.screencastFrameAck"
+                && msg["sessionId"] == "missing-session"
+                && msg["params"]["sessionId"] == 78
+        }));
         client.dispose();
     }
 
@@ -2972,6 +3280,17 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(f_pop2["popupSwitched"], true);
+
+        client
+            .dispatch_input_batch(InputBatchParams {
+                events: vec![InputEvent {
+                    action: "switch_tab".into(),
+                    target_id: Some("t-chrome".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
 
         // 3. Restricted chrome:// page where Runtime.evaluate fails falls back to Page.getLayoutMetrics.
         let restricted = client

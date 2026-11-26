@@ -1,4 +1,5 @@
 use crate::cdp::client::{now_iso, CdpClient, CdpError, FrameRecord, PollFrameParams};
+use crate::cdp::targets::TabStateStore;
 use crate::i18n::current_lang;
 use crate::stream::dedup::{hash_frame_data, hash_tabs};
 use crate::stream::profiles::{
@@ -9,6 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CRISP_SETTLE_DELAY: Duration = Duration::from_millis(380);
+const MAX_SETTLE_ATTEMPTS: u8 = 3;
+const SETTLE_RETRY_BACKOFF: Duration = Duration::from_millis(150);
 pub const SCREENCAST_IDLE_STOP: Duration = Duration::from_secs(12);
 pub const SCREENCAST_TIER_DWELL: Duration = Duration::from_secs(2);
 const FALLBACK_ACTIVE_WINDOW: Duration = Duration::from_millis(2500);
@@ -34,9 +37,10 @@ pub struct FramePipeline {
     adaptive_profile: AdaptiveProfile,
     last_motion_hash: String,
     settle_at: Option<Instant>,
-    settle_attempted: bool,
+    settle_failures: u8,
     settle_in_flight: bool,
     inputs_in_flight: usize,
+    input_generation: u64,
 }
 
 impl FramePipeline {
@@ -59,9 +63,10 @@ impl FramePipeline {
             adaptive_profile: AdaptiveProfile::default(),
             last_motion_hash: String::new(),
             settle_at: None,
-            settle_attempted: false,
+            settle_failures: 0,
             settle_in_flight: false,
             inputs_in_flight: 0,
+            input_generation: 0,
         }
     }
 
@@ -113,7 +118,7 @@ impl FramePipeline {
         self.latest_frame = None;
         self.last_motion_hash.clear();
         self.settle_at = None;
-        self.settle_attempted = false;
+        self.settle_failures = 0;
     }
 
     fn select_profile(&mut self, preset: &str, rtt_ms: Option<f64>) -> &'static QualityProfile {
@@ -129,6 +134,7 @@ impl FramePipeline {
 
     pub fn begin_input(&mut self) -> bool {
         self.inputs_in_flight += 1;
+        self.input_generation += 1;
         self.notify_activity()
     }
 
@@ -142,7 +148,7 @@ impl FramePipeline {
 
     fn schedule_settle(&mut self) {
         self.settle_at = Some(Instant::now() + CRISP_SETTLE_DELAY);
-        self.settle_attempted = false;
+        self.settle_failures = 0;
     }
 
     pub fn latest_frame_is_crisp(&self) -> bool {
@@ -152,7 +158,7 @@ impl FramePipeline {
     pub fn settle_deadline(&self, target_id: &str) -> Option<Instant> {
         self.settle_at.filter(|_| {
             self.inputs_in_flight == 0
-                && !self.settle_attempted
+                && self.settle_failures < MAX_SETTLE_ATTEMPTS
                 && !self.settle_in_flight
                 && !self.screencast_idle_paused
                 && self
@@ -196,17 +202,14 @@ impl FramePipeline {
     /// screencast frame cannot replace a settled still.
     pub fn ingest_motion_frame(&mut self, target_id: &str, data: &str, vw: u32, vh: u32) -> bool {
         let hash = hash_frame_data(data);
-        let same_target = self
-            .latest_frame
-            .as_ref()
-            .is_some_and(|f| f.target_id == target_id);
-        if same_target && self.last_motion_hash == hash {
+        let same_frame = self.latest_frame.as_ref().is_some_and(|frame| {
+            frame.target_id == target_id
+                && (frame.viewport_width, frame.viewport_height) == (vw, vh)
+        });
+        if same_frame && self.last_motion_hash == hash {
             self.deduped_frames += 1;
             if self.latest_frame.as_ref().is_some_and(|f| !f.crisp) {
                 self.latest_frame_captured_at = now_iso();
-                if !self.settle_attempted {
-                    self.schedule_settle();
-                }
             }
             return false;
         }
@@ -220,11 +223,11 @@ impl FramePipeline {
         // Include the format in the hash domain when switching encodings.
         let hash = format!("webp-{}", hash_frame_data(data));
         self.settle_at = None;
-        if self
-            .latest_frame
-            .as_ref()
-            .is_some_and(|f| f.target_id == target_id && f.hash == hash)
-        {
+        if self.latest_frame.as_ref().is_some_and(|f| {
+            f.target_id == target_id
+                && f.hash == hash
+                && (f.viewport_width, f.viewport_height) == viewport
+        }) {
             self.deduped_frames += 1;
             self.latest_frame_captured_at = now_iso();
             return;
@@ -309,10 +312,14 @@ pub(crate) fn ensure_screencast(
 ) -> Result<(String, &'static QualityProfile), CdpError> {
     let _guard = client.screencast_lock.lock().unwrap();
     let qp = {
-        let existing_sid = client.tabs.lock().unwrap().session_for(target_id);
+        let tabs = client.tabs.lock().unwrap();
+        let existing_sid = tabs.session_for(target_id);
         let mut cap = client.capture.lock().unwrap();
         cap.mark_poll();
         let qp = cap.select_profile(quality_preset, rtt_ms);
+        if tabs.active_target_id.as_deref() != Some(target_id) {
+            return Ok((existing_sid.unwrap_or_default(), qp));
+        }
         if cap.screencast_target_id.as_deref() == Some(target_id) {
             if let (Some(cur_name), Some(sid)) = (cap.screencast_profile.as_deref(), existing_sid) {
                 if cur_name == qp.name {
@@ -449,25 +456,92 @@ fn extract_layout_viewport(metrics: &Value) -> Option<(u32, u32)> {
     None
 }
 
+struct CaptureSnapshot<'a> {
+    session_id: &'a str,
+    target_id: &'a str,
+    target_epoch: u64,
+    pause_epoch: u64,
+    seq: u64,
+    input_generation: u64,
+}
+
+impl<'a> CaptureSnapshot<'a> {
+    fn new(
+        tabs: &TabStateStore,
+        cap: &FramePipeline,
+        target_id: &'a str,
+        session_id: &'a str,
+    ) -> Self {
+        Self {
+            session_id,
+            target_id,
+            target_epoch: tabs.tab_epoch,
+            pause_epoch: tabs.pause_epoch,
+            seq: cap.frame_seq,
+            input_generation: cap.input_generation,
+        }
+    }
+
+    fn is_current(&self, tabs: &TabStateStore, cap: &FramePipeline) -> bool {
+        tabs.active_target_id.as_deref() == Some(self.target_id)
+            && tabs.sessions.get(self.target_id).map(String::as_str) == Some(self.session_id)
+            && tabs.tab_epoch == self.target_epoch
+            && tabs.pause_epoch == self.pause_epoch
+            && cap.frame_seq == self.seq
+            && cap.input_generation == self.input_generation
+            && cap.inputs_in_flight == 0
+            && !tabs.has_dialog(self.target_id)
+    }
+}
+
 pub(crate) fn capture_fallback_frame(
     client: &Arc<CdpClient>,
     target_id: &str,
     session_id: &str,
     qp: &QualityProfile,
 ) -> Result<(), CdpError> {
-    if client.tabs.lock().unwrap().has_dialog(target_id) {
-        return Ok(());
-    }
-    let (mut vw, mut vh): (u32, u32) = {
+    let (snapshot, viewport) = {
+        let tabs = client.tabs.lock().unwrap();
         let mut cap = client.capture.lock().unwrap();
+        let snapshot = CaptureSnapshot::new(&tabs, &cap, target_id, session_id);
+        if !snapshot.is_current(&tabs, &cap) {
+            return Ok(());
+        }
         cap.last_fallback_shot_at = Some(Instant::now());
-        cap.latest_frame
+        let viewport = cap
+            .latest_frame
             .as_ref()
             .filter(|f| f.target_id == target_id && f.viewport_width > 0 && f.viewport_height > 0)
             .map(|f| (f.viewport_width, f.viewport_height))
-            .unwrap_or((1280, 800))
+            .unwrap_or((1280, 800));
+        (snapshot, viewport)
     };
 
+    let shot = request_fallback_screenshot(client, session_id, qp, viewport);
+    let changed = {
+        let tabs = client.tabs.lock().unwrap();
+        let mut cap = client.capture.lock().unwrap();
+        if !snapshot.is_current(&tabs, &cap) {
+            return Ok(());
+        }
+        let (shot, (vw, vh)) = shot?;
+        shot["data"]
+            .as_str()
+            .filter(|data| !data.is_empty())
+            .is_some_and(|data| cap.ingest_motion_frame(target_id, data, vw, vh))
+    };
+    if changed {
+        client.notify_frame_waiters();
+    }
+    Ok(())
+}
+
+fn request_fallback_screenshot(
+    client: &Arc<CdpClient>,
+    session_id: &str,
+    qp: &QualityProfile,
+    (mut vw, mut vh): (u32, u32),
+) -> Result<(Value, (u32, u32)), CdpError> {
     let mut got_vp = false;
 
     match client.send_cdp(
@@ -559,23 +633,7 @@ pub(crate) fn capture_fallback_frame(
         }
     };
 
-    let Some(data) = shot.get("data").and_then(|v| v.as_str()) else {
-        return Ok(());
-    };
-    if data.is_empty() {
-        return Ok(());
-    }
-
-    if client.tabs.lock().unwrap().is_recently_closed(target_id) {
-        return Ok(());
-    }
-    client
-        .capture
-        .lock()
-        .unwrap()
-        .ingest_motion_frame(target_id, data, vw, vh);
-    client.notify_frame_waiters();
-    Ok(())
+    Ok((shot, (vw, vh)))
 }
 
 fn capture_crisp_if_due(
@@ -583,29 +641,24 @@ fn capture_crisp_if_due(
     target_id: &str,
     session_id: &str,
 ) -> Result<(), CdpError> {
-    let (deadline, epoch, pause_epoch, viewport) = {
+    let (snapshot, deadline, viewport) = {
         let tabs = client.tabs.lock().unwrap();
-        if tabs.paused
-            || tabs.active_target_id.as_deref() != Some(target_id)
-            || tabs.session_for(target_id).as_deref() != Some(session_id)
-            || tabs.has_dialog(target_id)
-        {
+        let mut cap = client.capture.lock().unwrap();
+        let snapshot = CaptureSnapshot::new(&tabs, &cap, target_id, session_id);
+        if tabs.paused || !snapshot.is_current(&tabs, &cap) {
             return Ok(());
         }
-        let mut cap = client.capture.lock().unwrap();
         let Some(deadline) = cap
             .settle_deadline(target_id)
             .filter(|due| *due <= Instant::now())
         else {
             return Ok(());
         };
-        cap.settle_attempted = true;
         cap.settle_in_flight = true;
         let frame = cap.latest_frame.as_ref().unwrap();
         (
+            snapshot,
             deadline,
-            tabs.tab_epoch,
-            tabs.pause_epoch,
             (frame.viewport_width, frame.viewport_height),
         )
     };
@@ -621,33 +674,26 @@ fn capture_crisp_if_due(
         let tabs = client.tabs.lock().unwrap();
         let mut cap = client.capture.lock().unwrap();
         cap.settle_in_flight = false;
-        if cap.settle_at != Some(deadline) {
-            Ok(())
-        } else if tabs.paused
-            || tabs.pause_epoch != pause_epoch
-            || tabs.tab_epoch != epoch
-            || tabs.session_for(target_id).as_deref() != Some(session_id)
-            || tabs.has_dialog(target_id)
-            || cap.inputs_in_flight != 0
+        if cap.settle_at != Some(deadline)
+            || !snapshot.is_current(&tabs, &cap)
             || cap.screencast_idle_paused
         {
-            // The still arrived after a state change. Let the next eligible poll try again.
-            cap.settle_attempted = false;
             Ok(())
         } else {
             match shot {
-                Ok(shot) => {
-                    if let Some(data) = shot
-                        .get("data")
-                        .and_then(Value::as_str)
-                        .filter(|data| !data.is_empty())
-                    {
+                Err(err) if err.is_target_gone() => Err(err),
+                shot => {
+                    let data = shot.as_ref().ok().and_then(|value| value["data"].as_str());
+                    if let Some(data) = data.filter(|data| !data.is_empty()) {
                         cap.ingest_crisp_frame(target_id, data, viewport);
+                    } else {
+                        cap.settle_failures += 1;
+                        cap.settle_at = Some(
+                            Instant::now() + SETTLE_RETRY_BACKOFF * u32::from(cap.settle_failures),
+                        );
                     }
                     Ok(())
                 }
-                Err(err) if err.is_target_gone() => Err(err),
-                Err(_) => Ok(()),
             }
         }
     };
@@ -711,7 +757,6 @@ pub(crate) fn poll_frame(
     let paused = client.is_paused();
     let idle_paused = client.capture.lock().unwrap().screencast_idle_paused;
 
-    let mut target_id = String::new();
     let mut tabs: Vec<TabInfo> = Vec::new();
     let mut recovered = false;
 
@@ -723,14 +768,14 @@ pub(crate) fn poll_frame(
         };
         let force_tabs = params.force_refresh || attempt > 0;
         let (mut resolved_tid, mut resolved_tabs) =
-            client.resolve_target_id(ask_tid, force_tabs, true)?;
+            client.resolve_target_id(ask_tid, force_tabs, false)?;
 
         if resolved_tid.is_none() {
             // Chrome has 0 open windows/tabs: wait gently for a user-opened tab without spawning about:blank.
             if !params.force_refresh && params.wait_ms > 0 && !paused && !idle_paused {
                 let wait = params.wait_ms.clamp(40, 1200);
                 if client.wait_for_notify(Duration::from_millis(wait)) && client.is_connected() {
-                    let (next_tid, next_tabs) = client.resolve_target_id(None, true, true)?;
+                    let (next_tid, next_tabs) = client.resolve_target_id(None, true, false)?;
                     resolved_tid = next_tid;
                     resolved_tabs = next_tabs;
                 }
@@ -738,9 +783,14 @@ pub(crate) fn poll_frame(
         }
 
         let Some(tid) = resolved_tid else {
-            let (epoch, is_paused, pause_epoch) = {
+            let (active, epoch, is_paused, pause_epoch) = {
                 let ts = client.tabs.lock().unwrap();
-                (ts.tab_epoch, ts.paused, ts.pause_epoch)
+                (
+                    ts.active_target_id.clone(),
+                    ts.tab_epoch,
+                    ts.paused,
+                    ts.pause_epoch,
+                )
             };
             let (seq, is_idle) = {
                 let cap = client.capture.lock().unwrap();
@@ -759,7 +809,7 @@ pub(crate) fn poll_frame(
                 "pauseEpoch": pause_epoch,
                 "screencastPausedIdle": is_idle,
                 "noTabs": true,
-                "activeTargetId": Value::Null,
+                "activeTargetId": active,
                 "dialog": Value::Null,
                 "epoch": epoch,
                 "tabsHash": t_hash,
@@ -785,7 +835,7 @@ pub(crate) fn poll_frame(
             return Ok(resp);
         };
 
-        target_id = tid;
+        let target_id = tid;
         tabs = resolved_tabs;
 
         let attempt_res: Result<(), CdpError> = (|| {
@@ -920,22 +970,48 @@ pub(crate) fn poll_frame(
         }
     }
 
-    let (epoch, cur_paused, pause_epoch, dialog, popup_switched) = {
+    let connection_mode = client.connection_mode();
+    let (
+        active,
+        epoch,
+        cur_paused,
+        pause_epoch,
+        dialog,
+        popup_switched,
+        frame,
+        crisp,
+        cur_idle_paused,
+        captured_at,
+    ) = {
         let mut ts = client.tabs.lock().unwrap();
-        let dlg = ts.dialog_value_for(&target_id);
-        let popped = ts.take_popup_switched(&target_id);
-        (ts.tab_epoch, ts.paused, ts.pause_epoch, dlg, popped)
-    };
-    let (frame, crisp, cur_idle_paused, captured_at) = {
+        let active = ts
+            .active_target_id
+            .clone()
+            .filter(|_| connection_mode.is_some());
+        let dialog = ts.active_dialog_value();
+        let popped = active
+            .as_deref()
+            .is_some_and(|id| ts.take_popup_switched(id));
         let cap = client.capture.lock().unwrap();
-        let f = cap
+        let frame = cap
             .latest_frame
             .as_ref()
-            .filter(|f| f.target_id == target_id)
+            .filter(|f| active.as_deref() == Some(f.target_id.as_str()))
             .cloned();
-        let captured_at = f.as_ref().map(|_| cap.latest_frame_captured_at.clone());
-        let crisp = f.is_some() && cap.latest_frame_is_crisp();
-        (f, crisp, cap.screencast_idle_paused, captured_at)
+        let captured_at = frame.as_ref().map(|_| cap.latest_frame_captured_at.clone());
+        let crisp = frame.is_some() && cap.latest_frame_is_crisp();
+        (
+            active,
+            ts.tab_epoch,
+            ts.paused,
+            ts.pause_epoch,
+            dialog,
+            popped,
+            frame,
+            crisp,
+            cap.screencast_idle_paused,
+            captured_at,
+        )
     };
 
     let same_hash = frame
@@ -951,11 +1027,14 @@ pub(crate) fn poll_frame(
         .map(|f| !same_hash && (params.force_refresh || f.seq > params.since_seq || diff_hash))
         .unwrap_or(false);
 
+    if connection_mode.is_none() {
+        tabs.clear();
+    }
     let t_hash = hash_tabs(&tabs);
     let include_tabs = params.known_tabs_hash.is_empty() || params.known_tabs_hash != t_hash;
-    let tab_meta = tabs.iter().find(|t| t.target_id == target_id);
-
-    let connection_mode = client.connection_mode();
+    let tab_meta = tabs
+        .iter()
+        .find(|t| active.as_deref() == Some(t.target_id.as_str()));
     let mut resp = json!({
         "connected": connection_mode.is_some(),
         "connectionMode": connection_mode,
@@ -965,7 +1044,7 @@ pub(crate) fn poll_frame(
         "pauseEpoch": pause_epoch,
         "screencastPausedIdle": cur_idle_paused,
         "noTabs": false,
-        "activeTargetId": target_id,
+        "activeTargetId": active,
         "dialog": dialog,
         "epoch": epoch,
         "tabsHash": t_hash,

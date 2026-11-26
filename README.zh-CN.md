@@ -18,10 +18,9 @@
 
 </div>
 
-## 它是什么 / 不是什么
+## 概览
 
-- **它是什么**：基于原生 Rust 本机中继与 SEP-1865 MCP App 的实时投屏控制器，让你在 Antigravity 中直接点击、输入、滚动和管理本机 Chrome 标签页。
-- **它不是什么**：不是远程桌面、云端中转或无头爬虫 —— 所有调试连接严格限定在环回地址（`127.0.0.1` / `::1`），打开面板绝不自动拨号。
+Chrome Stream 通过 Rust 本地中继和 SEP-1865 MCP App，在 Antigravity 中传输本机 Chrome 画面，并提供输入和标签页控制。Chrome 调试流量仅使用环回地址（`127.0.0.1` 和 `::1`）。
 
 ## 核心特性
 
@@ -44,8 +43,8 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chr
 
 ### 2. 连接 Chrome
 
-- **连接日常 Chrome**：在运行中的 Chrome 打开 `chrome://inspect/#remote-debugging` 开启远程调试，在 Antigravity 打开 **Chrome Stream** 点 **连接日常 Chrome** 并在 Chrome 中点一次 **Allow**。远程离开电脑前只需点 **休眠**，切勿点彻底断开，即可长期免重弹 Allow。
-- **独立远程 Chrome（免 Allow）**：在离线页直接点 **启动独立远程 Chrome（免 Allow）**，自动以 `0700` 隔离配置目录仅监听 `127.0.0.1` 启动并接入。
+- **连接日常 Chrome**仅使用 Chrome 的 `DevToolsActivePort` 文件。先在 `chrome://inspect/#remote-debugging` 启用远程调试，再在 Antigravity 中打开 **Chrome Stream**。点击 **连接日常 Chrome**，然后在 Chrome 中确认 **Allow**。点击 **休眠**可保留已授权的连接。
+- **独立远程 Chrome（免 Allow）**在 `127.0.0.1` 启动，使用权限为 `0700` 的隔离配置目录。只有正在运行的浏览器端点与该目录匹配时，启动操作才会复用它。如果端口已被占用，请用 `CHROME_STREAM_DEBUG_PORT` 指定空闲端口，或连接日常 Chrome。
 
 ## AI Agent 专属指引
 
@@ -60,9 +59,10 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chr
 ## 安全与隐私边界
 
 - **严格环回（`127.0.0.1` / `::1`）**：拒绝一切非本机地址，绝不将 Chrome 调试端口暴露至局域网或公网。
-- **私有权限隔离（`0600` Socket / `0700` 独立配置）**：中继持有文件锁与 inode 校验，并发启动或旧进程退出绝不会误删活跃 Socket。
+- **本地访问控制**使用权限为 `0600` 的 Unix 套接字，并验证对端用户 ID。中继在使用套接字和权限为 `0700` 的 Chrome 配置目录前检查目录所有者和写权限。
 - **显式连接与 12 秒空闲停流**：打开面板不自动连接；12 秒无交互自动暂停抓屏护显卡，下次交互立即唤醒。
-- **信息脱敏与零外连**：返回给 Agent 前自动剥离本机路径、主机名与 WebSocket Token；面板严格执行 `default-src 'none'`，零外网请求。
+- **诊断脱敏**。`chrome-stream-mcp doctor --json` 默认省略本机文件路径和原始 DevTools WebSocket URL。
+- **MCP Apps 能力**。宿主协商 MCP App MIME 类型后，`resources/read` 会返回包含标签页和像素的启动快照。其他宿主收到静态面板 HTML。
 
 ## 相关文档
 

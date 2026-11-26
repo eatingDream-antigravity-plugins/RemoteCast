@@ -5,13 +5,14 @@ Complete operational reference for AI agents and power users: MCP tool schemas, 
 ## 1. MCP Protocol & Tools
 
 - Supported MCP protocol versions: `2025-11-25`, `2025-06-18`.
-- App-only tools (`_meta.ui.visibility: ["app"]`) are advertised in `tools/list` and permitted in `tools/call` **only** when the client negotiates MCP Apps UI capability (`extensions["io.modelcontextprotocol/ui"].mimeTypes` containing `"text/html;profile=mcp-app"`, or explicit legacy UI host capability).
+- The first `initialize` request fixes MCP Apps capability for the transport. The client must include the exact string `"text/html;profile=mcp-app"` in `capabilities.extensions["io.modelcontextprotocol/ui"].mimeTypes`.
+- With this capability, the host may call App-only tools and receive live bootstrap state in `resources/read`. Other hosts receive static panel HTML. The public stage tool returns an allowlisted readiness and connection summary.
 
 ### Public Tools (all MCP clients)
 
 | Tool | Parameters | Behavior |
 | :--- | :--- | :--- |
-| `chrome_stream_stage` | `{}` | Opens the live viewer (`ui://chrome-stream-mcp/stage`) and reports relay/Chrome readiness without auto-connecting. |
+| `chrome_stream_stage` | `{}` | Opens the live viewer (`ui://chrome-stream-mcp/stage`) and reports relay/Chrome readiness. The tool leaves the Chrome connection unchanged. |
 | `chrome_stream_connect` | `{ qualityPreset?: "auto" \| "ultra" \| "low" \| "medium" \| "high", rttMs?: number, mode?: "auto" \| "personal" \| "remote" }` | Connects to local Chrome (`auto` checks `DevToolsActivePort` then loopback debug port; `personal` uses port files only; `remote` uses loopback debug port only) and starts streaming the active tab. |
 | `chrome_stream_disconnect` | `{ mode?: "standby" \| "revoke" }` (default `"revoke"`) | `"standby"` pauses capture (0 FPS) while keeping the authorized CDP WebSocket warmly alive in the relay; `"revoke"` closes the CDP WebSocket (requiring local Chrome **Allow** again on personal Chrome). |
 
@@ -19,16 +20,17 @@ Complete operational reference for AI agents and power users: MCP tool schemas, 
 
 | Tool | Parameters | Behavior |
 | :--- | :--- | :--- |
-| `chrome_stream_frame` | `{ targetId?, sinceSeq?, lastFrameHash?, knownTabsHash?, qualityPreset?, rttMs?, waitMs?, forceRefresh? }` | Long-polls for changed JPEG motion frames or crisp settled WebP stills (`crisp: true, format: "webp"`); returns `unchanged: true, imageBytes: 0` with zero image cloning when unchanged. |
-| `chrome_stream_input` | `{ targetId?, targetEpoch?, events: [...] }` | Dispatches coalesced mouse, wheel, touch, keyboard, IME, dialog, navigation, tab, and pause/resume actions bound to `(targetId, targetEpoch)`. Rejects stale targets with `staleTarget: true` instead of misrouting input. |
-| `chrome_stream_launch_remote` | `{ qualityPreset?, rttMs? }` | Reuses an existing `127.0.0.1:<port>` Remote Chrome or spawns a detached isolated Chrome (`0700` `<data_dir>/remote-profile`, `--remote-debugging-address=127.0.0.1`), connects in `"remote"` mode, and warms the active tab. |
+| `chrome_stream_frame` | `{ targetId?, sinceSeq?, lastFrameHash?, knownTabsHash?, qualityPreset?, rttMs?, waitMs?, forceRefresh? }` | Long-polls for changed JPEG motion frames or crisp settled WebP stills (`crisp: true, format: "webp"`); returns `unchanged: true, imageBytes: 0` for unchanged frames. The bootstrap cache shares its stored image across unchanged updates. |
+| `chrome_stream_input` | `{ targetId?, targetEpoch?, events: [...] }` | Dispatches coalesced mouse, wheel, touch, keyboard, IME, dialog, navigation, tab, and pause/resume actions bound to `(targetId, targetEpoch)`. Closing a tab requires an explicit `targetId`. A stale `targetEpoch` or missing target yields `staleTarget: true`. |
+| `chrome_stream_launch_remote` | `{ qualityPreset?, rttMs? }` | Reuses a live endpoint verified against the isolated profile, or starts an isolated Chrome (`0700` `<data_dir>/remote-profile`, `--remote-debugging-address=127.0.0.1`), connects in `"remote"` mode, and warms the active tab. |
 
 ## 2. Standby vs. Revoke & Dedicated Remote Chrome
 
-- **Personal Chrome (`connectionMode: "personal"`)**: Connects via Chrome's `DevToolsActivePort`. Click **Allow** once locally; the user-only `0600` local relay holds the authorized session alive across plugin reloads and standby pauses (never exits on idle while connected).
-- **Standby (`mode: "standby"` or panel header Standby/Wake)**: Stops screencasting (`0 FPS`) without revoking Chrome consent. Recommended whenever stepping away from the computer.
-- **Revoke (`mode: "revoke"` or `⋯` menu -> Revoke & Disconnect)**: Tears down the CDP WebSocket and releases the Chrome debugging session.
-- **Remote Chrome (`connectionMode: "remote"`)**: Launches Chrome directly via `exec` argv (never `sh -c`) with `--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=<port>`, and `--user-data-dir=<data_dir>/remote-profile` (`0700`), completely isolated from personal Chrome and requiring no local **Allow** click.
+- **Personal Chrome** (`mode: "personal"`) discovers Chrome exclusively from its `DevToolsActivePort` files. Confirm **Allow** in Chrome. The local relay can keep that authorized WebSocket across host reloads and standby.
+- **Standby** (`mode: "standby"`) uses the relay's `pause` RPC and reports retained authorization only after the relay confirms both the connection and the pause.
+- **Revoke** (`mode: "revoke"`) closes the Chrome DevTools Protocol (CDP) WebSocket and clears the bootstrap page, tabs, and pixels. A relay failure returns `isError: true` with `unconfirmed: true`. Query live status or retry the revoke.
+- **Dedicated Remote Chrome** starts with `--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=<port>`, and `--user-data-dir=<data_dir>/remote-profile`. The launcher checks ongoing sessions against the profile's endpoint record and the live browser endpoint. On a conflict, set `CHROME_STREAM_DEBUG_PORT` to a free port or use Personal mode. The explicit `connect` option `mode: "remote"` attaches to the configured loopback port.
+- The relay checks same-user Unix socket credentials and validates the directory chain before using socket or profile files. Requests to the relay and MCP server have a 1 MiB line limit. Relay replies have a 16 MiB limit for calls and a 64 KiB limit for probes.
 
 ## 3. Weak-Network Profiles & Progressive Sharpness
 
@@ -40,7 +42,7 @@ Complete operational reference for AI agents and power users: MCP tool schemas, 
 | `high` | 84 | 1440 × 920 | every frame |
 
 - **EWMA + Asymmetric Hysteresis**: Smooths RTT with `alpha = 0.25`; downgrades only after 2 consecutive slow samples and upgrades only after 3 consecutive fast samples.
-- **Two-Stage Crisp Settle**: ~380 ms after the last motion frame or input burst on an active unpaused tab, captures one crisp WebP still (`quality: 86`, `crisp: true`, `format: "webp"`), then deduplicates subsequent polls at 0 bytes until motion/input resumes.
+- **Two-Stage Crisp Settle**: The relay requests a WebP still about 380 ms after the last pixel, viewport, or input change. It retries transient capture failures with backoff up to three total attempts. Later unchanged polls report `imageBytes: 0`.
 
 ## 4. Environment Variables
 
@@ -62,7 +64,9 @@ chrome-stream-mcp relay [--data-dir <path>]
 chrome-stream-mcp doctor [--json]
 ```
 
-Generic stdio MCP client config (Claude Code, Codex, Cursor, OpenCode, etc.):
+`doctor --json` returns a sanitized readiness summary by default. It omits local paths, raw DevTools WebSocket URLs, and live page data. The text form displays local socket and panel paths for interactive troubleshooting.
+
+Generic stdio MCP client configuration
 
 ```json
 {
