@@ -88,7 +88,7 @@ Generic stdio MCP client configuration
 Requires Rust (`cargo`) and Node.js 20+ (panel bundler & tests; zero npm dependencies):
 
 ```sh
-git clone https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp.git && cd chrome-stream-mcp
+git clone https://github.com/eatingDream-antigravity-plugins/RemoteCast.git && cd RemoteCast
 node panel/build.mjs && node --test panel/net-policy.test.mjs
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --locked
 cargo build --release --locked

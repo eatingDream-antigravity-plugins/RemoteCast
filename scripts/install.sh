@@ -1,12 +1,12 @@
 #!/bin/sh
 # Install Chrome Stream MCP plugin from GitHub Releases with SHA256 verification.
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chrome-stream-mcp/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
 #   CHROME_STREAM_VERSION=v0.1.0 sh scripts/install.sh
 
 set -eu
 
-REPO="${CHROME_STREAM_REPO:-eatingDream-antigravity-plugins/chrome-stream-mcp}"
+REPO="${CHROME_STREAM_REPO:-eatingDream-antigravity-plugins/RemoteCast}"
 PLUGINS_DIR="${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}"
 INSTALL_DIR="${PLUGINS_DIR}/chrome-stream-mcp"
 VERSION="${CHROME_STREAM_VERSION:-}"

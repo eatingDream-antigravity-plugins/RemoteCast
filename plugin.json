@@ -8,7 +8,7 @@
     "url": "https://github.com/eatingDream"
   },
   "homepage": "https://remotecast.eatingdream.dev",
-  "repository": "https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp",
+  "repository": "https://github.com/eatingDream-antigravity-plugins/RemoteCast",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Open RemoteCast to view and control local Chrome tabs",

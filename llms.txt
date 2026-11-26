@@ -12,7 +12,7 @@
 ## Quick Install (macOS / Linux)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chrome-stream-mcp/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
 ```
 
 ## Public MCP Tools

@@ -6,10 +6,10 @@
 
 **在 Antigravity 内实时查看和操作本机 Google Chrome —— 即使手机远程或弱网环境下，依然清晰跟手。**
 
-[主页](https://remotecast.eatingdream.dev) · [English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases) · [AI 使用指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[主页](https://remotecast.eatingdream.dev) · [English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/RemoteCast/releases) · [AI 使用指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
-[![CI](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml)
-[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)
+[![CI](https://github.com/eatingDream-antigravity-plugins/RemoteCast/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/RemoteCast/actions/workflows/ci.yml)
+[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/RemoteCast/releases)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
@@ -36,7 +36,7 @@ RemoteCast（`chrome-stream-mcp`）通过 Rust 本地中继和 SEP-1865 MCP App�
 ### 1. 一键安装（macOS 与 Linux）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chrome-stream-mcp/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
 ```
 
 安装完成后重载 Antigravity 即可生效。
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chr
 
 完整的 MCP 工具参数表、`CHROME_STREAM_*` 环境变量、CLI 诊断命令与跨客户端 stdio 配置已整理至面向 Agent 的文档中：
 
-- **通用 Skill（`agentskills.io`）**：[`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md)（或运行 `npx skills add eatingDream-antigravity-plugins/chrome-stream-mcp`）
+- **通用 Skill（`agentskills.io`）**：[`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md)（或运行 `npx skills add eatingDream-antigravity-plugins/RemoteCast`）
 - **完整 AI 与配置参考**：[`docs/ai-guide.md`](docs/ai-guide.md)
 - **LLM 索引入口**：[`llms.txt`](llms.txt)
 
@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chr
 
 ## Antigravity 插件套件
 
-隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[ContextRadar](https://github.com/eatingDream-antigravity-plugins/context-radar-mcp)（`context-radar-mcp`）· [ClamGuard](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp)（`mac-clamshell-mcp`）· **RemoteCast**（`chrome-stream-mcp`）· [ColabDeck](https://github.com/eatingDream-antigravity-plugins/colab-mcp)（`colab-mcp`），由 [PanelKit](https://github.com/eatingDream-antigravity-plugins/agy-mcp-kit)（`agy-mcp-kit`）统一驱动。
+隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[ContextRadar](https://github.com/eatingDream-antigravity-plugins/ContextRadar)（`context-radar-mcp`）· [ClamGuard](https://github.com/eatingDream-antigravity-plugins/ClamGuard)（`mac-clamshell-mcp`）· **RemoteCast**（`chrome-stream-mcp`）· [ColabDeck](https://github.com/eatingDream-antigravity-plugins/ColabDeck)（`colab-mcp`），由 [PanelKit](https://github.com/eatingDream-antigravity-plugins/PanelKit)（`agy-mcp-kit`）统一驱动。
 
 ## 许可证
 
