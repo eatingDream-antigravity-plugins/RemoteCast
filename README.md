@@ -6,10 +6,10 @@
 
 **View and interact with your local Google Chrome tabs inside Antigravity — crisp and responsive even over slow mobile or remote links.**
 
-[Homepage](https://remotecast.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[Homepage](https://remotecast.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/RemoteCast/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
-[![CI](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/actions/workflows/ci.yml)
-[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/releases)
+[![CI](https://github.com/eatingDream-antigravity-plugins/RemoteCast/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/RemoteCast/actions/workflows/ci.yml)
+[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/RemoteCast/releases)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
@@ -36,7 +36,7 @@ RemoteCast (`chrome-stream-mcp`) is a native Rust relay and SEP-1865 MCP App. It
 ### 1. Install (macOS & Linux)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chrome-stream-mcp/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
 ```
 
 Reload Antigravity after installation.
@@ -50,7 +50,7 @@ Reload Antigravity after installation.
 
 Point your coding agent directly to the machine-readable guides for complete MCP tool schemas, `CHROME_STREAM_*` environment variables, CLI diagnostics, and stdio setup:
 
-- **Skill (`agentskills.io`)**: [`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md) (or `npx skills add eatingDream-antigravity-plugins/chrome-stream-mcp`)
+- **Skill (`agentskills.io`)**: [`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md) (or `npx skills add eatingDream-antigravity-plugins/RemoteCast`)
 - **Full AI & Configuration Guide**: [`docs/ai-guide.md`](docs/ai-guide.md)
 - **LLM Entry Index**: [`llms.txt`](llms.txt)
 
@@ -72,7 +72,7 @@ Point your coding agent directly to the machine-readable guides for complete MCP
 
 ## Antigravity Plugin Suite
 
-Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [ContextRadar](https://github.com/eatingDream-antigravity-plugins/context-radar-mcp) (`context-radar-mcp`) · [ClamGuard](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp) (`mac-clamshell-mcp`) · **RemoteCast** (`chrome-stream-mcp`) · [ColabDeck](https://github.com/eatingDream-antigravity-plugins/colab-mcp) (`colab-mcp`) — powered by [PanelKit](https://github.com/eatingDream-antigravity-plugins/agy-mcp-kit) (`agy-mcp-kit`).
+Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [ContextRadar](https://github.com/eatingDream-antigravity-plugins/ContextRadar) (`context-radar-mcp`) · [ClamGuard](https://github.com/eatingDream-antigravity-plugins/ClamGuard) (`mac-clamshell-mcp`) · **RemoteCast** (`chrome-stream-mcp`) · [ColabDeck](https://github.com/eatingDream-antigravity-plugins/ColabDeck) (`colab-mcp`) — powered by [PanelKit](https://github.com/eatingDream-antigravity-plugins/PanelKit) (`agy-mcp-kit`).
 
 ## License
 
