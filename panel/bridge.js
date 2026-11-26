@@ -1,26 +1,20 @@
 // Lightweight SEP-1865 (2026-01-26) MCP Apps PostMessage bridge.
 export const LATEST_PROTOCOL_VERSION = "2026-01-26";
 const de = () => document.documentElement;
-
 const HX = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
 function parseAlpha(v) {
   const s = String(v || "").trim().toLowerCase();
-  if (!s || s === "transparent" || s === "none" || s === "initial" || s === "inherit" || s === "unset") return 0;
+  if (/^(|transparent|none|initial|inherit|unset)$/.test(s)) return 0;
   const hx = s.match(HX);
   if (hx) {
     const h = hx[1];
-    if (h.length === 4) return parseInt(h[3] + h[3], 16) / 255;
-    if (h.length === 8) return parseInt(h.slice(6, 8), 16) / 255;
-    return 1;
+    return h.length === 4 ? parseInt(h[3] + h[3], 16) / 255 : h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
   }
-  const fn = s.match(/^(?:rgba?|hsla?)\([^,)]+,[^,)]+,[^,)]+,\s*(\d*\.?\d+%?)\s*\)$/) ||
-    s.match(/\/\s*(\d*\.?\d+%?)\s*\)$/);
-  if (fn) {
-    const a = fn[1].endsWith("%") ? parseFloat(fn[1]) / 100 : parseFloat(fn[1]);
-    return Number.isFinite(a) ? Math.max(0, Math.min(1, a)) : 0;
-  }
-  return 1;
+  const fn = s.match(/^(?:rgba?|hsla?)\([^,)]+,[^,)]+,[^,)]+,\s*(\d*\.?\d+%?)\s*\)$/) || s.match(/\/\s*(\d*\.?\d+%?)\s*\)$/);
+  if (!fn) return 1;
+  const a = fn[1].endsWith("%") ? parseFloat(fn[1]) / 100 : parseFloat(fn[1]);
+  return Number.isFinite(a) ? Math.max(0, Math.min(1, a)) : 0;
 }
 
 export function lum(raw) {
@@ -28,7 +22,7 @@ export function lum(raw) {
   if (parseAlpha(s) < 0.5) return null;
   const m = s.match(HX);
   if (m) {
-    const h = m[1], p = h.length <= 4 ? [h[0]+h[0], h[1]+h[1], h[2]+h[2]] : [h.slice(0,2), h.slice(2,4), h.slice(4,6)];
+    const h = m[1], p = h.length <= 4 ? [h[0] + h[0], h[1] + h[1], h[2] + h[2]] : [h.slice(0, 2), h.slice(2, 4), h.slice(4, 6)];
     return (0.2126 * parseInt(p[0], 16) + 0.7152 * parseInt(p[1], 16) + 0.0722 * parseInt(p[2], 16)) / 255;
   }
   const r = s.match(/^rgba?\(\s*(\d*\.?\d+)[\s,]+(\d*\.?\d+)[\s,]+(\d*\.?\d+)/i);
@@ -37,7 +31,7 @@ export function lum(raw) {
 
 export function applyDocumentTheme(t) {
   if (t !== "dark" && t !== "light") return;
-  const e = de(), bg = t === "light" ? "var(--color-background-primary,#FAF8F5)" : "var(--color-background-primary,#141311)";
+  const e = de(), bg = `var(--color-background-primary,${t === "light" ? "#FAF8F5" : "#141311"})`;
   if (e.getAttribute("data-theme") !== t) e.setAttribute("data-theme", t);
   e.style.colorScheme = t; e.style.backgroundColor = bg;
   if (document.body) document.body.style.backgroundColor = bg;
@@ -46,13 +40,12 @@ export function applyDocumentTheme(t) {
 }
 
 export function applyHostStyleVariables(v, el = de()) {
-  if (v && typeof v === "object") {
-    for (const [k, x] of Object.entries(v)) {
-      if (x == null) continue;
-      const val = String(x).trim();
-      if (k === "--color-background-primary" && (!val || parseAlpha(val) < 0.9)) continue;
-      el.style.setProperty(k, val);
-    }
+  if (!v || typeof v !== "object") return;
+  for (const [k, x] of Object.entries(v)) {
+    if (x == null) continue;
+    const val = String(x).trim();
+    if (k === "--color-background-primary" && (!val || parseAlpha(val) < 0.9)) continue;
+    el.style.setProperty(k, val);
   }
 }
 
@@ -66,8 +59,7 @@ export function applyHostContext(c) {
   if (c.styles?.variables) applyHostStyleVariables(c.styles.variables);
   if (c.styles?.css?.fonts) applyHostFonts(c.styles.css.fonts);
   const raw = String(c.theme || "").trim().toLowerCase();
-  let t = raw.includes("dark") || raw.includes("night") || raw.includes("black") ? "dark"
-    : raw.includes("light") || raw.includes("day") || raw.includes("white") ? "light" : null;
+  let t = /dark|night|black/.test(raw) ? "dark" : /light|day|white/.test(raw) ? "light" : null;
   if (!t) {
     const bg = c.styles?.variables?.["--color-background-primary"] ||
       (typeof getComputedStyle === "function" ? getComputedStyle(de()).getPropertyValue("--color-background-primary") : "");
@@ -118,8 +110,7 @@ export class App {
     return new Promise((res, rej) => {
       const arm = () => globalThis.setTimeout(() => { this._p.delete(id); rej(new Error(`Timeout:${method}`)); }, timeoutMs);
       const e = { res, rej, t: arm(), reset() { globalThis.clearTimeout(e.t); e.t = arm(); } };
-      this._p.set(id, e);
-      this._send({ id, method, params });
+      this._p.set(id, e); this._send({ id, method, params });
     });
   }
   notification(method, params) { this._send(params !== undefined ? { method, params } : { method }); }

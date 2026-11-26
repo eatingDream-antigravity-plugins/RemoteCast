@@ -1,12 +1,15 @@
+use crate::cdp::capture::{self, FramePipeline};
 use crate::cdp::discovery::{
     discover_port_file, probe_debug_port_ws_url, resolve_ws_url_candidates, PortFileStatus,
 };
+use crate::cdp::input::InputDispatcher;
 use crate::cdp::protocol::{
     default_ws_factory, CdpTransport, TransportEvent, TransportFactory,
 };
+use crate::cdp::targets::{self, TabStateStore};
 use crate::i18n::{chrome_not_found_error, current_lang};
-use crate::stream::dedup::{hash_frame_data, hash_tabs, is_target_gone_error, normalize_url};
-use crate::stream::profiles::{resolve_profile, QualityProfile, TabInfo};
+use crate::stream::dedup::{hash_tabs, is_target_gone_error};
+use crate::stream::profiles::{QualityProfile, TabInfo};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,12 +20,14 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use crate::cdp::capture::SCREENCAST_TIER_DWELL;
+#[cfg(test)]
+use crate::cdp::input::edit_command_def_for_os;
+
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
-pub const SCREENCAST_IDLE_STOP: Duration = Duration::from_secs(12);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(65);
-const CMD_TIMEOUT: Duration = Duration::from_secs(12);
-const CLOSED_TARGET_TTL: Duration = Duration::from_secs(5);
-const TAB_CACHE_TTL: Duration = Duration::from_millis(2500);
+pub(crate) const CMD_TIMEOUT: Duration = Duration::from_secs(12);
 pub const BOOT_SNAPSHOT_MAX_DATA_URL_CHARS: usize = 120_000;
 
 #[derive(Debug, Clone)]
@@ -160,127 +165,37 @@ struct PendingCall {
     method: String,
 }
 
-struct ClientState {
+struct TransportState {
     transport: Option<Arc<dyn CdpTransport>>,
     connecting: bool,
-    paused: bool,
-    screencast_idle_paused: bool,
-    sessions: HashMap<String, String>,          // targetId -> sessionId
-    session_to_target: HashMap<String, String>, // sessionId -> targetId
-    dialogs: HashMap<String, JsDialogInfo>,     // targetId -> open modal JS dialog
-    active_target_id: Option<String>,
-    popup_switched_target: Option<String>,
-    tab_epoch: u64,
-    recently_closed: HashMap<String, Instant>,
-    screencast_target_id: Option<String>,
-    screencast_quality: String,
-    screencast_profile: Option<String>,
-    last_poll_at: Instant,
-    last_interaction_at: Instant,
     last_keepalive_at: Instant,
-    last_fallback_shot_at: Option<Instant>,
-    frame_seq: u64,
-    deduped_frames: u64,
-    latest_frame: Option<FrameRecord>,
-    cached_tabs: Vec<TabInfo>,
-    last_tabs_at: Option<Instant>,
 }
 
-impl ClientState {
+impl TransportState {
     fn new() -> Self {
-        let now = Instant::now();
         Self {
             transport: None,
             connecting: false,
-            paused: false,
-            screencast_idle_paused: false,
-            sessions: HashMap::new(),
-            session_to_target: HashMap::new(),
-            dialogs: HashMap::new(),
-            active_target_id: None,
-            popup_switched_target: None,
-            tab_epoch: 1,
-            recently_closed: HashMap::new(),
-            screencast_target_id: None,
-            screencast_quality: "low".to_string(),
-            screencast_profile: None,
-            last_poll_at: now,
-            last_interaction_at: now,
-            last_keepalive_at: now,
-            last_fallback_shot_at: None,
-            frame_seq: 0,
-            deduped_frames: 0,
-            latest_frame: None,
-            cached_tabs: Vec::new(),
-            last_tabs_at: None,
+            last_keepalive_at: Instant::now(),
         }
     }
 
-    fn prune_closed(&mut self) {
-        let now = Instant::now();
-        self.recently_closed
-            .retain(|_, ts| now.duration_since(*ts) <= CLOSED_TARGET_TTL);
-    }
-
-    fn is_recently_closed(&mut self, target_id: &str) -> bool {
-        self.prune_closed();
-        self.recently_closed.contains_key(target_id)
-    }
-
-    fn evict_session(&mut self, target_id: &str) {
-        if let Some(old_sid) = self.sessions.remove(target_id) {
-            self.session_to_target.remove(&old_sid);
-        }
-        self.dialogs.remove(target_id);
-        if self.screencast_target_id.as_deref() == Some(target_id) {
-            self.screencast_target_id = None;
-            self.screencast_profile = None;
-        }
-    }
-
-    fn active_dialog_value(&self) -> Value {
-        self.active_target_id
-            .as_deref()
-            .and_then(|tid| self.dialogs.get(tid))
-            .and_then(|d| serde_json::to_value(d).ok())
-            .unwrap_or(Value::Null)
-    }
-
-    fn handle_target_gone(&mut self, target_id: &str, mark_closed: bool) -> bool {
-        if target_id.is_empty() {
-            return false;
-        }
-        if mark_closed {
-            self.recently_closed
-                .insert(target_id.to_string(), Instant::now());
-        }
-        self.evict_session(target_id);
-        self.cached_tabs.retain(|t| t.target_id != target_id);
-        self.last_tabs_at = None;
-        if self
-            .latest_frame
-            .as_ref()
-            .map(|f| f.target_id.as_str() == target_id)
-            .unwrap_or(false)
-        {
-            self.latest_frame = None;
-        }
-        if self.active_target_id.as_deref() == Some(target_id) {
-            self.active_target_id = self.cached_tabs.first().map(|t| t.target_id.clone());
-            self.tab_epoch += 1;
-            return true;
-        }
-        false
+    fn is_open(&self) -> bool {
+        self.transport.as_ref().map(|t| t.is_open()).unwrap_or(false)
     }
 }
 
+/// Facade coordinating orthogonal CDP subsystems (`TransportState`, `TabStateStore`,
+/// `FramePipeline`, and `InputDispatcher`).
 pub struct CdpClient {
     port_files: Vec<PathBuf>,
     debug_port: u16,
     ws_url_override: Option<String>,
     ws_factory: TransportFactory,
     connect_lock: Mutex<()>,
-    state: Mutex<ClientState>,
+    transport_state: Mutex<TransportState>,
+    pub(crate) tabs: Mutex<TabStateStore>,
+    pub(crate) capture: Mutex<FramePipeline>,
     pending: Mutex<HashMap<u64, PendingCall>>,
     next_id: AtomicU64,
     frame_notify: (Mutex<u64>, Condvar),
@@ -327,7 +242,9 @@ impl CdpClient {
             ws_url_override,
             ws_factory,
             connect_lock: Mutex::new(()),
-            state: Mutex::new(ClientState::new()),
+            transport_state: Mutex::new(TransportState::new()),
+            tabs: Mutex::new(TabStateStore::new()),
+            capture: Mutex::new(FramePipeline::new()),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             frame_notify: (Mutex::new(0), Condvar::new()),
@@ -359,53 +276,21 @@ impl CdpClient {
         self.disconnect();
     }
 
-    /// Stops Chrome GPU screencasting once 12s have elapsed since the last real user interaction,
-    /// even if the panel continues background status polling.
-    pub fn check_idle_screencast_stop(self: &Arc<Self>) -> bool {
-        let should_stop = {
-            let mut st = self.state.lock().unwrap();
-            let connected = st
-                .transport
-                .as_ref()
-                .map(|t| t.is_open())
-                .unwrap_or(false);
-            if !connected || st.paused {
-                false
-            } else if st.last_interaction_at.elapsed() >= SCREENCAST_IDLE_STOP {
-                let had_sc = st.screencast_target_id.is_some();
-                st.screencast_idle_paused = true;
-                had_sc
-            } else {
-                false
-            }
-        };
-        if should_stop {
-            self.stop_screencast();
-            self.notify_frame_waiters();
-        }
-        should_stop
-    }
-
     fn keepalive_tick(self: &Arc<Self>) {
+        self.tabs.lock().unwrap().prune_closed();
         let need_ping = {
-            let mut st = self.state.lock().unwrap();
-            st.prune_closed();
-            let connected = st
-                .transport
-                .as_ref()
-                .map(|t| t.is_open())
-                .unwrap_or(false);
+            let mut tr = self.transport_state.lock().unwrap();
             let now = Instant::now();
-            let ping = connected && now.duration_since(st.last_keepalive_at) >= KEEPALIVE_INTERVAL;
+            let ping = tr.is_open() && now.duration_since(tr.last_keepalive_at) >= KEEPALIVE_INTERVAL;
             if ping {
-                st.last_keepalive_at = now;
+                tr.last_keepalive_at = now;
             }
             ping
         };
         if need_ping {
             let _ = self.send_cdp("Browser.getVersion", json!({}), None, Duration::from_secs(5));
         }
-        self.check_idle_screencast_stop();
+        capture::check_idle_screencast_stop(self);
     }
 
     pub fn port_file_status(&self) -> PortFileStatus {
@@ -443,71 +328,90 @@ impl CdpClient {
     }
 
     pub fn is_connected(&self) -> bool {
-        let st = self.state.lock().unwrap();
-        st.transport.as_ref().map(|t| t.is_open()).unwrap_or(false)
+        self.transport_state.lock().unwrap().is_open()
     }
 
     pub fn is_connecting(&self) -> bool {
-        self.state.lock().unwrap().connecting
+        self.transport_state.lock().unwrap().connecting
     }
 
     pub fn is_paused(&self) -> bool {
-        self.state.lock().unwrap().paused
+        self.tabs.lock().unwrap().paused
+    }
+
+    pub fn pause_epoch(&self) -> u64 {
+        self.tabs.lock().unwrap().pause_epoch
     }
 
     #[cfg(test)]
     pub fn is_screencast_idle_paused(&self) -> bool {
-        self.state.lock().unwrap().screencast_idle_paused
+        self.capture.lock().unwrap().screencast_idle_paused
     }
 
     #[cfg(test)]
-    pub fn rewind_last_interaction(&self, age: Duration) {
-        let mut st = self.state.lock().unwrap();
-        st.last_interaction_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+    pub fn rewind_capture_idle(&self, age: Duration) {
+        let mut cap = self.capture.lock().unwrap();
+        cap.capture_idle_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+    }
+
+    #[cfg(test)]
+    pub fn rewind_screencast_started_at(&self, age: Duration) {
+        let mut cap = self.capture.lock().unwrap();
+        cap.screencast_started_at = Some(Instant::now().checked_sub(age).unwrap_or_else(Instant::now));
     }
 
     pub fn pause(self: &Arc<Self>) {
-        {
-            let mut st = self.state.lock().unwrap();
-            st.paused = true;
-            st.screencast_idle_paused = false;
-        }
+        self.tabs.lock().unwrap().set_paused(true);
+        self.capture.lock().unwrap().screencast_idle_paused = false;
         self.stop_screencast();
         self.notify_frame_waiters();
     }
 
     pub fn resume(&self) {
-        {
-            let mut st = self.state.lock().unwrap();
-            let now = Instant::now();
-            st.paused = false;
-            st.screencast_idle_paused = false;
-            st.last_poll_at = now;
-            st.last_interaction_at = now;
-        }
+        self.tabs.lock().unwrap().set_paused(false);
+        self.capture.lock().unwrap().notify_activity();
         self.notify_frame_waiters();
     }
 
     pub fn active_target_id(&self) -> Option<String> {
-        self.state.lock().unwrap().active_target_id.clone()
+        self.tabs.lock().unwrap().active_target_id.clone()
     }
 
     pub fn active_dialog(&self) -> Value {
-        self.state.lock().unwrap().active_dialog_value()
+        self.tabs.lock().unwrap().active_dialog_value()
     }
 
     pub fn tab_epoch(&self) -> u64 {
-        self.state.lock().unwrap().tab_epoch
+        self.tabs.lock().unwrap().tab_epoch
     }
 
     #[cfg(test)]
     pub fn deduped_frames(&self) -> u64 {
-        self.state.lock().unwrap().deduped_frames
+        self.capture.lock().unwrap().deduped_frames
     }
 
     #[cfg(test)]
     pub fn screencast_target_id(&self) -> Option<String> {
-        self.state.lock().unwrap().screencast_target_id.clone()
+        self.capture.lock().unwrap().screencast_target_id.clone()
+    }
+
+    #[cfg(test)]
+    pub fn screencast_profile(&self) -> Option<String> {
+        self.capture.lock().unwrap().screencast_profile.clone()
+    }
+
+    pub(crate) fn handle_target_gone(&self, target_id: &str, mark_closed: bool) -> bool {
+        let active_changed = self
+            .tabs
+            .lock()
+            .unwrap()
+            .mark_target_gone(target_id, mark_closed);
+        {
+            let mut cap = self.capture.lock().unwrap();
+            cap.clear_screencast_if_target(target_id);
+            cap.clear_frame_if_target(target_id);
+        }
+        active_changed
     }
 
     pub fn status_snapshot(&self, relay_pid: u32, relay_version: &str) -> Value {
@@ -516,51 +420,92 @@ impl CdpClient {
             .get("valid")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let st = self.state.lock().unwrap();
-        let connected = st.transport.as_ref().map(|t| t.is_open()).unwrap_or(false);
+        let (connected, connecting) = {
+            let tr = self.transport_state.lock().unwrap();
+            (tr.is_open(), tr.connecting)
+        };
+        let (paused, pause_epoch, no_tabs, active_tid, dialog, epoch) = {
+            let ts = self.tabs.lock().unwrap();
+            (
+                connected && ts.paused,
+                ts.pause_epoch,
+                connected && ts.cached_tabs.is_empty() && ts.active_target_id.is_none(),
+                ts.active_target_id.clone(),
+                if connected {
+                    ts.active_dialog_value()
+                } else {
+                    Value::Null
+                },
+                ts.tab_epoch,
+            )
+        };
+        let (idle_paused, has_cached_frame, profile, deduped_frames) = {
+            let cap = self.capture.lock().unwrap();
+            (
+                connected && cap.screencast_idle_paused,
+                cap.latest_frame.is_some(),
+                cap.screencast_profile.clone(),
+                cap.deduped_frames,
+            )
+        };
+
         json!({
             "hostname": "localhost",
             "locale": current_lang().as_str(),
             "connected": connected,
-            "connecting": st.connecting,
-            "paused": connected && st.paused,
-            "screencastPausedIdle": connected && st.screencast_idle_paused,
-            "noTabs": connected && st.cached_tabs.is_empty() && st.active_target_id.is_none(),
+            "connecting": connecting,
+            "paused": paused,
+            "pauseEpoch": pause_epoch,
+            "screencastPausedIdle": idle_paused,
+            "noTabs": no_tabs,
             "chromeReady": chrome_ready,
             "portFile": port_file,
-            "activeTargetId": st.active_target_id,
-            "dialog": if connected { st.active_dialog_value() } else { Value::Null },
-            "epoch": st.tab_epoch,
-            "hasCachedFrame": st.latest_frame.is_some(),
-            "qualityProfile": st.screencast_profile,
-            "dedupedFrames": st.deduped_frames,
+            "activeTargetId": active_tid,
+            "dialog": dialog,
+            "epoch": epoch,
+            "hasCachedFrame": has_cached_frame,
+            "qualityProfile": profile,
+            "dedupedFrames": deduped_frames,
             "relayVersion": relay_version,
             "relayPid": relay_pid,
             "checkedAt": now_iso(),
         })
     }
 
+    /// Builds a zero-side-effect boot snapshot for SWR HTML injection.
+    /// Never downgrades or restarts an already-active high/medium screencast.
     pub fn boot_snapshot(
         self: &Arc<Self>,
         relay_pid: u32,
         relay_version: &str,
-        quality_preset: &str,
+        quality_preset: Option<&str>,
         rtt_ms: f64,
     ) -> Value {
-        let (connected, paused, idle_paused, tabs, active_tid, epoch, frame, profile, dialog) = {
-            let st = self.state.lock().unwrap();
-            let connected = st.transport.as_ref().map(|t| t.is_open()).unwrap_or(false);
-            let paused = connected && st.paused;
-            let idle_paused = connected && st.screencast_idle_paused;
-            let tabs = if connected {
-                st.cached_tabs.clone()
-            } else {
-                Vec::new()
-            };
-            let active = st.active_target_id.clone();
-            let frame = if connected {
-                st.latest_frame.as_ref().and_then(|f| {
-                    if active.as_deref() == Some(f.target_id.as_str())
+        let connected = self.is_connected();
+        let (paused, pause_epoch, tabs, active_tid, epoch, dialog) = {
+            let ts = self.tabs.lock().unwrap();
+            (
+                connected && ts.paused,
+                ts.pause_epoch,
+                if connected {
+                    ts.cached_tabs.clone()
+                } else {
+                    Vec::new()
+                },
+                ts.active_target_id.clone(),
+                ts.tab_epoch,
+                if connected {
+                    ts.active_dialog_value()
+                } else {
+                    Value::Null
+                },
+            )
+        };
+        let (idle_paused, frame, profile, has_active_sc) = {
+            let cap = self.capture.lock().unwrap();
+            let f = if connected {
+                cap.latest_frame.as_ref().and_then(|f| {
+                    if active_tid.as_deref() == Some(f.target_id.as_str())
                         && f.image_data_url.len() < BOOT_SNAPSHOT_MAX_DATA_URL_CHARS
                     {
                         Some(f.clone())
@@ -571,29 +516,22 @@ impl CdpClient {
             } else {
                 None
             };
-            let dialog = if connected {
-                st.active_dialog_value()
-            } else {
-                Value::Null
-            };
             (
-                connected,
-                paused,
-                idle_paused,
-                tabs,
-                active,
-                st.tab_epoch,
-                frame,
-                st.screencast_profile.clone().unwrap_or_else(|| "low".into()),
-                dialog,
+                connected && cap.screencast_idle_paused,
+                f,
+                cap.screencast_profile
+                    .clone()
+                    .unwrap_or_else(|| "low".into()),
+                cap.screencast_target_id.is_some(),
             )
         };
 
-        if connected && !paused && !idle_paused && !tabs.is_empty() {
+        // Only warm on cold start when NO screencast is active; never downgrade an active stream!
+        if connected && !paused && !idle_paused && !tabs.is_empty() && !has_active_sc {
             let c = Arc::clone(self);
-            let qp = quality_preset.to_string();
+            let qp = quality_preset.map(String::from);
             let _ = thread::spawn(move || {
-                c.warm_active_tab(&qp, rtt_ms);
+                c.warm_active_tab(qp.as_deref(), rtt_ms);
             });
         }
 
@@ -615,6 +553,7 @@ impl CdpClient {
             "connected": connected,
             "connecting": self.is_connecting(),
             "paused": paused,
+            "pauseEpoch": pause_epoch,
             "screencastPausedIdle": idle_paused,
             "noTabs": connected && tabs.is_empty() && active_tid.is_none(),
             "chromeReady": chrome_ready,
@@ -643,14 +582,14 @@ impl CdpClient {
         })
     }
 
-    fn notify_frame_waiters(&self) {
+    pub(crate) fn notify_frame_waiters(&self) {
         let (lock, cvar) = &self.frame_notify;
         let mut gen = lock.lock().unwrap();
         *gen = gen.wrapping_add(1);
         cvar.notify_all();
     }
 
-    fn wait_for_next_frame(
+    pub(crate) fn wait_for_next_frame(
         &self,
         since_seq: u64,
         timeout: Duration,
@@ -660,23 +599,29 @@ impl CdpClient {
         let (lock, cvar) = &self.frame_notify;
         let mut gen = lock.lock().unwrap();
         loop {
+            if !self.is_connected() {
+                return;
+            }
             {
-                let mut st = self.state.lock().unwrap();
-                if st.paused
-                    || st.screencast_idle_paused
-                    || !st.transport.as_ref().map(|t| t.is_open()).unwrap_or(false)
-                {
+                let mut ts = self.tabs.lock().unwrap();
+                if ts.paused {
                     return;
                 }
                 if let Some(tid) = expected_target_id {
-                    if st.is_recently_closed(tid) || st.dialogs.contains_key(tid) {
-                        return;
-                    }
-                    if st.active_target_id.as_deref() != Some(tid) {
+                    if ts.is_recently_closed(tid)
+                        || ts.has_dialog(tid)
+                        || ts.active_target_id.as_deref() != Some(tid)
+                    {
                         return;
                     }
                 }
-                if let Some(f) = &st.latest_frame {
+            }
+            {
+                let cap = self.capture.lock().unwrap();
+                if cap.screencast_idle_paused {
+                    return;
+                }
+                if let Some(f) = &cap.latest_frame {
                     let target_ok = expected_target_id
                         .map(|tid| f.target_id == tid)
                         .unwrap_or(true);
@@ -698,7 +643,7 @@ impl CdpClient {
         }
     }
 
-    fn wait_for_notify(&self, timeout: Duration) -> bool {
+    pub(crate) fn wait_for_notify(&self, timeout: Duration) -> bool {
         let (lock, cvar) = &self.frame_notify;
         let gen = lock.lock().unwrap();
         let start_gen = *gen;
@@ -708,24 +653,12 @@ impl CdpClient {
 
     pub fn disconnect(&self) {
         let old_transport = {
-            let mut st = self.state.lock().unwrap();
-            st.connecting = false;
-            st.paused = false;
-            st.screencast_idle_paused = false;
-            st.sessions.clear();
-            st.session_to_target.clear();
-            st.dialogs.clear();
-            st.recently_closed.clear();
-            st.active_target_id = None;
-            st.popup_switched_target = None;
-            st.screencast_target_id = None;
-            st.screencast_profile = None;
-            st.latest_frame = None;
-            st.last_fallback_shot_at = None;
-            st.cached_tabs.clear();
-            st.last_tabs_at = None;
-            st.transport.take()
+            let mut tr = self.transport_state.lock().unwrap();
+            tr.connecting = false;
+            tr.transport.take()
         };
+        self.tabs.lock().unwrap().reset_on_disconnect();
+        self.capture.lock().unwrap().reset_on_disconnect();
         self.fail_all_pending("Chrome CDP connection closed");
         self.notify_frame_waiters();
         if let Some(t) = old_transport {
@@ -747,16 +680,12 @@ impl CdpClient {
     /// ONLY invoked by explicit `connect` RPC (never by background polls or input batches).
     pub fn ensure_connected(self: &Arc<Self>) -> Result<(), CdpError> {
         if self.is_connected() {
-            let mut st = self.state.lock().unwrap();
-            st.last_interaction_at = Instant::now();
-            st.screencast_idle_paused = false;
+            self.capture.lock().unwrap().notify_activity();
             return Ok(());
         }
         let _connect_guard = self.connect_lock.lock().unwrap();
         if self.is_connected() {
-            let mut st = self.state.lock().unwrap();
-            st.last_interaction_at = Instant::now();
-            st.screencast_idle_paused = false;
+            self.capture.lock().unwrap().notify_activity();
             return Ok(());
         }
 
@@ -766,10 +695,7 @@ impl CdpClient {
             .or_else(|| resolve_ws_url_candidates(&self.port_files, self.debug_port))
             .ok_or_else(|| CdpError::new(chrome_not_found_error(current_lang())))?;
 
-        {
-            let mut st = self.state.lock().unwrap();
-            st.connecting = true;
-        }
+        self.transport_state.lock().unwrap().connecting = true;
 
         let weak = Arc::downgrade(self);
         let on_event = Arc::new(move |ev: TransportEvent| {
@@ -784,23 +710,19 @@ impl CdpClient {
         match connect_res {
             Ok(transport) => {
                 {
-                    let mut st = self.state.lock().unwrap();
-                    let now = Instant::now();
-                    st.transport = Some(Arc::clone(&transport));
-                    st.connecting = false;
-                    st.paused = false;
-                    st.screencast_idle_paused = false;
-                    st.last_keepalive_at = now;
-                    st.last_interaction_at = now;
-                    st.last_poll_at = now;
+                    let mut tr = self.transport_state.lock().unwrap();
+                    tr.transport = Some(Arc::clone(&transport));
+                    tr.connecting = false;
+                    tr.last_keepalive_at = Instant::now();
                 }
+                self.tabs.lock().unwrap().set_paused(false);
+                self.capture.lock().unwrap().notify_activity();
                 // Subscribe to target lifecycle events so external tab closures & popups sync immediately
                 self.send_no_wait("Target.setDiscoverTargets", json!({ "discover": true }), None);
                 Ok(())
             }
             Err(msg) => {
-                let mut st = self.state.lock().unwrap();
-                st.connecting = false;
+                self.transport_state.lock().unwrap().connecting = false;
                 Err(CdpError::new(msg))
             }
         }
@@ -808,35 +730,18 @@ impl CdpClient {
 
     fn handle_transport_closed(&self) {
         let should_clean = {
-            let mut st = self.state.lock().unwrap();
-            if st
-                .transport
-                .as_ref()
-                .map(|t| !t.is_open())
-                .unwrap_or(true)
-            {
-                st.transport = None;
-                st.connecting = false;
-                st.paused = false;
-                st.screencast_idle_paused = false;
-                st.sessions.clear();
-                st.session_to_target.clear();
-                st.dialogs.clear();
-                st.recently_closed.clear();
-                st.active_target_id = None;
-                st.popup_switched_target = None;
-                st.screencast_target_id = None;
-                st.screencast_profile = None;
-                st.latest_frame = None;
-                st.last_fallback_shot_at = None;
-                st.cached_tabs.clear();
-                st.last_tabs_at = None;
+            let mut tr = self.transport_state.lock().unwrap();
+            if !tr.is_open() {
+                tr.transport = None;
+                tr.connecting = false;
                 true
             } else {
                 false
             }
         };
         if should_clean {
+            self.tabs.lock().unwrap().reset_on_disconnect();
+            self.capture.lock().unwrap().reset_on_disconnect();
             self.fail_all_pending("Chrome CDP connection closed");
             self.notify_frame_waiters();
         }
@@ -908,50 +813,31 @@ impl CdpClient {
                     .filter(|&n| n > 0)
                     .unwrap_or(800);
 
-                let hash = hash_frame_data(data);
-                let mut should_notify = false;
-                {
-                    let mut st = self.state.lock().unwrap();
-                    let target_id = sid
-                        .and_then(|s| st.session_to_target.get(s).cloned())
-                        .or_else(|| st.screencast_target_id.clone());
-
-                    if let Some(tid) = target_id {
-                        if st.active_target_id.as_deref() == Some(tid.as_str())
-                            && !st.is_recently_closed(&tid)
+                let target_and_epoch = {
+                    let mut ts = self.tabs.lock().unwrap();
+                    let tid = sid
+                        .and_then(|s| ts.target_for_session(s))
+                        .or_else(|| self.capture.lock().unwrap().screencast_target_id.clone());
+                    tid.and_then(|t| {
+                        if ts.active_target_id.as_deref() == Some(t.as_str())
+                            && !ts.is_recently_closed(&t)
                         {
-                            let is_dup = st
-                                .latest_frame
-                                .as_ref()
-                                .map(|f| f.target_id == tid && f.hash == hash)
-                                .unwrap_or(false);
-                            if is_dup {
-                                st.deduped_frames += 1;
-                                if let Some(f) = st.latest_frame.as_mut() {
-                                    f.captured_at = now_iso();
-                                }
-                            } else {
-                                st.frame_seq += 1;
-                                let seq = st.frame_seq;
-                                let epoch = st.tab_epoch;
-                                st.latest_frame = Some(FrameRecord {
-                                    seq,
-                                    epoch,
-                                    target_id: tid,
-                                    hash,
-                                    image_data_url: format!("data:image/jpeg;base64,{data}"),
-                                    image_bytes: (data.len() * 3) / 4,
-                                    viewport_width: vw,
-                                    viewport_height: vh,
-                                    captured_at: now_iso(),
-                                });
-                                should_notify = true;
-                            }
+                            Some((t, ts.tab_epoch))
+                        } else {
+                            None
                         }
+                    })
+                };
+
+                if let Some((tid, epoch)) = target_and_epoch {
+                    let committed = self
+                        .capture
+                        .lock()
+                        .unwrap()
+                        .ingest_frame(&tid, epoch, data, vw, vh);
+                    if committed {
+                        self.notify_frame_waiters();
                     }
-                }
-                if should_notify {
-                    self.notify_frame_waiters();
                 }
             }
             "Page.javascriptDialogOpening" => {
@@ -977,54 +863,25 @@ impl CdpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let mut wake = false;
-                {
-                    let mut st = self.state.lock().unwrap();
-                    let tid = sid
-                        .and_then(|s| st.session_to_target.get(s).cloned())
-                        .or_else(|| st.active_target_id.clone());
-                    if let Some(target_id) = tid {
-                        st.dialogs.insert(
-                            target_id.clone(),
-                            JsDialogInfo {
-                                target_id,
-                                dialog_type: dtype,
-                                message,
-                                default_prompt,
-                                url,
-                            },
-                        );
-                        wake = true;
-                    }
-                }
+                let wake = self
+                    .tabs
+                    .lock()
+                    .unwrap()
+                    .open_dialog(sid, dtype, message, default_prompt, url);
                 if wake {
                     self.notify_frame_waiters();
                 }
             }
             "Page.javascriptDialogClosed" => {
                 let sid = msg.get("sessionId").and_then(|v| v.as_str());
-                let mut wake = false;
-                {
-                    let mut st = self.state.lock().unwrap();
-                    let tid = sid
-                        .and_then(|s| st.session_to_target.get(s).cloned())
-                        .or_else(|| st.active_target_id.clone());
-                    if let Some(target_id) = tid {
-                        if st.dialogs.remove(&target_id).is_some() {
-                            wake = true;
-                        }
-                    }
-                }
+                let wake = self.tabs.lock().unwrap().close_dialog_for_session(sid);
                 if wake {
                     self.notify_frame_waiters();
                 }
             }
             "Target.targetDestroyed" => {
                 if let Some(tid) = params.and_then(|p| p.get("targetId")).and_then(|v| v.as_str()) {
-                    let wake = {
-                        let mut st = self.state.lock().unwrap();
-                        st.handle_target_gone(tid, true)
-                    };
+                    let wake = self.handle_target_gone(tid, true);
                     if wake {
                         self.notify_frame_waiters();
                     }
@@ -1037,74 +894,32 @@ impl CdpClient {
                 let param_tid = params
                     .and_then(|p| p.get("targetId"))
                     .and_then(|v| v.as_str());
-                let mut st = self.state.lock().unwrap();
-                let mapped_tid = sid.and_then(|s| st.session_to_target.remove(s));
-                let tid = param_tid.map(String::from).or(mapped_tid);
-                if let Some(tid) = tid {
-                    let should_remove = match (sid, st.sessions.get(&tid)) {
-                        (None, _) => true,
-                        (Some(s), Some(cur)) if cur == s => true,
-                        _ => false,
-                    };
-                    if should_remove {
-                        st.sessions.remove(&tid);
-                        st.dialogs.remove(&tid);
-                    }
-                    if st.screencast_target_id.as_deref() == Some(tid.as_str()) {
-                        st.screencast_target_id = None;
-                        st.screencast_profile = None;
-                    }
+                if let Some(tid) = self.tabs.lock().unwrap().detach_session(sid, param_tid) {
+                    self.capture.lock().unwrap().clear_screencast_if_target(&tid);
                 }
             }
             "Target.targetCreated" => {
-                {
-                    let mut st = self.state.lock().unwrap();
-                    st.last_tabs_at = None;
-                    if let Some(info) = params.and_then(|p| p.get("targetInfo")) {
-                        let is_page = info.get("type").and_then(|v| v.as_str()) == Some("page");
-                        let new_tid = info.get("targetId").and_then(|v| v.as_str()).unwrap_or("");
-                        let url = info.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                        let title = info.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                        let opener_id = info.get("openerId").and_then(|v| v.as_str());
-
-                        let valid_page = is_page
-                            && !new_tid.is_empty()
-                            && !url.starts_with("devtools://")
-                            && !(url.starts_with("chrome-extension://") && title.is_empty())
-                            && !st.is_recently_closed(new_tid);
-
-                        if valid_page && st.active_target_id.as_deref() != Some(new_tid) {
-                            let opener_matches = opener_id.is_some()
-                                && opener_id == st.active_target_id.as_deref();
-                            let recent_interaction = !st.paused
-                                && st.last_interaction_at.elapsed() < Duration::from_millis(2500);
-                            if st.active_target_id.is_none() || opener_matches || recent_interaction
-                            {
-                                let was_popup = st.active_target_id.is_some();
-                                st.active_target_id = Some(new_tid.to_string());
-                                st.tab_epoch += 1;
-                                st.latest_frame = None;
-                                st.screencast_idle_paused = false;
-                                st.last_interaction_at = Instant::now();
-                                if was_popup {
-                                    st.popup_switched_target = Some(new_tid.to_string());
-                                }
-                            }
-                        }
-                    }
+                let switched = self
+                    .tabs
+                    .lock()
+                    .unwrap()
+                    .handle_target_created(params.and_then(|p| p.get("targetInfo")));
+                if switched {
+                    let mut cap = self.capture.lock().unwrap();
+                    cap.clear_latest_frame();
+                    cap.notify_activity();
                 }
                 self.notify_frame_waiters();
             }
             "Target.targetInfoChanged" => {
-                let mut st = self.state.lock().unwrap();
-                st.last_tabs_at = None;
+                self.tabs.lock().unwrap().invalidate_tab_cache();
             }
             _ => {}
         }
     }
 
     pub fn send_no_wait(&self, method: &str, params: Value, session_id: Option<&str>) {
-        let transport = { self.state.lock().unwrap().transport.clone() };
+        let transport = self.transport_state.lock().unwrap().transport.clone();
         let Some(t) = transport else { return };
         if !t.is_open() {
             return;
@@ -1124,14 +939,13 @@ impl CdpClient {
         session_id: Option<&str>,
         timeout: Duration,
     ) -> Result<Value, CdpError> {
-        let transport = {
-            self.state
-                .lock()
-                .unwrap()
-                .transport
-                .clone()
-                .ok_or_else(|| CdpError::new("Chrome CDP connection closed"))?
-        };
+        let transport = self
+            .transport_state
+            .lock()
+            .unwrap()
+            .transport
+            .clone()
+            .ok_or_else(|| CdpError::new("Chrome CDP connection closed"))?;
         if !transport.is_open() {
             return Err(CdpError::new("Chrome CDP connection closed"));
         }
@@ -1143,15 +957,13 @@ impl CdpClient {
         }
 
         let (tx, rx) = mpsc::channel();
-        {
-            self.pending.lock().unwrap().insert(
-                id,
-                PendingCall {
-                    tx,
-                    method: method.to_string(),
-                },
-            );
-        }
+        self.pending.lock().unwrap().insert(
+            id,
+            PendingCall {
+                tx,
+                method: method.to_string(),
+            },
+        );
 
         if let Err(err_msg) = transport.send_text(&payload.to_string()) {
             self.pending.lock().unwrap().remove(&id);
@@ -1172,71 +984,7 @@ impl CdpClient {
     }
 
     pub fn list_tabs(self: &Arc<Self>, force: bool) -> Result<Vec<TabInfo>, CdpError> {
-        {
-            let mut st = self.state.lock().unwrap();
-            st.prune_closed();
-            if !force && !st.cached_tabs.is_empty() {
-                if let Some(ts) = st.last_tabs_at {
-                    if ts.elapsed() < TAB_CACHE_TTL {
-                        let closed = st.recently_closed.clone();
-                        return Ok(st
-                            .cached_tabs
-                            .iter()
-                            .filter(|t| !closed.contains_key(&t.target_id))
-                            .cloned()
-                            .collect());
-                    }
-                }
-            }
-        }
-
-        let res = self.send_cdp("Target.getTargets", json!({}), None, CMD_TIMEOUT)?;
-        let raw = res
-            .get("targetInfos")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut st = self.state.lock().unwrap();
-        st.prune_closed();
-        let mut tabs = Vec::new();
-        for item in raw {
-            if item.get("type").and_then(|v| v.as_str()) != Some("page") {
-                continue;
-            }
-            let Some(tid) = item.get("targetId").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if st.recently_closed.contains_key(tid) {
-                continue;
-            }
-            let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            if url.starts_with("devtools://") {
-                continue;
-            }
-            if url.starts_with("chrome-extension://") && title.is_empty() {
-                continue;
-            }
-            tabs.push(TabInfo {
-                target_id: tid.to_string(),
-                title: if !title.is_empty() {
-                    title.to_string()
-                } else if !url.is_empty() {
-                    url.to_string()
-                } else {
-                    "New Tab".to_string()
-                },
-                url: if !url.is_empty() {
-                    url.to_string()
-                } else {
-                    "about:blank".to_string()
-                },
-            });
-        }
-        st.cached_tabs = tabs.clone();
-        st.last_tabs_at = Some(Instant::now());
-        Ok(tabs)
+        targets::list_tabs(self, force)
     }
 
     pub fn resolve_target_id(
@@ -1245,114 +993,15 @@ impl CdpClient {
         force_tabs: bool,
         update_active: bool,
     ) -> Result<(Option<String>, Vec<TabInfo>), CdpError> {
-        let tabs = self.list_tabs(force_tabs)?;
-        if tabs.is_empty() {
-            // Never auto-create `about:blank`: let the user close the last tab / Chrome window cleanly.
-            let need_stop_sc = {
-                let mut st = self.state.lock().unwrap();
-                if update_active {
-                    if st.active_target_id.is_some() {
-                        st.tab_epoch += 1;
-                    }
-                    st.active_target_id = None;
-                    st.latest_frame = None;
-                }
-                st.screencast_target_id.is_some()
-            };
-            if need_stop_sc {
-                self.stop_screencast();
-            }
-            return Ok((None, Vec::new()));
-        }
-
-        let mut st = self.state.lock().unwrap();
-        let popup_switched = st.popup_switched_target.as_deref();
-        let safe_req = if popup_switched.is_some() && popup_switched == st.active_target_id.as_deref()
-        {
-            // Prefer newly opened popup target over stale client poll targetId
-            st.active_target_id.as_deref()
-        } else {
-            requested_id
-                .filter(|id| !id.is_empty() && !st.is_recently_closed(id))
-                .or(st.active_target_id.as_deref())
-        };
-        let chosen = safe_req
-            .and_then(|c| tabs.iter().find(|t| t.target_id == c))
-            .map(|t| t.target_id.clone())
-            .unwrap_or_else(|| tabs[0].target_id.clone());
-
-        if update_active {
-            if st
-                .active_target_id
-                .as_deref()
-                .map(|cur| cur != chosen.as_str())
-                .unwrap_or(false)
-            {
-                st.tab_epoch += 1;
-            }
-            st.active_target_id = Some(chosen.clone());
-        }
-        Ok((Some(chosen), tabs))
+        targets::resolve_target_id(self, requested_id, force_tabs, update_active)
     }
 
     pub fn attach(self: &Arc<Self>, target_id: &str) -> Result<String, CdpError> {
-        {
-            let mut st = self.state.lock().unwrap();
-            if st.is_recently_closed(target_id) {
-                return Err(CdpError {
-                    message: "No target with given id found".to_string(),
-                    cdp_code: Some(-32000),
-                    method: Some("Target.attachToTarget".to_string()),
-                });
-            }
-            if let Some(sid) = st.sessions.get(target_id) {
-                return Ok(sid.clone());
-            }
-        }
-
-        let res = self.send_cdp(
-            "Target.attachToTarget",
-            json!({ "targetId": target_id, "flatten": true }),
-            None,
-            CMD_TIMEOUT,
-        )?;
-        let sid = res
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CdpError::new("Target.attachToTarget missing sessionId"))?
-            .to_string();
-
-        {
-            let mut st = self.state.lock().unwrap();
-            st.sessions.insert(target_id.to_string(), sid.clone());
-            st.session_to_target
-                .insert(sid.clone(), target_id.to_string());
-        }
-        // Enable Page domain non-blockingly so JS modal dialogs (`alert`/`confirm`/`prompt`/`beforeunload`)
-        // fire `Page.javascriptDialogOpening` instead of silently freezing the tab.
-        self.send_no_wait("Page.enable", json!({}), Some(&sid));
-        Ok(sid)
+        targets::attach(self, target_id)
     }
 
     pub fn stop_screencast(self: &Arc<Self>) {
-        let prev_sid = {
-            let mut st = self.state.lock().unwrap();
-            let Some(prev_tid) = st.screencast_target_id.take() else {
-                return;
-            };
-            st.screencast_profile = None;
-            st.sessions.get(&prev_tid).cloned()
-        };
-        if let Some(sid) = prev_sid {
-            if self.is_connected() {
-                let _ = self.send_cdp(
-                    "Page.stopScreencast",
-                    json!({}),
-                    Some(&sid),
-                    Duration::from_secs(3),
-                );
-            }
-        }
+        capture::stop_screencast(self);
     }
 
     pub fn ensure_screencast(
@@ -1361,205 +1010,11 @@ impl CdpClient {
         quality_preset: &str,
         rtt_ms: f64,
     ) -> Result<(String, &'static QualityProfile), CdpError> {
-        let qp = resolve_profile(quality_preset, rtt_ms);
-        {
-            let mut st = self.state.lock().unwrap();
-            st.last_poll_at = Instant::now();
-            if st.screencast_target_id.as_deref() == Some(target_id)
-                && st.screencast_profile.as_deref() == Some(qp.name)
-            {
-                if let Some(sid) = st.sessions.get(target_id).cloned() {
-                    return Ok((sid, qp));
-                }
-            }
-        }
-
-        self.stop_screencast();
-        let sid = self.attach(target_id)?;
-        {
-            let mut st = self.state.lock().unwrap();
-            st.screencast_target_id = Some(target_id.to_string());
-            st.screencast_quality = quality_preset.to_string();
-            st.screencast_profile = Some(qp.name.to_string());
-            if st
-                .latest_frame
-                .as_ref()
-                .map(|f| f.target_id.as_str() != target_id)
-                .unwrap_or(false)
-            {
-                st.latest_frame = None;
-            }
-        }
-
-        let start_res = self.send_cdp(
-            "Page.startScreencast",
-            json!({
-                "format": "jpeg",
-                "quality": qp.quality,
-                "maxWidth": qp.max_width,
-                "maxHeight": qp.max_height,
-                "everyNthFrame": qp.every_nth_frame,
-            }),
-            Some(&sid),
-            Duration::from_secs(5),
-        );
-
-        if let Err(err) = start_res {
-            let mut st = self.state.lock().unwrap();
-            st.screencast_target_id = None;
-            st.screencast_profile = None;
-            if err.is_target_gone() {
-                st.evict_session(target_id);
-                return Err(err);
-            }
-            // Restricted pages (e.g. chrome://) disallow screencast; fallback screenshot handles them.
-        }
-
-        Ok((sid, qp))
+        capture::ensure_screencast(self, target_id, quality_preset, rtt_ms, false)
     }
 
-    pub fn warm_active_tab(self: &Arc<Self>, quality_preset: &str, rtt_ms: f64) {
-        if !self.is_connected() || self.is_paused() {
-            return;
-        }
-        let active = self.active_target_id();
-        if let Ok((Some(tid), _)) = self.resolve_target_id(active.as_deref(), false, true) {
-            let _ = self.ensure_screencast(&tid, quality_preset, rtt_ms);
-        }
-    }
-
-    fn capture_fallback_frame(
-        self: &Arc<Self>,
-        target_id: &str,
-        session_id: &str,
-        quality_preset: &str,
-        rtt_ms: f64,
-    ) -> Result<(), CdpError> {
-        let (mut vw, mut vh): (u32, u32) = {
-            let mut st = self.state.lock().unwrap();
-            if st.dialogs.contains_key(target_id) {
-                return Ok(());
-            }
-            st.last_fallback_shot_at = Some(Instant::now());
-            st.latest_frame
-                .as_ref()
-                .filter(|f| f.target_id == target_id && f.viewport_width > 0 && f.viewport_height > 0)
-                .map(|f| (f.viewport_width, f.viewport_height))
-                .unwrap_or((1280, 800))
-        };
-
-        let qp = resolve_profile(quality_preset, rtt_ms);
-        let mut got_vp = false;
-
-        match self.send_cdp(
-            "Runtime.evaluate",
-            json!({
-                "expression": "JSON.stringify([window.innerWidth||1280,window.innerHeight||800])",
-                "returnByValue": true,
-            }),
-            Some(session_id),
-            Duration::from_millis(1500),
-        ) {
-            Ok(ev) => {
-                if let Some(raw) = ev.pointer("/result/value").and_then(|v| v.as_str()) {
-                    if let Ok(arr) = serde_json::from_str::<Vec<f64>>(raw) {
-                        if arr.len() >= 2 && arr[0] > 0.0 && arr[1] > 0.0 {
-                            vw = arr[0].round() as u32;
-                            vh = arr[1].round() as u32;
-                            got_vp = true;
-                        }
-                    }
-                }
-            }
-            Err(err) if err.is_target_gone() => return Err(err),
-            Err(_) => {}
-        }
-
-        let mut capture_params = json!({
-            "format": "jpeg",
-            "quality": qp.quality.min(55),
-            "fromSurface": true,
-        });
-        if got_vp {
-            let scale_w = qp.max_width as f64 / vw as f64;
-            let scale_h = qp.max_height as f64 / vh as f64;
-            let scale = scale_w.min(scale_h).min(1.0);
-            let scale_rounded = (scale * 1000.0).round() / 1000.0;
-            capture_params["clip"] = json!({
-                "x": 0,
-                "y": 0,
-                "width": vw,
-                "height": vh,
-                "scale": scale_rounded,
-            });
-        }
-
-        let shot = match self.send_cdp(
-            "Page.captureScreenshot",
-            capture_params.clone(),
-            Some(session_id),
-            Duration::from_secs(8),
-        ) {
-            Ok(v) => v,
-            Err(err) if err.is_target_gone() => return Err(err),
-            Err(err) => {
-                if capture_params.get("clip").is_some() {
-                    self.send_cdp(
-                        "Page.captureScreenshot",
-                        json!({
-                            "format": "jpeg",
-                            "quality": qp.quality.min(46),
-                            "fromSurface": true,
-                        }),
-                        Some(session_id),
-                        Duration::from_secs(8),
-                    )?
-                } else {
-                    return Err(err);
-                }
-            }
-        };
-
-        let Some(data) = shot.get("data").and_then(|v| v.as_str()) else {
-            return Ok(());
-        };
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        let hash = hash_frame_data(data);
-        let mut st = self.state.lock().unwrap();
-        if st.is_recently_closed(target_id) {
-            return Ok(());
-        }
-        let is_dup = st
-            .latest_frame
-            .as_ref()
-            .map(|f| f.target_id == target_id && f.hash == hash)
-            .unwrap_or(false);
-        if is_dup {
-            st.deduped_frames += 1;
-            if let Some(f) = st.latest_frame.as_mut() {
-                f.captured_at = now_iso();
-            }
-            return Ok(());
-        }
-
-        st.frame_seq += 1;
-        let seq = st.frame_seq;
-        let epoch = st.tab_epoch;
-        st.latest_frame = Some(FrameRecord {
-            seq,
-            epoch,
-            target_id: target_id.to_string(),
-            hash,
-            image_data_url: format!("data:image/jpeg;base64,{data}"),
-            image_bytes: (data.len() * 3) / 4,
-            viewport_width: vw,
-            viewport_height: vh,
-            captured_at: now_iso(),
-        });
-        Ok(())
+    pub fn warm_active_tab(self: &Arc<Self>, quality_preset: Option<&str>, rtt_ms: f64) {
+        capture::warm_active_tab(self, quality_preset, rtt_ms);
     }
 
     pub fn close_tab(
@@ -1567,1222 +1022,22 @@ impl CdpClient {
         target_id_to_close: Option<&str>,
         quality_preset: Option<&str>,
     ) -> Result<Value, CdpError> {
-        if !self.is_connected() {
-            return Ok(json!({
-                "ok": false,
-                "connected": false,
-                "paused": false,
-                "portFile": self.public_port_file(),
-                "locale": current_lang().as_str(),
-            }));
-        }
-        {
-            let mut st = self.state.lock().unwrap();
-            let now = Instant::now();
-            st.last_poll_at = now;
-            st.last_interaction_at = now;
-            st.screencast_idle_paused = false;
-        }
-
-        let before_tabs = self.list_tabs(true)?;
-        let close_id = target_id_to_close
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .or_else(|| self.active_target_id());
-
-        let close_idx = close_id
-            .as_deref()
-            .and_then(|id| before_tabs.iter().position(|t| t.target_id == id));
-        let was_active = close_id.as_deref().is_some()
-            && self.active_target_id().as_deref() == close_id.as_deref();
-
-        if let Some(cid) = close_id.as_deref() {
-            let need_stop_sc = {
-                let mut st = self.state.lock().unwrap();
-                st.recently_closed.insert(cid.to_string(), Instant::now());
-                st.screencast_target_id.as_deref() == Some(cid)
-            };
-            if need_stop_sc {
-                self.stop_screencast();
-            }
-            {
-                let mut st = self.state.lock().unwrap();
-                st.evict_session(cid);
-                if st
-                    .latest_frame
-                    .as_ref()
-                    .map(|f| f.target_id.as_str() == cid)
-                    .unwrap_or(false)
-                {
-                    st.latest_frame = None;
-                }
-                if was_active {
-                    st.active_target_id = None;
-                    st.tab_epoch += 1;
-                }
-            }
-
-            // Close in Chrome only if target actually existed (prevents double-close hitting innocent tabs!)
-            if close_idx.is_some() {
-                if let Err(err) = self.send_cdp(
-                    "Target.closeTarget",
-                    json!({ "targetId": cid }),
-                    None,
-                    Duration::from_secs(5),
-                ) {
-                    if !err.is_target_gone() {
-                        return Err(err);
-                    }
-                }
-            }
-        }
-
-        // Refresh surviving targets (retry briefly while Chrome tears down renderer)
-        let mut remaining = Vec::new();
-        for attempt in 0..4 {
-            {
-                self.state.lock().unwrap().last_tabs_at = None;
-            }
-            remaining = self.list_tabs(true)?;
-            if !remaining.is_empty() || attempt >= 1 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(35));
-        }
-
-        if remaining.is_empty() {
-            // Respect closing the last tab / Chrome window without spawning `about:blank`.
-            self.stop_screencast();
-            let mut st = self.state.lock().unwrap();
-            if st.active_target_id.is_some() {
-                st.tab_epoch += 1;
-            }
-            st.active_target_id = None;
-            st.latest_frame = None;
-            st.cached_tabs.clear();
-        } else {
-            let cur_active = self.active_target_id();
-            let active_still_valid = cur_active
-                .as_deref()
-                .map(|id| remaining.iter().any(|t| t.target_id == id))
-                .unwrap_or(false);
-            if was_active || !active_still_valid {
-                let next_idx = close_idx
-                    .map(|idx| idx.min(remaining.len() - 1))
-                    .unwrap_or(0);
-                let next_tid = remaining[next_idx].target_id.clone();
-                let _ = self.send_cdp(
-                    "Target.activateTarget",
-                    json!({ "targetId": next_tid }),
-                    None,
-                    Duration::from_secs(3),
-                );
-                let mut st = self.state.lock().unwrap();
-                st.active_target_id = Some(next_tid);
-                st.tab_epoch += 1;
-            }
-        }
-
-        let (active_tid, sc_tid, sc_q, paused) = {
-            let st = self.state.lock().unwrap();
-            (
-                st.active_target_id.clone(),
-                st.screencast_target_id.clone(),
-                st.screencast_quality.clone(),
-                st.paused,
-            )
-        };
-        if !paused {
-            if let Some(tid) = active_tid.as_deref() {
-                if was_active || sc_tid.as_deref() != Some(tid) {
-                    let q = quality_preset.unwrap_or(sc_q.as_str());
-                    let _ = self.ensure_screencast(tid, q, 0.0);
-                }
-            }
-        }
-
-        self.notify_frame_waiters();
-        let (epoch, seq, dialog) = {
-            let st = self.state.lock().unwrap();
-            (st.tab_epoch, st.frame_seq, st.active_dialog_value())
-        };
-        let t_hash = hash_tabs(&remaining);
-
-        Ok(json!({
-            "ok": true,
-            "connected": self.is_connected(),
-            "paused": paused,
-            "screencastPausedIdle": false,
-            "noTabs": remaining.is_empty(),
-            "activeTargetId": active_tid,
-            "dialog": dialog,
-            "epoch": epoch,
-            "tabs": remaining,
-            "tabsHash": t_hash,
-            "seq": seq,
-        }))
+        targets::close_tab(self, target_id_to_close, quality_preset)
     }
 
-    /// Polls the active tab frame and tab state WITHOUT ever auto-dialing Chrome when disconnected.
     pub fn poll_frame(self: &Arc<Self>, params: PollFrameParams) -> Result<Value, CdpError> {
-        let t_start = Instant::now();
-        let mut profile = resolve_profile(&params.quality_preset, params.rtt_ms);
-
-        if !self.is_connected() {
-            let port_file = self.public_port_file();
-            let chrome_ready = port_file
-                .get("valid")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let epoch = self.tab_epoch();
-            return Ok(json!({
-                "connected": false,
-                "paused": false,
-                "screencastPausedIdle": false,
-                "noTabs": false,
-                "chromeReady": chrome_ready,
-                "portFile": port_file,
-                "activeTargetId": Value::Null,
-                "dialog": Value::Null,
-                "epoch": epoch,
-                "tabs": [],
-                "tabsHash": "empty",
-                "changed": false,
-                "unchanged": true,
-                "seq": params.since_seq,
-                "frameHash": "",
-                "imageDataUrl": "",
-                "imageBytes": 0,
-                "qualityApplied": profile.name,
-                "locale": current_lang().as_str(),
-                "serverMs": t_start.elapsed().as_millis() as u64,
-                "capturedAt": now_iso(),
-            }));
-        }
-
-        if params.force_refresh {
-            let mut st = self.state.lock().unwrap();
-            let now = Instant::now();
-            st.last_poll_at = now;
-            st.last_interaction_at = now;
-            st.screencast_idle_paused = false;
-        } else {
-            {
-                self.state.lock().unwrap().last_poll_at = Instant::now();
-            }
-            self.check_idle_screencast_stop();
-        }
-
-        let (paused, idle_paused) = {
-            let st = self.state.lock().unwrap();
-            (st.paused, st.screencast_idle_paused)
-        };
-
-        let mut target_id = String::new();
-        let mut tabs: Vec<TabInfo> = Vec::new();
-        let mut recovered = false;
-
-        for attempt in 0..2 {
-            let ask_tid = if attempt == 0 {
-                params.target_id.as_deref()
-            } else {
-                None
-            };
-            let force_tabs = params.force_refresh || attempt > 0;
-            let (mut resolved_tid, mut resolved_tabs) =
-                self.resolve_target_id(ask_tid, force_tabs, true)?;
-
-            if resolved_tid.is_none() {
-                // Chrome has 0 open windows/tabs: wait gently for a user-opened tab without spawning about:blank.
-                if !params.force_refresh && params.wait_ms > 0 && !paused && !idle_paused {
-                    let wait = params.wait_ms.clamp(40, 1200);
-                    if self.wait_for_notify(Duration::from_millis(wait)) && self.is_connected() {
-                        let (next_tid, next_tabs) = self.resolve_target_id(None, true, true)?;
-                        resolved_tid = next_tid;
-                        resolved_tabs = next_tabs;
-                    }
-                }
-            }
-
-            let Some(tid) = resolved_tid else {
-                let (epoch, seq, is_paused, is_idle) = {
-                    let st = self.state.lock().unwrap();
-                    (st.tab_epoch, st.frame_seq, st.paused, st.screencast_idle_paused)
-                };
-                let t_hash = hash_tabs(&resolved_tabs);
-                let include_tabs =
-                    params.known_tabs_hash.is_empty() || params.known_tabs_hash != t_hash;
-                let mut resp = json!({
-                    "connected": self.is_connected(),
-                    "paused": is_paused,
-                    "screencastPausedIdle": is_idle,
-                    "noTabs": true,
-                    "activeTargetId": Value::Null,
-                    "dialog": Value::Null,
-                    "epoch": epoch,
-                    "tabsHash": t_hash,
-                    "page": {
-                        "title": "",
-                        "url": "",
-                        "viewportWidth": 1280,
-                        "viewportHeight": 800,
-                    },
-                    "changed": false,
-                    "unchanged": true,
-                    "seq": seq,
-                    "frameHash": "",
-                    "imageDataUrl": "",
-                    "imageBytes": 0,
-                    "qualityApplied": profile.name,
-                    "locale": current_lang().as_str(),
-                    "serverMs": t_start.elapsed().as_millis() as u64,
-                    "capturedAt": now_iso(),
-                });
-                if include_tabs {
-                    resp["tabs"] = json!(resolved_tabs);
-                }
-                return Ok(resp);
-            };
-
-            target_id = tid;
-            tabs = resolved_tabs;
-
-            let attempt_res: Result<(), CdpError> = (|| {
-                let has_open_dialog = {
-                    self.state.lock().unwrap().dialogs.contains_key(&target_id)
-                };
-
-                if paused || idle_paused {
-                    // While paused or idle-stopped, never restart continuous screencast.
-                    if params.force_refresh && !has_open_dialog {
-                        let sid = self.attach(&target_id)?;
-                        self.capture_fallback_frame(
-                            &target_id,
-                            &sid,
-                            &params.quality_preset,
-                            params.rtt_ms,
-                        )?;
-                    }
-                    return Ok(());
-                }
-
-                if has_open_dialog {
-                    // Do not block on captureScreenshot/Runtime.evaluate while a modal JS dialog holds the renderer.
-                    return Ok(());
-                }
-
-                let (sid, qp) =
-                    self.ensure_screencast(&target_id, &params.quality_preset, params.rtt_ms)?;
-                profile = qp;
-
-                let (has_valid_frame, same_as_client_hash, cur_seq, sc_running, fb_due, has_dlg) = {
-                    let st = self.state.lock().unwrap();
-                    let sc_on = st.screencast_target_id.as_deref() == Some(target_id.as_str());
-                    let fb_interval = if st.last_interaction_at.elapsed() < Duration::from_millis(2500)
-                    {
-                        Duration::from_millis(350)
-                    } else {
-                        Duration::from_millis(1100)
-                    };
-                    let due = st
-                        .last_fallback_shot_at
-                        .map(|t| t.elapsed() >= fb_interval)
-                        .unwrap_or(true);
-                    let dlg = st.dialogs.contains_key(&target_id);
-                    match &st.latest_frame {
-                        Some(f) if f.target_id == target_id => (
-                            true,
-                            !params.last_frame_hash.is_empty() && f.hash == params.last_frame_hash,
-                            f.seq,
-                            sc_on,
-                            due,
-                            dlg,
-                        ),
-                        _ => (false, false, st.frame_seq, sc_on, due, dlg),
-                    }
-                };
-
-                if has_dlg {
-                    return Ok(());
-                }
-
-                if params.force_refresh {
-                    let prev_seq = self.state.lock().unwrap().frame_seq;
-                    if sc_running {
-                        self.wait_for_next_frame(
-                            prev_seq,
-                            Duration::from_millis(160),
-                            Some(&target_id),
-                        );
-                    }
-                    let need_fallback = {
-                        let st = self.state.lock().unwrap();
-                        !st.dialogs.contains_key(&target_id)
-                            && (st.frame_seq == prev_seq
-                                || st
-                                    .latest_frame
-                                    .as_ref()
-                                    .map(|f| f.target_id != target_id)
-                                    .unwrap_or(true))
-                    };
-                    if need_fallback {
-                        self.capture_fallback_frame(
-                            &target_id,
-                            &sid,
-                            &params.quality_preset,
-                            params.rtt_ms,
-                        )?;
-                    }
-                } else if !has_valid_frame {
-                    if sc_running {
-                        self.wait_for_next_frame(0, Duration::from_millis(300), Some(&target_id));
-                    }
-                    let need_fallback = {
-                        let st = self.state.lock().unwrap();
-                        !st.dialogs.contains_key(&target_id)
-                            && st
-                                .latest_frame
-                                .as_ref()
-                                .map(|f| f.target_id != target_id)
-                                .unwrap_or(true)
-                    };
-                    if need_fallback {
-                        self.capture_fallback_frame(
-                            &target_id,
-                            &sid,
-                            &params.quality_preset,
-                            params.rtt_ms,
-                        )?;
-                    }
-                } else if !sc_running {
-                    // Restricted page (e.g. `chrome://`): periodically refresh via throttled screenshot fallback.
-                    if fb_due {
-                        self.capture_fallback_frame(
-                            &target_id,
-                            &sid,
-                            &params.quality_preset,
-                            params.rtt_ms,
-                        )?;
-                    } else if params.wait_ms > 0 {
-                        let _ = self.wait_for_notify(Duration::from_millis(params.wait_ms.min(350)));
-                    }
-                } else if (cur_seq <= params.since_seq || same_as_client_hash) && params.wait_ms > 0
-                {
-                    let wait = params.wait_ms.clamp(40, 1200);
-                    self.wait_for_next_frame(
-                        params.since_seq.max(cur_seq),
-                        Duration::from_millis(wait),
-                        Some(&target_id),
-                    );
-                }
-
-                Ok(())
-            })();
-
-            match attempt_res {
-                Ok(()) => {
-                    let gone = { self.state.lock().unwrap().is_recently_closed(&target_id) };
-                    if gone && attempt == 0 {
-                        recovered = true;
-                        continue;
-                    }
-                    break;
-                }
-                Err(err) if err.is_target_gone() && self.is_connected() && attempt == 0 => {
-                    let wake = {
-                        self.state
-                            .lock()
-                            .unwrap()
-                            .handle_target_gone(&target_id, true)
-                    };
-                    if wake {
-                        self.notify_frame_waiters();
-                    }
-                    recovered = true;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        let (epoch, frame, cur_paused, cur_idle_paused, dialog, popup_switched) = {
-            let mut st = self.state.lock().unwrap();
-            let f = st
-                .latest_frame
-                .as_ref()
-                .filter(|f| f.target_id == target_id)
-                .cloned();
-            let dlg = st
-                .dialogs
-                .get(&target_id)
-                .and_then(|d| serde_json::to_value(d).ok())
-                .unwrap_or(Value::Null);
-            let popped = if st.popup_switched_target.as_deref() == Some(target_id.as_str()) {
-                st.popup_switched_target = None;
-                true
-            } else {
-                false
-            };
-            (
-                st.tab_epoch,
-                f,
-                st.paused,
-                st.screencast_idle_paused,
-                dlg,
-                popped,
-            )
-        };
-
-        let same_hash = frame
-            .as_ref()
-            .map(|f| !params.last_frame_hash.is_empty() && f.hash == params.last_frame_hash)
-            .unwrap_or(false);
-        let diff_hash = frame
-            .as_ref()
-            .map(|f| !params.last_frame_hash.is_empty() && f.hash != params.last_frame_hash)
-            .unwrap_or(false);
-        let changed = frame
-            .as_ref()
-            .map(|f| !same_hash && (params.force_refresh || f.seq > params.since_seq || diff_hash))
-            .unwrap_or(false);
-
-        let t_hash = hash_tabs(&tabs);
-        let include_tabs = params.known_tabs_hash.is_empty() || params.known_tabs_hash != t_hash;
-        let tab_meta = tabs.iter().find(|t| t.target_id == target_id);
-
-        let mut resp = json!({
-            "connected": self.is_connected(),
-            "paused": cur_paused,
-            "screencastPausedIdle": cur_idle_paused,
-            "noTabs": false,
-            "activeTargetId": target_id,
-            "dialog": dialog,
-            "epoch": epoch,
-            "tabsHash": t_hash,
-            "page": {
-                "title": tab_meta.map(|t| t.title.as_str()).unwrap_or(""),
-                "url": tab_meta.map(|t| t.url.as_str()).unwrap_or(""),
-                "viewportWidth": frame.as_ref().map(|f| f.viewport_width).unwrap_or(1280),
-                "viewportHeight": frame.as_ref().map(|f| f.viewport_height).unwrap_or(800),
-            },
-            "changed": changed,
-            "unchanged": !changed,
-            "seq": frame.as_ref().map(|f| f.seq).unwrap_or(params.since_seq),
-            "frameHash": frame.as_ref().map(|f| f.hash.as_str()).unwrap_or(""),
-            "imageDataUrl": if changed { frame.as_ref().map(|f| f.image_data_url.as_str()).unwrap_or("") } else { "" },
-            "imageBytes": if changed { frame.as_ref().map(|f| f.image_bytes).unwrap_or(0) } else { 0 },
-            "qualityApplied": profile.name,
-            "locale": current_lang().as_str(),
-            "serverMs": t_start.elapsed().as_millis() as u64,
-            "capturedAt": frame.as_ref().map(|f| f.captured_at.as_str()).unwrap_or(&now_iso()),
-        });
-        if include_tabs {
-            resp["tabs"] = json!(tabs);
-        }
-        if recovered {
-            resp["recovered"] = json!(true);
-        }
-        if popup_switched {
-            resp["popupSwitched"] = json!(true);
-        }
-        Ok(resp)
+        capture::poll_frame(self, params)
     }
 
-    /// Dispatches batched input/tab/dialog events WITHOUT ever auto-dialing Chrome when disconnected.
     pub fn dispatch_input_batch(
         self: &Arc<Self>,
         params: InputBatchParams,
     ) -> Result<Value, CdpError> {
-        if params.events.iter().any(|e| e.action == "disconnect") {
-            if self.is_connected() {
-                self.stop_screencast();
-            }
-            self.disconnect();
-            return Ok(json!({
-                "ok": true,
-                "connected": false,
-                "paused": false,
-                "screencastPausedIdle": false,
-                "portFile": self.public_port_file(),
-                "locale": current_lang().as_str(),
-            }));
-        }
-
-        if !self.is_connected() {
-            return Ok(json!({
-                "ok": false,
-                "connected": false,
-                "paused": false,
-                "screencastPausedIdle": false,
-                "portFile": self.public_port_file(),
-                "locale": current_lang().as_str(),
-            }));
-        }
-
-        let is_pause_only = params.events.iter().all(|e| e.action == "pause");
-        let was_idle_paused = {
-            let mut st = self.state.lock().unwrap();
-            let now = Instant::now();
-            st.last_poll_at = now;
-            if !is_pause_only {
-                st.last_interaction_at = now;
-                std::mem::replace(&mut st.screencast_idle_paused, false)
-            } else {
-                false
-            }
-        };
-
-        let mut tab_mutated = false;
-        let mut nav_mutated = false;
-        let mut recovered = false;
-        let mut latest_tabs: Option<Vec<TabInfo>> = None;
-
-        for ev in &params.events {
-            let action = ev.action.as_str();
-            if action.is_empty() {
-                continue;
-            }
-
-            if action == "pause" {
-                self.pause();
-                return Ok(json!({
-                    "ok": true,
-                    "connected": self.is_connected(),
-                    "paused": true,
-                    "screencastPausedIdle": false,
-                    "portFile": self.public_port_file(),
-                }));
-            }
-
-            if action == "resume" {
-                self.resume();
-                continue;
-            }
-
-            if action == "new_tab" {
-                let target_url = normalize_url(ev.url.as_deref().unwrap_or("about:blank"));
-                let created = self.send_cdp(
-                    "Target.createTarget",
-                    json!({ "url": target_url }),
-                    None,
-                    CMD_TIMEOUT,
-                )?;
-                let new_tid = created
-                    .get("targetId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CdpError::new("Target.createTarget missing targetId"))?
-                    .to_string();
-                {
-                    let mut st = self.state.lock().unwrap();
-                    st.recently_closed.remove(&new_tid);
-                    st.active_target_id = Some(new_tid.clone());
-                    st.tab_epoch += 1;
-                    st.latest_frame = None;
-                    st.last_tabs_at = None;
-                }
-                let _ = self.send_cdp(
-                    "Target.activateTarget",
-                    json!({ "targetId": new_tid }),
-                    None,
-                    Duration::from_secs(3),
-                );
-                tab_mutated = true;
-                continue;
-            }
-
-            if action == "close_tab" {
-                let tid = ev.target_id.as_deref().or(params.target_id.as_deref());
-                let res = self.close_tab(tid, None)?;
-                if let Some(arr) = res.get("tabs") {
-                    if let Ok(parsed) = serde_json::from_value::<Vec<TabInfo>>(arr.clone()) {
-                        latest_tabs = Some(parsed);
-                    }
-                }
-                tab_mutated = true;
-                continue;
-            }
-
-            if action == "switch_tab" {
-                let req = ev.target_id.as_deref().or(params.target_id.as_deref());
-                let (maybe_tid, cur_tabs) = self.resolve_target_id(req, false, true)?;
-                let Some(tid) = maybe_tid else {
-                    latest_tabs = Some(cur_tabs);
-                    tab_mutated = true;
-                    continue;
-                };
-                match self.send_cdp(
-                    "Target.activateTarget",
-                    json!({ "targetId": tid }),
-                    None,
-                    Duration::from_secs(3),
-                ) {
-                    Ok(_) => {
-                        let mut st = self.state.lock().unwrap();
-                        st.active_target_id = Some(tid);
-                        st.latest_frame = None;
-                        tab_mutated = true;
-                    }
-                    Err(err) if err.is_target_gone() && self.is_connected() => {
-                        {
-                            self.state.lock().unwrap().handle_target_gone(&tid, true);
-                        }
-                        let (fb_tid, fb_tabs) = self.resolve_target_id(None, true, true)?;
-                        if let Some(fb) = fb_tid {
-                            let _ = self.send_cdp(
-                                "Target.activateTarget",
-                                json!({ "targetId": fb }),
-                                None,
-                                Duration::from_secs(3),
-                            );
-                        }
-                        latest_tabs = Some(fb_tabs);
-                        recovered = true;
-                        tab_mutated = true;
-                    }
-                    Err(err) => return Err(err),
-                }
-                continue;
-            }
-
-            let ask_tid = ev.target_id.as_deref().or(params.target_id.as_deref());
-            let mut resolved_tid = String::new();
-            let step_res: Result<(), CdpError> = (|| {
-                let (maybe_tid, cur_tabs) = self.resolve_target_id(ask_tid, false, true)?;
-                let tid = match maybe_tid {
-                    Some(t) => t,
-                    None if action == "navigate" => {
-                        // Explicit URL navigation when 0 tabs exist opens a tab for that URL.
-                        let target_url = normalize_url(ev.url.as_deref().unwrap_or("about:blank"));
-                        let created = self.send_cdp(
-                            "Target.createTarget",
-                            json!({ "url": target_url }),
-                            None,
-                            CMD_TIMEOUT,
-                        )?;
-                        let new_tid = created
-                            .get("targetId")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| CdpError::new("Target.createTarget missing targetId"))?
-                            .to_string();
-                        {
-                            let mut st = self.state.lock().unwrap();
-                            st.recently_closed.remove(&new_tid);
-                            st.active_target_id = Some(new_tid.clone());
-                            st.tab_epoch += 1;
-                            st.latest_frame = None;
-                            st.last_tabs_at = None;
-                        }
-                        let _ = self.send_cdp(
-                            "Target.activateTarget",
-                            json!({ "targetId": new_tid }),
-                            None,
-                            Duration::from_secs(3),
-                        );
-                        tab_mutated = true;
-                        nav_mutated = true;
-                        return Ok(());
-                    }
-                    None => {
-                        latest_tabs = Some(cur_tabs);
-                        tab_mutated = true;
-                        return Ok(());
-                    }
-                };
-                resolved_tid = tid.clone();
-                let sid = self.attach(&tid)?;
-                let mods = ev.modifiers.unwrap_or(0).clamp(0, 15);
-
-                match action {
-                    "dialog" => {
-                        let accept = ev.accept.unwrap_or(true);
-                        let mut dlg_params = json!({ "accept": accept });
-                        if let Some(pt) = ev.prompt_text.as_deref().or(ev.text.as_deref()) {
-                            dlg_params["promptText"] = json!(pt);
-                        }
-                        let res = self.send_cdp(
-                            "Page.handleJavaScriptDialog",
-                            dlg_params,
-                            Some(&sid),
-                            Duration::from_secs(5),
-                        );
-                        {
-                            self.state.lock().unwrap().dialogs.remove(&tid);
-                        }
-                        if let Err(err) = res {
-                            if !err.message.to_ascii_lowercase().contains("no dialog") {
-                                return Err(err);
-                            }
-                        }
-                        self.notify_frame_waiters();
-                    }
-                    "mousemove" => {
-                        let mx = ev.x.unwrap_or(0.0).max(0.0).round() as i64;
-                        let my = ev.y.unwrap_or(0.0).max(0.0).round() as i64;
-                        let btns = ev.buttons.unwrap_or(0);
-                        let btn = match ev.button.as_deref() {
-                            Some("left") => "left",
-                            Some("right") => "right",
-                            Some("middle") => "middle",
-                            _ if btns & 1 != 0 => "left",
-                            _ if btns & 2 != 0 => "right",
-                            _ if btns & 4 != 0 => "middle",
-                            _ => "none",
-                        };
-                        self.send_cdp(
-                            "Input.dispatchMouseEvent",
-                            json!({
-                                "type": "mouseMoved",
-                                "x": mx,
-                                "y": my,
-                                "button": btn,
-                                "buttons": btns,
-                                "modifiers": mods,
-                            }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                    }
-                    "mousedown" => {
-                        let cx = ev.x.unwrap_or(0.0).max(0.0).round() as i64;
-                        let cy = ev.y.unwrap_or(0.0).max(0.0).round() as i64;
-                        let (btn, default_mask) = mouse_button_and_mask(ev.button.as_deref());
-                        let btns = ev.buttons.unwrap_or(default_mask);
-                        let count = ev.click_count.unwrap_or(1).clamp(1, 3);
-                        self.send_cdp(
-                            "Input.dispatchMouseEvent",
-                            json!({
-                                "type": "mousePressed",
-                                "x": cx,
-                                "y": cy,
-                                "button": btn,
-                                "buttons": btns,
-                                "clickCount": count,
-                                "modifiers": mods,
-                            }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                    }
-                    "mouseup" => {
-                        let cx = ev.x.unwrap_or(0.0).max(0.0).round() as i64;
-                        let cy = ev.y.unwrap_or(0.0).max(0.0).round() as i64;
-                        let (btn, _) = mouse_button_and_mask(ev.button.as_deref());
-                        let btns = ev.buttons.unwrap_or(0);
-                        let count = ev.click_count.unwrap_or(1).clamp(1, 3);
-                        self.send_cdp(
-                            "Input.dispatchMouseEvent",
-                            json!({
-                                "type": "mouseReleased",
-                                "x": cx,
-                                "y": cy,
-                                "button": btn,
-                                "buttons": btns,
-                                "clickCount": count,
-                                "modifiers": mods,
-                            }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                    }
-                    "click" => {
-                        let cx = ev.x.unwrap_or(0.0).max(0.0).round() as i64;
-                        let cy = ev.y.unwrap_or(0.0).max(0.0).round() as i64;
-                        let (btn, mask) = mouse_button_and_mask(ev.button.as_deref());
-                        let count = ev.click_count.unwrap_or(1).clamp(1, 3);
-                        self.send_cdp(
-                            "Input.dispatchMouseEvent",
-                            json!({
-                                "type": "mouseMoved",
-                                "x": cx,
-                                "y": cy,
-                                "button": "none",
-                                "buttons": 0,
-                                "modifiers": mods,
-                            }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                        self.send_cdp(
-                            "Input.dispatchMouseEvent",
-                            json!({
-                                "type": "mousePressed",
-                                "x": cx,
-                                "y": cy,
-                                "button": btn,
-                                "buttons": mask,
-                                "clickCount": count,
-                                "modifiers": mods,
-                            }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                        self.send_cdp(
-                            "Input.dispatchMouseEvent",
-                            json!({
-                                "type": "mouseReleased",
-                                "x": cx,
-                                "y": cy,
-                                "button": btn,
-                                "buttons": 0,
-                                "clickCount": count,
-                                "modifiers": mods,
-                            }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                    }
-                    "scroll" => {
-                        let sx = ev.x.unwrap_or(500.0).max(0.0).round() as i64;
-                        let sy = ev.y.unwrap_or(350.0).max(0.0).round() as i64;
-                        self.send_cdp(
-                            "Input.dispatchMouseEvent",
-                            json!({
-                                "type": "mouseWheel",
-                                "x": sx,
-                                "y": sy,
-                                "deltaX": ev.delta_x.unwrap_or(0.0),
-                                "deltaY": ev.delta_y.unwrap_or(0.0),
-                                "modifiers": mods,
-                            }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                    }
-                    "type" => {
-                        if let Some(txt) = ev.text.as_deref() {
-                            if !txt.is_empty() {
-                                self.send_cdp(
-                                    "Input.insertText",
-                                    json!({ "text": txt }),
-                                    Some(&sid),
-                                    CMD_TIMEOUT,
-                                )?;
-                            }
-                        }
-                        if ev.press_enter == Some(true) {
-                            self.dispatch_key(&sid, "Enter", 0)?;
-                        }
-                    }
-                    "key" => {
-                        let key_name = ev.key.as_deref().unwrap_or("Enter");
-                        let repeat = ev.repeat.unwrap_or(1).clamp(1, 20);
-                        let base_cmd_mod = platform_cmd_modifier();
-                        for _ in 0..repeat {
-                            if let Some((k, code, vk, cmd_mods, cmd)) =
-                                edit_command_def_for_os(key_name, base_cmd_mod)
-                            {
-                                self.send_cdp(
-                                    "Input.dispatchKeyEvent",
-                                    json!({
-                                        "type": "rawKeyDown",
-                                        "key": k,
-                                        "code": code,
-                                        "windowsVirtualKeyCode": vk,
-                                        "modifiers": cmd_mods,
-                                        "commands": [cmd],
-                                    }),
-                                    Some(&sid),
-                                    CMD_TIMEOUT,
-                                )?;
-                                self.send_cdp(
-                                    "Input.dispatchKeyEvent",
-                                    json!({
-                                        "type": "keyUp",
-                                        "key": k,
-                                        "code": code,
-                                        "windowsVirtualKeyCode": vk,
-                                        "modifiers": cmd_mods,
-                                    }),
-                                    Some(&sid),
-                                    CMD_TIMEOUT,
-                                )?;
-                            } else {
-                                self.dispatch_key(&sid, key_name, mods)?;
-                            }
-                        }
-                    }
-                    "navigate" => {
-                        let url = normalize_url(ev.url.as_deref().unwrap_or("about:blank"));
-                        self.send_cdp(
-                            "Page.navigate",
-                            json!({ "url": url }),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                        nav_mutated = true;
-                    }
-                    "back" | "forward" => {
-                        let hist = self.send_cdp(
-                            "Page.getNavigationHistory",
-                            json!({}),
-                            Some(&sid),
-                            CMD_TIMEOUT,
-                        )?;
-                        let cur_idx = hist
-                            .get("currentIndex")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                        let next_idx = cur_idx + if action == "back" { -1 } else { 1 };
-                        if let Some(entries) = hist.get("entries").and_then(|v| v.as_array()) {
-                            if next_idx >= 0 && (next_idx as usize) < entries.len() {
-                                if let Some(entry_id) = entries[next_idx as usize].get("id") {
-                                    self.send_cdp(
-                                        "Page.navigateToHistoryEntry",
-                                        json!({ "entryId": entry_id }),
-                                        Some(&sid),
-                                        CMD_TIMEOUT,
-                                    )?;
-                                    nav_mutated = true;
-                                }
-                            }
-                        }
-                    }
-                    "reload" => {
-                        self.send_cdp("Page.reload", json!({}), Some(&sid), CMD_TIMEOUT)?;
-                        nav_mutated = true;
-                    }
-                    _ => {}
-                }
-                Ok(())
-            })();
-
-            if let Err(err) = step_res {
-                if err.is_target_gone() && self.is_connected() {
-                    let dead_id = if !resolved_tid.is_empty() {
-                        resolved_tid.as_str()
-                    } else {
-                        ask_tid.unwrap_or("")
-                    };
-                    {
-                        self.state.lock().unwrap().handle_target_gone(dead_id, true);
-                    }
-                    let (_, fb_tabs) = self.resolve_target_id(None, true, true)?;
-                    latest_tabs = Some(fb_tabs);
-                    recovered = true;
-                    tab_mutated = true;
-                    // Drop remaining stale coordinate/key events intended for the closed tab
-                    break;
-                }
-                return Err(err);
-            }
-        }
-
-        // Immediately resume GPU screencast if this interaction woke an idle-paused session
-        // or switched tabs while unpaused.
-        let (wake_tid, wake_q, is_paused_now) = {
-            let st = self.state.lock().unwrap();
-            let need_sc = !st.paused
-                && (was_idle_paused
-                    || (tab_mutated
-                        && st.active_target_id.is_some()
-                        && st.screencast_target_id != st.active_target_id));
-            let tid = if need_sc {
-                st.active_target_id.clone()
-            } else {
-                None
-            };
-            (tid, st.screencast_quality.clone(), st.paused)
-        };
-        if !is_paused_now {
-            if let Some(tid) = wake_tid {
-                let has_dlg = { self.state.lock().unwrap().dialogs.contains_key(&tid) };
-                if !has_dlg {
-                    let _ = self.ensure_screencast(&tid, &wake_q, 0.0);
-                }
-            }
-        }
-
-        let tabs = if tab_mutated || nav_mutated {
-            match latest_tabs {
-                Some(t) => t,
-                None => self.list_tabs(true)?,
-            }
-        } else {
-            self.state.lock().unwrap().cached_tabs.clone()
-        };
-
-        let (active_tid, epoch, seq, paused, dialog) = {
-            let st = self.state.lock().unwrap();
-            (
-                st.active_target_id.clone(),
-                st.tab_epoch,
-                st.frame_seq,
-                st.paused,
-                st.active_dialog_value(),
-            )
-        };
-        let t_hash = hash_tabs(&tabs);
-
-        let mut resp = json!({
-            "ok": true,
-            "connected": self.is_connected(),
-            "paused": paused,
-            "screencastPausedIdle": false,
-            "noTabs": tabs.is_empty() && active_tid.is_none(),
-            "recovered": recovered,
-            "activeTargetId": active_tid,
-            "dialog": dialog,
-            "epoch": epoch,
-            "tabsHash": t_hash,
-            "seq": seq,
-        });
-        if tab_mutated || nav_mutated {
-            resp["tabs"] = json!(tabs);
-        }
-        Ok(resp)
-    }
-
-    fn dispatch_key(
-        self: &Arc<Self>,
-        session_id: &str,
-        key_name: &str,
-        modifiers: i32,
-    ) -> Result<(), CdpError> {
-        let (key, code, key_code, text) = key_def(key_name);
-        let mut down = json!({
-            "type": "rawKeyDown",
-            "key": key,
-            "code": code,
-            "windowsVirtualKeyCode": key_code,
-            "nativeVirtualKeyCode": key_code,
-            "modifiers": modifiers,
-        });
-        // Do not emit printable `char` when Ctrl or Meta is held.
-        let emit_char = (modifiers & (2 | 4)) == 0;
-        if emit_char {
-            if let Some(ref txt) = text {
-                down["text"] = json!(txt);
-                down["unmodifiedText"] = json!(txt.to_ascii_lowercase());
-            }
-        }
-        self.send_cdp("Input.dispatchKeyEvent", down, Some(session_id), CMD_TIMEOUT)?;
-
-        if emit_char {
-            if let Some(txt) = text {
-                self.send_cdp(
-                    "Input.dispatchKeyEvent",
-                    json!({
-                        "type": "char",
-                        "text": txt,
-                        "key": key,
-                        "code": code,
-                        "windowsVirtualKeyCode": key_code,
-                        "modifiers": modifiers,
-                    }),
-                    Some(session_id),
-                    CMD_TIMEOUT,
-                )?;
-            }
-        }
-
-        self.send_cdp(
-            "Input.dispatchKeyEvent",
-            json!({
-                "type": "keyUp",
-                "key": key,
-                "code": code,
-                "windowsVirtualKeyCode": key_code,
-                "nativeVirtualKeyCode": key_code,
-                "modifiers": modifiers,
-            }),
-            Some(session_id),
-            CMD_TIMEOUT,
-        )?;
-        Ok(())
+        InputDispatcher::dispatch_batch(self, params)
     }
 }
 
-fn mouse_button_and_mask(raw: Option<&str>) -> (&'static str, u8) {
-    match raw {
-        Some("right") => ("right", 2),
-        Some("middle") => ("middle", 4),
-        _ => ("left", 1),
-    }
-}
-
-pub const fn platform_cmd_modifier() -> i32 {
-    #[cfg(target_os = "macos")]
-    {
-        4 // Meta (Command)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        2 // Control
-    }
-}
-
-pub fn edit_command_def_for_os(
-    name: &str,
-    base_cmd_mod: i32,
-) -> Option<(&'static str, &'static str, i32, i32, &'static str)> {
-    match name {
-        "SelectAll" => Some(("a", "KeyA", 65, base_cmd_mod, "selectAll")),
-        "Copy" => Some(("c", "KeyC", 67, base_cmd_mod, "copy")),
-        "Paste" => Some(("v", "KeyV", 86, base_cmd_mod, "paste")),
-        "Cut" => Some(("x", "KeyX", 88, base_cmd_mod, "cut")),
-        "Undo" => Some(("z", "KeyZ", 90, base_cmd_mod, "undo")),
-        "Redo" => Some(("z", "KeyZ", 90, base_cmd_mod | 8, "redo")),
-        _ => None,
-    }
-}
-
-fn key_def(name: &str) -> (String, String, i32, Option<String>) {
-    match name {
-        "Backspace" => ("Backspace".into(), "Backspace".into(), 8, None),
-        "Delete" => ("Delete".into(), "Delete".into(), 46, None),
-        "Tab" => ("Tab".into(), "Tab".into(), 9, None),
-        "Escape" => ("Escape".into(), "Escape".into(), 27, None),
-        "ArrowUp" => ("ArrowUp".into(), "ArrowUp".into(), 38, None),
-        "ArrowDown" => ("ArrowDown".into(), "ArrowDown".into(), 40, None),
-        "ArrowLeft" => ("ArrowLeft".into(), "ArrowLeft".into(), 37, None),
-        "ArrowRight" => ("ArrowRight".into(), "ArrowRight".into(), 39, None),
-        "PageUp" => ("PageUp".into(), "PageUp".into(), 33, None),
-        "PageDown" => ("PageDown".into(), "PageDown".into(), 34, None),
-        "Home" => ("Home".into(), "Home".into(), 36, None),
-        "End" => ("End".into(), "End".into(), 35, None),
-        "Space" | " " => (" ".into(), "Space".into(), 32, Some(" ".into())),
-        "Enter" => ("Enter".into(), "Enter".into(), 13, Some("\r".into())),
-        s if s.len() == 1 && s.is_ascii() => {
-            let b = s.as_bytes()[0];
-            let (code, vk): (String, i32) = match b {
-                b'a'..=b'z' => (format!("Key{}", (b - 32) as char), (b - 32) as i32),
-                b'A'..=b'Z' => (format!("Key{}", b as char), b as i32),
-                b'0'..=b'9' => (format!("Digit{}", b as char), b as i32),
-                b'/' | b'?' => ("Slash".into(), 191),
-                b'.' | b'>' => ("Period".into(), 190),
-                b',' | b'<' => ("Comma".into(), 188),
-                b';' | b':' => ("Semicolon".into(), 186),
-                b'\'' | b'"' => ("Quote".into(), 222),
-                b'[' | b'{' => ("BracketLeft".into(), 219),
-                b']' | b'}' => ("BracketRight".into(), 221),
-                b'\\' | b'|' => ("Backslash".into(), 220),
-                b'-' | b'_' => ("Minus".into(), 189),
-                b'=' | b'+' => ("Equal".into(), 187),
-                b'`' | b'~' => ("Backquote".into(), 192),
-                b'!' => ("Digit1".into(), 49),
-                b'@' => ("Digit2".into(), 50),
-                b'#' => ("Digit3".into(), 51),
-                b'$' => ("Digit4".into(), 52),
-                b'%' => ("Digit5".into(), 53),
-                b'^' => ("Digit6".into(), 54),
-                b'&' => ("Digit7".into(), 55),
-                b'*' => ("Digit8".into(), 56),
-                b'(' => ("Digit9".into(), 57),
-                b')' => ("Digit0".into(), 48),
-                _ => ("Unidentified".into(), b as i32),
-            };
-            let txt = if b >= 0x20 && b <= 0x7E {
-                Some(s.to_string())
-            } else {
-                None
-            };
-            (s.to_string(), code, vk, txt)
-        }
-        _ => ("Enter".into(), "Enter".into(), 13, Some("\r".into())),
-    }
-}
-
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -2791,7 +1046,7 @@ pub mod tests {
     use super::*;
     use crate::cdp::protocol::EventCallback;
     use crate::stream::dedup::base64_encode;
-    use crate::stream::profiles::PROFILE_ULTRA;
+    use crate::stream::profiles::{PROFILE_HIGH, PROFILE_ULTRA};
     use std::collections::HashSet;
     use std::sync::atomic::AtomicUsize;
 
@@ -2805,6 +1060,8 @@ pub mod tests {
         fail_attach_once: HashSet<String>,
         fail_click_for: HashSet<String>,
         fail_screencast_for: HashSet<String>,
+        fail_eval_for: HashSet<String>,
+        layout_metrics_vp: Option<(u32, u32)>,
         auto_screencast_b64: Option<String>,
     }
 
@@ -2828,6 +1085,8 @@ pub mod tests {
                     fail_attach_once: HashSet::new(),
                     fail_click_for: HashSet::new(),
                     fail_screencast_for: HashSet::new(),
+                    fail_eval_for: HashSet::new(),
+                    layout_metrics_vp: None,
                     auto_screencast_b64: None,
                 }),
                 on_event,
@@ -3000,7 +1259,26 @@ pub mod tests {
                         }
                     }
 
-                    "Runtime.evaluate" => Ok(json!({ "result": { "value": "[1440,900]" } })),
+                    "Runtime.evaluate" => {
+                        let tid = session_id
+                            .as_deref()
+                            .and_then(|s| st.session_to_target.get(s))
+                            .cloned()
+                            .unwrap_or_default();
+                        if st.fail_eval_for.contains(&tid) {
+                            Err((-32000, "Cannot evaluate on chrome:// page".into()))
+                        } else {
+                            Ok(json!({ "result": { "value": "[1440,900]" } }))
+                        }
+                    }
+
+                    "Page.getLayoutMetrics" => {
+                        let (w, h) = st.layout_metrics_vp.unwrap_or((1366, 768));
+                        Ok(json!({
+                            "cssVisualViewport": { "clientWidth": w, "clientHeight": h },
+                            "cssLayoutViewport": { "clientWidth": w, "clientHeight": h },
+                        }))
+                    }
 
                     "Page.captureScreenshot" => {
                         st.shot_counter += 1;
@@ -3105,7 +1383,6 @@ pub mod tests {
             make_unconnected_mock_client(vec![tab("t1", "Home", "https://home.test")]);
         assert_eq!(dials.load(Ordering::SeqCst), 0);
 
-        // Polling while initially disconnected returns connected=false WITHOUT dialing Chrome!
         let f0 = client
             .poll_frame(PollFrameParams {
                 quality_preset: "low".into(),
@@ -3116,7 +1393,6 @@ pub mod tests {
         assert_eq!(f0["connected"], false);
         assert_eq!(dials.load(Ordering::SeqCst), 0);
 
-        // Input batch while disconnected returns connected=false WITHOUT dialing Chrome!
         let in0 = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
@@ -3131,7 +1407,6 @@ pub mod tests {
         assert_eq!(in0["connected"], false);
         assert_eq!(dials.load(Ordering::SeqCst), 0);
 
-        // Explicit connect dials exactly once.
         client.ensure_connected().unwrap();
         assert_eq!(dials.load(Ordering::SeqCst), 1);
 
@@ -3145,7 +1420,6 @@ pub mod tests {
             .unwrap();
         assert_eq!(f1["connected"], true);
 
-        // External disconnect closes transport; subsequent late polls MUST NOT re-dial!
         client.disconnect();
         let f2 = client
             .poll_frame(PollFrameParams {
@@ -3156,11 +1430,7 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(f2["connected"], false);
-        assert_eq!(
-            dials.load(Ordering::SeqCst),
-            1,
-            "poll_frame after disconnect must never silently re-dial Chrome"
-        );
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
         client.dispose();
     }
 
@@ -3176,7 +1446,7 @@ pub mod tests {
             })
             .unwrap();
 
-        let sid = client.state.lock().unwrap().sessions.get("t1").cloned().unwrap();
+        let sid = client.tabs.lock().unwrap().session_for("t1").unwrap();
         let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
         assert!(mock
             .state
@@ -3222,6 +1492,7 @@ pub mod tests {
             })
             .unwrap();
         assert!(res["dialog"].is_null());
+        assert!(res["serverMs"].as_u64().is_some());
 
         let sent = mock.state.lock().unwrap().sent.clone();
         let dlg_cmd = sent
@@ -3247,8 +1518,7 @@ pub mod tests {
         assert_eq!(client.screencast_target_id().as_deref(), Some("t1"));
         assert!(!client.is_screencast_idle_paused());
 
-        // Simulate 13s without user input while panel continues background polling
-        client.rewind_last_interaction(Duration::from_secs(13));
+        client.rewind_capture_idle(Duration::from_secs(13));
         let idle_poll = client
             .poll_frame(PollFrameParams {
                 target_id: Some("t1".into()),
@@ -3268,7 +1538,6 @@ pub mod tests {
             .iter()
             .any(|m| m["method"] == "Page.stopScreencast"));
 
-        // User scroll/click immediately wakes screencast!
         let wake = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
@@ -3336,11 +1605,8 @@ pub mod tests {
         let h1 = f_pop["frameHash"].as_str().unwrap().to_string();
         assert!(!h1.is_empty());
 
-        // On restricted chrome:// pages (screencast unsupported), subsequent poll after throttle captures fresh fallback frame
-        {
-            client.state.lock().unwrap().last_fallback_shot_at =
-                Some(Instant::now() - Duration::from_secs(2));
-        }
+        client.capture.lock().unwrap().last_fallback_shot_at =
+            Some(Instant::now() - Duration::from_secs(2));
         let f_next = client
             .poll_frame(PollFrameParams {
                 target_id: Some("t-oauth".into()),
@@ -3397,7 +1663,7 @@ pub mod tests {
                     InputEvent {
                         action: "key".into(),
                         key: Some("Enter".into()),
-                        modifiers: Some(8), // Shift+Enter
+                        modifiers: Some(8),
                         ..Default::default()
                     },
                     InputEvent {
@@ -3435,7 +1701,6 @@ pub mod tests {
             .unwrap();
 
         let sent = holder.lock().unwrap().as_ref().unwrap().state.lock().unwrap().sent.clone();
-        // Verify clickCount=2 dispatched a single press+release pair (not 4x clicks!)
         let dbl_presses: Vec<&Value> = sent
             .iter()
             .filter(|m| {
@@ -3447,23 +1712,18 @@ pub mod tests {
         assert_eq!(dbl_presses.len(), 1);
         assert_eq!(dbl_presses[0]["params"]["clickCount"], 2);
 
-        // Verify drag mouseMoved preserved buttons=1
         assert!(sent.iter().any(|m| {
             m["method"] == "Input.dispatchMouseEvent"
                 && m["params"]["type"] == "mouseMoved"
                 && m["params"]["x"] == 80
                 && m["params"]["buttons"] == 1
         }));
-
-        // Verify Shift+Enter preserved modifiers=8
         assert!(sent.iter().any(|m| {
             m["method"] == "Input.dispatchKeyEvent"
                 && m["params"]["type"] == "rawKeyDown"
                 && m["params"]["key"] == "Enter"
                 && m["params"]["modifiers"] == 8
         }));
-
-        // Verify edit commands AND OS modifier mapping (macOS=4, Linux=2)
         for cmd in ["undo", "redo", "cut", "selectAll", "copy", "paste"] {
             assert!(sent.iter().any(|m| {
                 m["method"] == "Input.dispatchKeyEvent"
@@ -3497,20 +1757,17 @@ pub mod tests {
         assert_eq!(client.active_target_id().as_deref(), Some("t2"));
         assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
 
-        // 1. Closing a non-active tab keeps active session & frame sequence untouched.
         let r_non_active = client.close_tab(Some("t1"), None).unwrap();
         assert_eq!(r_non_active["connected"], true);
         assert_eq!(r_non_active["activeTargetId"], "t2");
         assert_eq!(client.screencast_target_id().as_deref(), Some("t2"));
         assert_eq!(r_non_active["seq"], f1["seq"]);
 
-        // 2. Duplicate/nonexistent close never closes an innocent surviving tab.
         let r_dup = client.close_tab(Some("t-nonexistent"), None).unwrap();
         assert_eq!(r_dup["connected"], true);
         assert_eq!(r_dup["tabs"].as_array().unwrap().len(), 2);
         assert_eq!(r_dup["activeTargetId"], "t2");
 
-        // 3. Closing the active tab switches atomically and warms surviving neighbor.
         let r_active = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t2".into()),
@@ -3537,7 +1794,6 @@ pub mod tests {
             .iter()
             .any(|m| m["method"] == "Target.activateTarget" && m["params"]["targetId"] == "t3"));
 
-        // 4. Closing the last tab enters zero-tab state without creating about:blank.
         let r_last = client.close_tab(Some("t3"), None).unwrap();
         assert_eq!(r_last["connected"], true);
         assert_eq!(r_last["noTabs"], true);
@@ -3554,10 +1810,7 @@ pub mod tests {
             .unwrap()
             .sent
             .clone();
-        assert!(
-            !sent_after.iter().any(|m| m["method"] == "Target.createTarget"),
-            "closing last tab must NOT auto-create about:blank"
-        );
+        assert!(!sent_after.iter().any(|m| m["method"] == "Target.createTarget"));
         client.dispose();
     }
 
@@ -3591,7 +1844,6 @@ pub mod tests {
         assert_eq!(frame["activeTargetId"], "t2");
         assert!(client.is_connected());
 
-        // External target destruction during input dispatch also recovers without disconnecting
         holder
             .lock()
             .unwrap()
@@ -3644,8 +1896,7 @@ pub mod tests {
         let th1 = f1["tabsHash"].as_str().unwrap().to_string();
         let seq1 = f1["seq"].as_u64().unwrap();
 
-        let sid = client.state.lock().unwrap().sessions.get("t1").cloned().unwrap();
-        // Push byte-identical frame -> deduped at ingress!
+        let sid = client.tabs.lock().unwrap().session_for("t1").unwrap();
         mock.push_event(
             "Page.screencastFrame",
             json!({
@@ -3657,7 +1908,6 @@ pub mod tests {
         );
         assert_eq!(client.deduped_frames(), 1);
 
-        // Poll with matching frameHash & tabsHash -> zero imageDataUrl, no tabs array!
         let f2 = client
             .poll_frame(PollFrameParams {
                 target_id: Some("t1".into()),
@@ -3675,7 +1925,6 @@ pub mod tests {
         assert_eq!(f2["imageBytes"], 0);
         assert!(f2.get("tabs").is_none());
 
-        // Push distinct frame -> delivered with new hash!
         mock.push_event(
             "Page.screencastFrame",
             json!({
@@ -3737,7 +1986,7 @@ pub mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let old_sid = client.state.lock().unwrap().sessions.get("t1").cloned().unwrap();
+        let old_sid = client.tabs.lock().unwrap().session_for("t1").unwrap();
         client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
@@ -3748,7 +1997,7 @@ pub mod tests {
                 }],
             })
             .unwrap();
-        let seq_before = client.state.lock().unwrap().frame_seq;
+        let seq_before = client.capture.lock().unwrap().frame_seq;
 
         let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
         mock.push_event(
@@ -3761,8 +2010,8 @@ pub mod tests {
             Some(&old_sid),
         );
 
-        assert_eq!(client.state.lock().unwrap().frame_seq, seq_before);
-        assert!(client.state.lock().unwrap().latest_frame.is_none());
+        assert_eq!(client.capture.lock().unwrap().frame_seq, seq_before);
+        assert!(client.capture.lock().unwrap().latest_frame.is_none());
         let sent = mock.state.lock().unwrap().sent.clone();
         assert!(sent
             .iter()
@@ -3799,12 +2048,8 @@ pub mod tests {
         assert!(empty["tabs"].as_array().unwrap().is_empty());
         assert!(client.is_connected());
         let sent = mock.state.lock().unwrap().sent.clone();
-        assert!(
-            !sent.iter().any(|m| m["method"] == "Target.createTarget"),
-            "external last-tab close must NOT force-create about:blank"
-        );
+        assert!(!sent.iter().any(|m| m["method"] == "Target.createTarget"));
 
-        // When user later opens a new tab in Chrome, polling attaches to it cleanly.
         mock.state
             .lock()
             .unwrap()
@@ -3831,9 +2076,9 @@ pub mod tests {
     }
 
     #[test]
-    fn pause_stops_screencast_while_keeping_connection_and_resume_restarts() {
+    fn pause_stops_screencast_bumps_pause_epoch_and_resume_restarts() {
         let (client, holder) = make_mock_client(vec![tab("t1", "Live", "https://live.test")]);
-        client
+        let initial = client
             .poll_frame(PollFrameParams {
                 target_id: Some("t1".into()),
                 quality_preset: "low".into(),
@@ -3841,6 +2086,7 @@ pub mod tests {
                 ..Default::default()
             })
             .unwrap();
+        assert_eq!(initial["pauseEpoch"], 0);
         assert_eq!(client.screencast_target_id().as_deref(), Some("t1"));
 
         let res = client
@@ -3854,11 +2100,15 @@ pub mod tests {
             .unwrap();
         assert_eq!(res["connected"], true);
         assert_eq!(res["paused"], true);
+        assert_eq!(res["pauseEpoch"], 1);
         assert!(client.is_connected());
         assert!(client.is_paused());
         assert!(client.screencast_target_id().is_none());
 
-        // Polling while paused must NOT restart Page.startScreencast
+        // Idempotent second pause keeps pause_epoch stable
+        client.pause();
+        assert_eq!(client.pause_epoch(), 1);
+
         let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
         let sc_before = mock
             .state
@@ -3877,6 +2127,7 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(paused_poll["paused"], true);
+        assert_eq!(paused_poll["pauseEpoch"], 1);
         let sc_after_pause = mock
             .state
             .lock()
@@ -3887,9 +2138,9 @@ pub mod tests {
             .count();
         assert_eq!(sc_before, sc_after_pause);
 
-        // Resuming restores screencast without reconnecting
         client.resume();
         assert!(!client.is_paused());
+        assert_eq!(client.pause_epoch(), 2);
         let live_poll = client
             .poll_frame(PollFrameParams {
                 target_id: Some("t1".into()),
@@ -3899,7 +2150,211 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(live_poll["paused"], false);
+        assert_eq!(live_poll["pauseEpoch"], 2);
         assert_eq!(client.screencast_target_id().as_deref(), Some("t1"));
+        client.dispose();
+    }
+
+    #[test]
+    fn boot_snapshot_and_warm_never_downgrade_active_high_screencast() {
+        let (client, holder) = make_mock_client(vec![tab("t1", "HD", "https://hd.test")]);
+        let f_hi = client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t1".into()),
+                quality_preset: "high".into(),
+                wait_ms: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(f_hi["qualityApplied"], "high");
+        assert_eq!(client.screencast_profile().as_deref(), Some("high"));
+
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        let starts_before = mock
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|m| m["method"] == "Page.startScreencast")
+            .count();
+        let stops_before = mock
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|m| m["method"] == "Page.stopScreencast")
+            .count();
+
+        // Both boot_snapshot and direct warm_active_tab with "low" MUST NOT downgrade active "high"!
+        let snap = client.boot_snapshot(1, "0.3.2", Some("low"), 0.0);
+        client.warm_active_tab(Some("low"), 0.0);
+        thread::sleep(Duration::from_millis(30));
+
+        assert_eq!(snap["qualityApplied"], "high");
+        assert_eq!(client.screencast_profile().as_deref(), Some("high"));
+        let sent = mock.state.lock().unwrap().sent.clone();
+        assert_eq!(
+            sent.iter()
+                .filter(|m| m["method"] == "Page.startScreencast")
+                .count(),
+            starts_before,
+            "boot_snapshot/warm_active_tab must not restart active high screencast"
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|m| m["method"] == "Page.stopScreencast")
+                .count(),
+            stops_before,
+            "boot_snapshot/warm_active_tab must not stop active high screencast"
+        );
+        client.dispose();
+    }
+
+    #[test]
+    fn decouples_popup_trigger_from_capture_idle_uses_layout_metrics_and_dwell_hysteresis() {
+        let (client, holder) = make_mock_client(vec![
+            tab("t1", "Main", "https://main.test"),
+            tab("t-chrome", "Inspect", "chrome://inspect"),
+        ]);
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        {
+            let mut st = mock.state.lock().unwrap();
+            st.fail_screencast_for.insert("t-chrome".into());
+            st.fail_eval_for.insert("t-chrome".into());
+            st.layout_metrics_vp = Some((1366, 768));
+        }
+
+        // 1. Start high-quality screencast on t1; non-forced downgrade within dwell is suppressed,
+        //    whereas forced refresh or post-dwell applies cleanly.
+        client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t1".into()),
+                quality_preset: "high".into(),
+                wait_ms: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(client.screencast_profile().as_deref(), Some("high"));
+
+        let within_dwell = client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t1".into()),
+                quality_preset: "low".into(),
+                wait_ms: 20,
+                force_refresh: false,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(within_dwell["qualityApplied"], "high");
+        assert_eq!(client.screencast_profile().as_deref(), Some("high"));
+
+        // Rewinding past SCREENCAST_TIER_DWELL allows tier transition
+        client.rewind_screencast_started_at(SCREENCAST_TIER_DWELL + Duration::from_secs(1));
+        let post_dwell = client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t1".into()),
+                quality_preset: "low".into(),
+                wait_ms: 20,
+                force_refresh: false,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(post_dwell["qualityApplied"], "low");
+        assert_eq!(client.screencast_profile().as_deref(), Some("low"));
+
+        // Explicit force_refresh bypasses dwell immediately (e.g. user quality selector)
+        let forced = client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t1".into()),
+                quality_preset: "high".into(),
+                wait_ms: 20,
+                force_refresh: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(forced["qualityApplied"], PROFILE_HIGH.name);
+        assert_eq!(client.screencast_profile().as_deref(), Some("high"));
+
+        // 2. Popup trigger is decoupled from capture_idle_at: poll/force_refresh does NOT arm
+        //    last_popup_trigger_at, so an unrelated background tab without openerId must NOT steal focus.
+        mock.state
+            .lock()
+            .unwrap()
+            .tabs
+            .push(tab("t-bg", "Background", "https://bg.test"));
+        mock.push_event(
+            "Target.targetCreated",
+            json!({
+                "targetInfo": {
+                    "targetId": "t-bg",
+                    "type": "page",
+                    "title": "Background",
+                    "url": "https://bg.test"
+                }
+            }),
+            None,
+        );
+        assert_eq!(client.active_target_id().as_deref(), Some("t1"));
+
+        // Real user click arms last_popup_trigger_at independently of capture_idle_at rewind
+        client
+            .dispatch_input_batch(InputBatchParams {
+                target_id: Some("t1".into()),
+                events: vec![InputEvent {
+                    action: "click".into(),
+                    x: Some(40.0),
+                    y: Some(50.0),
+                    ..Default::default()
+                }],
+            })
+            .unwrap();
+        client.rewind_capture_idle(Duration::from_secs(15));
+        mock.state
+            .lock()
+            .unwrap()
+            .tabs
+            .push(tab("t-pop2", "Popup", "https://pop.test"));
+        mock.push_event(
+            "Target.targetCreated",
+            json!({
+                "targetInfo": {
+                    "targetId": "t-pop2",
+                    "type": "page",
+                    "title": "Popup",
+                    "url": "https://pop.test"
+                }
+            }),
+            None,
+        );
+        assert_eq!(client.active_target_id().as_deref(), Some("t-pop2"));
+        // Consume the popup_switched handoff on t-pop2 before explicitly switching to t-chrome
+        let f_pop2 = client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t-pop2".into()),
+                quality_preset: "low".into(),
+                wait_ms: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(f_pop2["popupSwitched"], true);
+
+        // 3. Restricted chrome:// page where Runtime.evaluate fails falls back to Page.getLayoutMetrics.
+        let restricted = client
+            .poll_frame(PollFrameParams {
+                target_id: Some("t-chrome".into()),
+                quality_preset: "low".into(),
+                wait_ms: 20,
+                force_refresh: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(restricted["activeTargetId"], "t-chrome");
+        assert_eq!(restricted["page"]["viewportWidth"], 1366);
+        assert_eq!(restricted["page"]["viewportHeight"], 768);
+        let sent = mock.state.lock().unwrap().sent.clone();
+        assert!(sent.iter().any(|m| m["method"] == "Page.getLayoutMetrics"));
         client.dispose();
     }
 }
