@@ -15,6 +15,7 @@ function minifyCss(css) {
     .replace(/\s*([{}:;,>~+])\s*/g, "$1")
     .replace(/\(\s+/g, "(")
     .replace(/\s+\)/g, ")")
+    .replace(/\s*!important/g, "!important")
     .replace(/;}/g, "}")
     .replace(/\[([^=\]]+)="([a-zA-Z0-9_-]+)"\]/g, "[$1=$2]")
     .replace(/(^|[:\s(,])0+\.(\d)/g, "$1.$2")
@@ -30,9 +31,9 @@ const KEYWORDS_AND_GLOBALS = new Set(
   ).split(" ")
 );
 
-// Internal class properties/methods owned exclusively by our bundle (never present on DOM/MCP payloads).
+  // Internal class properties/methods owned exclusively by our bundle (never present on DOM/MCP payloads).
 const INTERNAL_PROPS = new Set(
-  "effectiveTier calibrated ewmaRttMs lastNetRttMs lastKbps fastStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState resolveStageAspect setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
+  "effectiveTier calibrated ewmaRttMs lastNetRttMs lastKbps fastStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState resolveStageAspect setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request tierVal clamp".split(" ")
 );
 
 function tokenizeJs(src) {
@@ -644,7 +645,7 @@ function minifyJsTokens(src) {
       if (!afterDot && !isObjKey && (t.v === "true" || t.v === "false")) {
         t.k = "op"; t.v = t.v === "true" ? "!0" : "!1"; continue;
       }
-      if (!afterDot && !isObjKey && t.v === "undefined" && !["=", ".", "?.", "[", "("].includes(nx?.v)) {
+      if (!afterDot && !isObjKey && p?.v !== "typeof" && t.v === "undefined" && !["=", ".", "?.", "[", "("].includes(nx?.v)) {
         if (strMap.has("undefined")) { t.v = strMap.get("undefined"); continue; }
         t.k = "op"; t.v = "void 0"; continue;
       }
@@ -656,8 +657,11 @@ function minifyJsTokens(src) {
       if (!afterDot && !isObjKey && p?.v !== "typeof" && !ts && strMap.has(t.v)) {
         t.v = strMap.get(t.v);
       }
+      if (t.k === "num" && /^0\.\d+$/.test(t.v)) t.v = t.v.slice(1);
     } else if (t.k === "lit" && !isObjKey && strMap.has(t.v)) {
       t.k = "id"; t.v = strMap.get(t.v);
+    } else if (t.k === "num" && /^0\.\d+$/.test(t.v)) {
+      t.v = t.v.slice(1);
     }
   }
 

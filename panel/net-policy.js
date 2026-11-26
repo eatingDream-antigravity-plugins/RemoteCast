@@ -19,6 +19,9 @@ export function resolvePanelLang({ saved = "", hostLocale = "", navLang = "", bo
   return "en";
 }
 
+const tierVal = (r, u, l, m, h) => (r >= 750 ? u : r >= 350 ? l : r >= 140 ? m : h);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
 export class AdaptiveBandwidthController {
   constructor(m = "auto") {
     this.mode = m; this.effectiveTier = m === "auto" ? "low" : m;
@@ -48,7 +51,7 @@ export class AdaptiveBandwidthController {
       else {
         const ci = TIERS.indexOf(prev), di = TIERS.indexOf(want);
         if (di < ci) { this.effectiveTier = want; this.fastStreak = 0; }
-        else if (di > ci && ((prev === "ultra" && r < 520) || (prev === "low" && r < 240) || (prev === "medium" && r < 100))) {
+        else if (di > ci && r < (prev === "ultra" ? 520 : prev === "low" ? 240 : 100)) {
           if (++this.fastStreak >= 4 && now - this.lastUpgradeAt >= 6000) { this.effectiveTier = TIERS[ci + 1]; this.fastStreak = 0; this.lastUpgradeAt = now; }
         } else this.fastStreak = 0;
       }
@@ -58,28 +61,19 @@ export class AdaptiveBandwidthController {
   }
   getNetworkGrade() { return !this.calibrated ? "good" : this.ewmaRttMs >= 350 ? "weak" : this.ewmaRttMs >= 140 ? "mid" : "good"; }
   computePollTiming({ idleMs = 0, inputBusy = false, screencastIdle = false, hidden = false, errCount = 0 } = {}) {
-    const r = this.ewmaRttMs;
-    const mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1;
-    if (hidden) {
-      const base = r >= 750 ? 12000 : r >= 350 ? 8000 : r >= 140 ? 4000 : 2000;
-      return { waitMs: 0, nextDelayMs: Math.min(30000, base * mult) };
-    }
-    if (screencastIdle && !inputBusy) return { waitMs: 0, nextDelayMs: Math.min(20000, 4000 * mult) };
-    if (inputBusy) return { waitMs: r > 350 ? 220 : 140, nextDelayMs: Math.min(240, Math.max(90, Math.round(r * 0.35))) };
-    if (errCount > 0) {
-      const base = idleMs < 3500 ? 1000 : idleMs < 12000 ? 1500 : 2000;
-      return { waitMs: 0, nextDelayMs: Math.min(16000, base * mult) };
-    }
-    if (idleMs < 3500) return { waitMs: r > 350 ? 280 : 180, nextDelayMs: r > 700 ? 320 : r > 350 ? 180 : 60 };
-    if (idleMs < 12000) return { waitMs: r > 350 ? 750 : 520, nextDelayMs: r > 700 ? 900 : r > 350 ? 500 : 280 };
-    return { waitMs: 400, nextDelayMs: r > 700 ? 2800 : r > 350 ? 2000 : 1400 };
+    const r = this.ewmaRttMs, mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1;
+    const p = (waitMs, nextDelayMs) => ({ waitMs, nextDelayMs });
+    if (hidden) return p(0, Math.min(30000, tierVal(r, 12000, 8000, 4000, 2000) * mult));
+    if (screencastIdle && !inputBusy) return p(0, Math.min(20000, 4000 * mult));
+    if (inputBusy) return p(r > 350 ? 220 : 140, clamp(Math.round(r * 0.35), 90, 240));
+    if (errCount > 0) return p(0, Math.min(16000, (idleMs < 3500 ? 1000 : idleMs < 12000 ? 1500 : 2000) * mult));
+    if (idleMs < 3500) return p(r > 350 ? 280 : 180, r > 700 ? 320 : r > 350 ? 180 : 60);
+    if (idleMs < 12000) return p(r > 350 ? 750 : 520, r > 700 ? 900 : r > 350 ? 500 : 280);
+    return p(400, r > 700 ? 2800 : r > 350 ? 2000 : 1400);
   }
   computeOfflinePollDelay({ hidden = false, errCount = 0 } = {}) {
-    const r = this.ewmaRttMs;
-    const base = hidden
-      ? (r >= 750 ? 10000 : r >= 350 ? 7500 : r >= 140 ? 5000 : 3000)
-      : (r >= 750 ? 8000 : r >= 350 ? 6000 : r >= 140 ? 4500 : 3000);
-    const mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1;
+    const r = this.ewmaRttMs, mult = errCount > 0 ? Math.min(4, 1 << Math.min(errCount, 2)) : 1;
+    const base = hidden ? tierVal(r, 10000, 7500, 5000, 3000) : tierVal(r, 8000, 6000, 4500, 3000);
     return Math.min(30000, base * mult);
   }
   getWheelCoalesceMs() { return this.ewmaRttMs > 350 ? 140 : 80; }
@@ -87,7 +81,7 @@ export class AdaptiveBandwidthController {
 }
 
 export function coalesceInputEvents(raw) {
-  const out = [], seen = new Set(), cl = (v) => Math.max(-1600, Math.min(1600, v));
+  const out = [], seen = new Set();
   for (const e of raw || []) {
     if (!e?.action) continue;
     const p = out[out.length - 1], a = e.action;
@@ -105,7 +99,8 @@ export function coalesceInputEvents(raw) {
     }
     if (p?.action === "type" && !p.pressEnter && a === "type" && !e.pressEnter) { p.text = (p.text || "") + (e.text || ""); continue; }
     if (p?.action === "scroll" && a === "scroll") {
-      p.deltaX = cl((p.deltaX || 0) + (e.deltaX || 0)); p.deltaY = cl((p.deltaY || 0) + (e.deltaY || 0));
+      p.deltaX = clamp((p.deltaX || 0) + (e.deltaX || 0), -1600, 1600);
+      p.deltaY = clamp((p.deltaY || 0) + (e.deltaY || 0), -1600, 1600);
       p.x = e.x; p.y = e.y; continue;
     }
     if (p?.action === "key" && a === "key" && p.key === e.key && (p.modifiers || 0) === (e.modifiers || 0) && REP.has(e.key)) {
@@ -141,7 +136,10 @@ export const isSafeImageUrl = (u) => typeof u === "string" && u.startsWith("data
 export function applyFramePayloadState(S, d, reqEpoch = S.ep, totalMs = 0) {
   if (!shouldApplyFrameResponse({ reqEpoch, currentEpoch: S.ep, currentTargetId: S.aid, payload: d }).apply) return null;
   S.on = true;
-  if (typeof d.paused === "boolean" && !totalMs) { S.pa = d.paused; S.st = !d.paused; }
+  if (typeof d.paused === "boolean") {
+    const pe = Number(d.pauseEpoch), ok = Number.isFinite(pe), cur = Number(S.pe) || 0;
+    if (ok ? pe > cur || (!totalMs && pe >= cur) : !totalMs) { if (ok) S.pe = pe; S.pa = d.paused; S.st = !d.paused; }
+  }
   S.id = !S.pa && !!d.screencastPausedIdle;
   S.dlg = d.dialog || null;
   const nt = isNoTabsPayload(d);

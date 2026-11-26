@@ -182,7 +182,7 @@ impl SwrBootCache {
 
     fn fetch_from_relay(&self, timeout: Duration) -> Option<Value> {
         self.relay
-            .call("boot_snapshot", json!({ "qualityPreset": "low" }), timeout)
+            .call("boot_snapshot", json!({}), timeout)
             .or_else(|_| self.relay.call("status", json!({}), timeout))
             .ok()
             .map(sanitize_boot_snapshot)
@@ -203,10 +203,10 @@ impl SwrBootCache {
             .spawn(move || {
                 if warm_relay {
                     let _ = me.relay.warm();
-                    // Also nudge relay's Chrome readiness check asynchronously when disconnected.
+                    // Also nudge relay's Chrome readiness check asynchronously without downgrading active streams.
                     let _ = me
                         .relay
-                        .call("warm", json!({ "qualityPreset": "low" }), Duration::from_millis(800));
+                        .call("warm", json!({}), Duration::from_millis(800));
                 }
                 let fetched = me.fetch_from_relay(Duration::from_millis(1500));
                 let mut st = me.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -338,6 +338,9 @@ impl SwrBootCache {
         } else {
             if let Some(p) = sc.get("paused").and_then(|v| v.as_bool()) {
                 snap["paused"] = json!(p);
+            }
+            if let Some(pe) = sc.get("pauseEpoch").and_then(|v| v.as_u64()) {
+                snap["pauseEpoch"] = json!(pe);
             }
             if let Some(idle) = sc.get("screencastPausedIdle").and_then(|v| v.as_bool()) {
                 snap["screencastPausedIdle"] = json!(idle);
@@ -812,6 +815,15 @@ mod tests {
         assert_eq!(fsc["recovered"], true);
         assert_eq!(fsc["activeTargetId"], "t2");
         assert_eq!(fsc["qualityApplied"], "ultra");
+
+        // Verify handle_input measures and returns serverMs even when relay omits it
+        let in_resp = dispatch_tool_with_cache(
+            &(Arc::new(DummyRelay { delay_ms: 0, poll_attempts: AtomicUsize::new(0) }) as Arc<dyn RelayBackend>),
+            None,
+            "chrome_stream_input",
+            json!({ "events": [{ "action": "click", "x": 10, "y": 20 }] }),
+        );
+        assert!(in_resp["structuredContent"]["serverMs"].as_u64().is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -173,6 +173,8 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
 
     state.pa = true;
     state.st = false;
+    state.pe = 1;
+    // Legacy payload without pauseEpoch preserves local paused state on live poll (totalMs > 0)
     const paintWhilePaused = applyFramePayloadState(state, {
       connected: true,
       activeTargetId: "t2",
@@ -184,12 +186,49 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     assert.equal(paintWhilePaused, false);
     assert.equal(state.pa, true);
     assert.equal(state.id, false);
+
+    // Stale pauseEpoch <= S.pe is ignored on live poll
+    applyFramePayloadState(state, {
+      connected: true,
+      activeTargetId: "t2",
+      paused: false,
+      pauseEpoch: 1,
+      changed: false,
+      unchanged: true,
+    }, 1, 40);
+    assert.equal(state.pa, true);
+    assert.equal(state.pe, 1);
+
+    // Newer server pauseEpoch > S.pe reconciles paused/resumed deterministically on live poll!
+    applyFramePayloadState(state, {
+      connected: true,
+      activeTargetId: "t2",
+      paused: false,
+      pauseEpoch: 2,
+      changed: false,
+      unchanged: true,
+    }, 1, 45);
+    assert.equal(state.pa, false);
+    assert.equal(state.st, true);
+    assert.equal(state.pe, 2);
+
+    applyFramePayloadState(state, {
+      connected: true,
+      activeTargetId: "t2",
+      paused: true,
+      pauseEpoch: 3,
+      changed: false,
+      unchanged: true,
+    }, 1, 50);
+    assert.equal(state.pa, true);
+    assert.equal(state.st, false);
+    assert.equal(state.pe, 3);
   });
 
-  it("ships dark-first, zero-flicker, CSP-clean, jargon-free panel bundle under 45 KiB", () => {
+  it("ships dark-first, zero-flicker, CSP-clean, jargon-free panel bundle <= 44,000 B", () => {
     const html = fs.readFileSync(path.join(__dirname, "dist", "panel.html"), "utf8");
     const bytes = Buffer.byteLength(html, "utf8");
-    assert.ok(bytes < 45 * 1024, `panel.html is ${bytes} B (>= 45 KiB)`);
+    assert.ok(bytes <= 44_000, `panel.html is ${bytes} B (> 44,000 B target)`);
     for (const jargon of ["SHA-1", "0600 Unix Socket", "原生 Rust", "Local Loopback", "CDP"]) {
       assert.ok(!html.includes(jargon), `panel.html must not expose internal jargon: ${jargon}`);
     }
@@ -632,6 +671,83 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       const callsAfterReveal = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_frame");
       assert.ok(callsAfterReveal.length >= 2, "ResizeObserver reveal must trigger immediate refresh");
       assert.equal(callsAfterReveal[callsAfterReveal.length - 1].params.arguments.forceRefresh, true);
+
+      // Calibrate fast RTT (50ms -> "high") on the reveal frame response
+      fakeNowMs += 50;
+      msgHandler({
+        source: win.parent,
+        data: {
+          jsonrpc: "2.0",
+          id: callsAfterReveal[callsAfterReveal.length - 1].id,
+          result: {
+            structuredContent: {
+              connected: true,
+              activeTargetId: "t1",
+              changed: false,
+              unchanged: true,
+              serverMs: 10,
+              screencastPausedIdle: false,
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Trigger an input batch (`chrome_stream_input`) with a slow 1200ms response:
+      // flIn MUST NOT pollute AdaptiveBandwidthController RTT EWMA!
+      els.get("rl").listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const inCall = posted.find((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input");
+      assert.ok(inCall, "reload click must dispatch chrome_stream_input");
+      fakeNowMs += 1200;
+      msgHandler({
+        source: win.parent,
+        data: {
+          jsonrpc: "2.0",
+          id: inCall.id,
+          result: { structuredContent: { ok: true, connected: true, activeTargetId: "t1", serverMs: 1180 } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+
+      const callsAfterSlowInput = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_frame");
+      const lastCall = callsAfterSlowInput[callsAfterSlowInput.length - 1];
+      assert.equal(
+        lastCall.params.arguments.qualityPreset,
+        "high",
+        "slow chrome_stream_input RPC must not downgrade frame qualityPreset"
+      );
+
+      // Simulate a stale-epoch frame response (after user opens a new tab, bumping S.ep) with 1500ms latency:
+      // onPoll MUST drop stale epoch BEFORE net.recordSample so RTT EWMA stays at "high"!
+      const staleReqId = lastCall.id;
+      els.get("nt").listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      fakeNowMs += 1500;
+      msgHandler({
+        source: win.parent,
+        data: {
+          jsonrpc: "2.0",
+          id: staleReqId,
+          result: {
+            structuredContent: {
+              connected: true,
+              activeTargetId: "t1",
+              changed: true,
+              imageBytes: 18000,
+              serverMs: 10,
+              screencastPausedIdle: false,
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      const callsAfterStale = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_frame");
+      assert.equal(
+        callsAfterStale[callsAfterStale.length - 1].params.arguments.qualityPreset,
+        "high",
+        "stale-epoch frame dropped by onPoll must not pollute RTT EWMA"
+      );
 
       msgHandler({
         source: win.parent,
