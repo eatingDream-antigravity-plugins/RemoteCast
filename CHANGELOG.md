@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.3.3](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.2...v0.3.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* **arch:** decouple CDP subsystems, fix SWR downgrade and RTT skew, reclaim bundle headroom ([#16](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/16)) ([4194bc5](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/4194bc5393511fe9da62f4a4a0554c951d11c914))
+
 ## [0.3.2](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.1...v0.3.2) (2026-11-25)
 
 
