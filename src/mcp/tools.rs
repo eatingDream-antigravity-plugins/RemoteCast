@@ -27,8 +27,8 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
     let mut tools = json!([
         {
             "name": "chrome_stream_stage",
-            "title": "Chrome Stream",
-            "description": "Open the Chrome Stream live browser stage to view and interactively control local Google Chrome tabs without auto-connecting.",
+            "title": "RemoteCast",
+            "description": "Open the RemoteCast live browser stage to view and interactively control local Google Chrome tabs without auto-connecting.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -40,15 +40,15 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
                 },
                 "com.google.antigravity/ui": {
                     "entrypoints": [
-                        { "type": "global", "title": "Chrome Stream" },
-                        { "type": "aux_pane", "title": "Chrome Stream" }
+                        { "type": "global", "title": "RemoteCast" },
+                        { "type": "aux_pane", "title": "RemoteCast" }
                     ]
                 }
             }
         },
         {
             "name": "chrome_stream_connect",
-            "title": "Connect Chrome Stream",
+            "title": "Connect RemoteCast",
             "description": "Connect or verify the persistent local Chrome DevTools session and warm the active tab screencast.",
             "inputSchema": {
                 "type": "object",
@@ -153,7 +153,7 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
         },
         {
             "name": "chrome_stream_disconnect",
-            "title": "Disconnect Chrome Stream",
+            "title": "Disconnect RemoteCast",
             "description": "Stop screencast streaming and either revoke the Chrome DevTools session or keep it authorized in standby.",
             "inputSchema": {
                 "type": "object",

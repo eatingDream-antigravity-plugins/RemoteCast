@@ -1,6 +1,6 @@
-# Chrome Stream MCP — AI & Configuration Guide
+# RemoteCast (chrome-stream-mcp) — AI & Configuration Guide
 
-Complete operational reference for AI agents and power users: MCP tool schemas, Standby vs. Revoke semantics, isolated Remote Chrome mode, weak-network profiles, environment variables, CLI commands, and source builds.
+Complete operational reference for AI agents and power users configuring **RemoteCast** (`chrome-stream-mcp`): MCP tool schemas, Standby vs. Revoke semantics, isolated Remote Chrome mode, weak-network profiles, environment variables, CLI commands, and source builds. Homepage: <https://remotecast.eatingdream.dev>.
 
 ## 1. MCP Protocol & Tools
 
