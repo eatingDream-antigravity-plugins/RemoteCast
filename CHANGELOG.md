@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.4.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.3...v0.4.0) (2026-11-26)
+
+
+### Features
+
+* **ai:** add llms.txt, root AGENTS.md, and cross-client AI integration docs ([#18](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/18)) ([e9421c7](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/e9421c743885d33ac658b4343e8110be33790be6))
+
 ## [0.3.3](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.2...v0.3.3) (2026-11-26)
 
 
