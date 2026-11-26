@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.5.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.4.0...v0.5.0) (2026-11-26)
+
+
+### Features
+
+* Standby/Wake zero-re-Allow, isolated Remote Chrome launcher, weak-net crisp WebP settle, and Editorial-Warm panel ([#20](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/issues/20)) ([ab7e23b](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/commit/ab7e23bf659c2034c8f6aa7a3405e1d0da4278d8))
+
 ## [0.4.0](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.3.3...v0.4.0) (2026-11-26)
 
 
