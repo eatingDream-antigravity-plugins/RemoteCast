@@ -429,7 +429,8 @@ fn handle_client_conn(
         if is_control(method)
             || (method == "input"
                 && params["events"].as_array().is_some_and(|events| {
-                    events.len() == 1 && events[0]["action"].as_str().is_some_and(is_control)
+                    (events.len() == 1 && events[0]["action"].as_str().is_some_and(is_control))
+                        || events.iter().any(|ev| ev["action"] == "disconnect")
                 }))
         {
             writer.write_response(rpc_response(&cdp, &data_dir, method, params, id));
@@ -1239,6 +1240,21 @@ mod tests {
             assert_eq!(reply["result"]["paused"], paused);
             assert_eq!(reply["result"]["connected"], connected);
         }
+        assert!(!cdp.is_connected());
+
+        // Reconnect and verify multi-event `input` containing `disconnect` also bypasses saturated RPC slots.
+        cdp.ensure_connected().unwrap();
+        let req = json!({
+            "id": 5,
+            "method": "input",
+            "params": { "events": [{ "action": "resume" }, { "action": "disconnect" }] }
+        });
+        writeln!(peer.get_mut(), "{req}").unwrap();
+        peer.get_mut().flush().unwrap();
+        let multi_reply = read_response(&mut peer);
+        assert_eq!(multi_reply["id"], 5);
+        assert_eq!(multi_reply["result"]["ok"], true);
+        assert_eq!(multi_reply["result"]["connected"], false);
         assert!(!cdp.is_connected());
         assert_eq!(rpcs.load(Ordering::SeqCst), 32);
         drop(slots);

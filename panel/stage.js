@@ -6,13 +6,13 @@ import {
 
 const doc = document, b0 = globalThis.__CHROME_STREAM_BOOT__ || {}, fin = Number.isFinite, rnd = Math.round, isA = Array.isArray;
 const on = (n, ev, fn, o) => n?.addEventListener(ev, fn, o), ck = (n, fn) => on(n, "click", fn), sa = (n, k, v) => n?.setAttribute(k, String(v));
-const pd = (e) => e.preventDefault(), tx = (n, v) => { if (n.textContent !== v) n.textContent = v; }, hd = (n, v) => { n.hidden = !!v; };
+const pd = (e) => e.preventDefault(), tx = (n, v) => { if (n.textContent !== v) n.textContent = v; }, hd = (n, v) => (n.hidden = !!v);
 const tg = (n, c, v) => n.classList.toggle(c, !!v), pNow = () => performance.now(), nowMs = () => Date.now(), cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const sTm = (f, m) => globalThis.setTimeout(f, m), cTm = (i) => globalThis.clearTimeout(i), hid = () => doc.visibilityState === "hidden";
 const root = doc.getElementById("app"), app = new App({ name: "Chrome Stream", version: "0.4.0" }, {}), net = new AdaptiveBandwidthController("auto");
 const KEYS = new Set([...REP, "Enter", "Escape", "Home", "End"]);
 const QK = "auto low medium high ultra".split(" "), IK = "Enter Escape Tab Backspace Undo Copy Paste SelectAll".split(" ");
-const DLG = "alert confirm prompt beforeunload".split(" "), PAGE_ACT = new Set("click mousedown mouseup mousemove scroll type key dialog navigate back forward reload".split(" "));
+const DLG = "alert confirm prompt beforeunload".split(" "), PAGE_ACT = new Set("click mousedown mouseup mousemove scroll type key dialog navigate back forward reload close_tab".split(" "));
 const BN = ["left", "middle", "right"], BM = [1, 4, 2];
 const lsG = (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
 const lsS = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
@@ -75,8 +75,8 @@ const S = {
   dlg: b0.dialog || null, nt: !!(b0.connected && isNoTabsPayload(b0)),
 };
 let curLg = resolvePanelLang({ saved: lsG("chrome_stream_lang"), navLang: globalThis.navigator?.language || "", bootLocale: b0.locale || "" });
-let T = I18N[curLg] || I18N.en, portF = b0.portFile || null, tabSig = "", qApp = b0.qualityApplied || "low", errMsg = null;
-let isCn = false, isDisc = false, isPa = false, isSw = false, qMode = "auto", lastMode = "personal", dlgKey = "", imeOn = false, popOn = false, moreOn = false;
+let T = I18N[curLg] || I18N.en, portF = b0.portFile || null, tabSig = "", qApp = b0.qualityApplied || "low", errMsg = null, cErr = 0;
+let isCn = 0, isDisc = 0, isPa = 0, isSw = 0, qMode = "auto", lastMode = "personal", dlgKey = "", imeOn = 0, popOn = 0, moreOn = 0;
 let qIn = [], inB = 0, inT = 0, pB = 0, pT = 0, oT = 0, oB = 0, urg = 0, act = nowMs(), tT = 0, dropTimers = () => {};
 let pErr = 0, offErr = 0, offUrg = 0, lastFetchAt = b0.connected ? nowMs() : 0, lastForceAt = 0, stopReveal = null;
 let pGen = 0, painted = 0, started = 0, synced = 0, ready = 0, tSig = "", lAr = 0, fTimes = [], fpsVal = 0, lastGuideLg = "";
@@ -94,10 +94,10 @@ const eMsg = (e, fb) => (typeof e === "string" ? e : e?.message || fb || String(
 const rpcSc = (name, a) => app.callServerTool({ name: "chrome_stream_" + name, arguments: a }).then((r) => r?.structuredContent);
 const sendIn = (events, targetId, targetEpoch) => rpcSc("input", fin(targetEpoch) && targetEpoch > 0 ? { targetId, targetEpoch, events } : { targetId, events });
 const dropIn = () => (qIn = [], cTm(inT), inT = 0, dropTimers());
-const evIn = (action, o, imm = true, tid = S.aid, tep = S.tep) => pushIn({ action, ...o }, imm, tid, tep);
-const tyIn = (text, pressEnter = false, imm = true) => evIn("type", { text, pressEnter }, imm);
-const kyIn = (key, modifiers, imm = true) => evIn("key", modifiers ? { key, modifiers } : { key }, imm);
-const clIn = (p, button, clickCount = 1, tid = S.aid, tep = S.tep) => evIn("click", { x: p.x, y: p.y, button, clickCount }, true, tid, tep);
+const evIn = (action, o, imm = 1, tid = S.aid, tep = S.tep) => pushIn({ action, ...o }, imm, tid, tep);
+const tyIn = (text, pressEnter = false, imm = 1) => evIn("type", { text, pressEnter }, imm);
+const kyIn = (key, modifiers, imm = 1) => evIn("key", modifiers ? { key, modifiers } : { key }, imm);
+const clIn = (p, button, clickCount = 1, tid = S.aid, tep = S.tep) => evIn("click", { x: p.x, y: p.y, button, clickCount }, 1, tid, tep);
 const fTab = (id) => S.tabs.find((t) => t.targetId === id), tErr = (e) => isTargetErrorText(e?.message), isRec = (d) => d?.recoverable || isTargetErrorText(d?.error);
 const modsOf = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 const focusSt = () => (D.si || D.st).focus({ preventScroll: true });
@@ -107,9 +107,9 @@ const ripple = (px, py) => { const d = h(".rp"); d.style.left = `${px}%`; d.styl
 const syncTabList = (d) => isA(d?.tabs) && (S.tabs = d.tabs, S.th = d.tabsHash || "", setMeta(fTab(S.aid)), uTabs());
 const clsP = () => (popOn && setPop(0), moreOn && setMore(0));
 const syncPe = (d, fb) => {
-  const pe = Number(d?.pauseEpoch), has = typeof d?.paused === "boolean";
-  if (fin(pe) && pe > S.pe) { S.pe = pe; return has ? (S.pa = d.paused, S.st = !d.paused, 1) : 0; }
-  return fb && has && (S.pa = d.paused, S.st = !d.paused), 0;
+  const pe = Number(d?.pauseEpoch), has = typeof d?.paused === "boolean", g = fin(pe) && pe > S.pe;
+  g && (S.pe = pe);
+  return has && (g || fb) ? (S.st = !(S.pa = d.paused), g ? 1 : 0) : 0;
 };
 const clrTm = (w) => (w ? (cTm(pT), pT = 0) : (cTm(oT), oT = 0));
 const hideCvs = () => (painted = 0, hd(D.vc, 1), D.vc.className = "c", hd(D.ph, 0), hd(D.pb, 1));
@@ -130,11 +130,11 @@ const paint = (url) => {
   im.decoding = "async";
   const blit = (src, nw, nh) => {
     if (gen !== pGen) return src.close?.();
-    fitStage(nw, nh);
-    if (D.vc.width !== nw || D.vc.height !== nh) { D.vc.width = nw; D.vc.height = nh; }
-    const cx = D.vc.getContext("2d", { alpha: false });
+    const v = D.vc; fitStage(nw, nh);
+    if (v.width !== nw || v.height !== nh) { v.width = nw; v.height = nh; }
+    const cx = v.getContext("2d", { alpha: false });
     cx && (cx.imageSmoothingEnabled = true, cx.imageSmoothingQuality = "high", cx.drawImage(src, 0, 0, nw, nh));
-    src.close?.(); painted = 1; bumpFps(1); hd(D.vc, 0); hd(D.ph, 1); setSw(0); uSt();
+    src.close?.(); painted = 1; bumpFps(1); hd(v, 0); hd(D.ph, 1); setSw(0); uSt();
   };
   const go = () => {
     if (gen !== pGen) return;
@@ -170,7 +170,8 @@ const syncDots = () => {
   D.ld.className = "ed " + (!S.on ? "" : errMsg ? "er" : S.pa || S.id ? "wn" : S.nt ? "" : "ok");
   D.od.className = D.o0.className = "ed " + (errMsg ? "er" : isCn ? "wn" : portF?.valid ? "ok" : "");
 };
-const setErr = (m) => (errMsg = m || null, syncBnr(), syncDots());
+const setErr = (m, st) => (errMsg = m || null, cErr = !!(m && st), syncBnr(), syncDots());
+const clrErr = () => !cErr && setErr();
 const setSw = (v) => (isSw = v, tg(D.vc, "sw", v), hd(D.lb, !(S.nv || isSw)));
 const sUrl = (u) => doc.activeElement !== D.ui && (D.ui.value = u || "");
 const setMeta = (m) => m && (S.pg = { ...S.pg, title: m.title || "", url: m.url || "" }, sUrl(m.url));
@@ -182,9 +183,9 @@ const syncPh = () => {
   else { tx(D.pm, T[S.pa ? 51 : 38]); hd(D.ph, 0); hd(D.pb, 1); }
 };
 const syncPauseUi = () => {
-  const lbl = T[S.pa ? 14 : 13], dis = !canCall();
-  tg(D.bp, "wp", S.pa); sa(D.bp, "aria-pressed", S.pa); sa(D.bp, "aria-label", lbl); D.bp.title = lbl;
-  D.bp.disabled = isPa || isDisc || dis; D.dc.disabled = isDisc || dis;
+  const lbl = T[S.pa ? 14 : 13], dis = !canCall(), b = D.bp;
+  tg(b, "wp", S.pa); sa(b, "aria-pressed", S.pa); sa(b, "aria-label", lbl); b.title = lbl;
+  b.disabled = isPa || isDisc || dis; D.dc.disabled = isDisc || dis;
   sa(D.pi, "d", IC[S.pa ? 2 : 1]); syncDots(); syncPh(); uSt();
 };
 const schedOffP = (ms = net.computeOfflinePollDelay({ hidden: hid(), errCount: offErr })) => { clrTm(0); if (!S.on && !isCn && canCall()) oT = sTm(() => { oT = 0; probeOff(); }, ms); };
@@ -192,18 +193,18 @@ const probeOff = async () => {
   if (S.on || isCn || oB || !canCall()) return;
   oB = 1; const t0 = pNow();
   try {
-    const d = await reqFrame(false, 0, false);
+    const d = await reqFrame(0, 0, 0);
     lastFetchAt = nowMs(); offErr = d?.error ? Math.min(4, offErr + 1) : 0;
     !d?.screencastPausedIdle && net.recordSample({ totalMs: rnd(pNow() - t0), serverMs: d?.serverMs || 0, imageBytes: 0 });
     if (isCn) return;
     d?.portFile && (setPf(d), !S.on && uOff());
-    if (d?.connected) { act = nowMs(); onPoll(d, 0, S.ep); liveOk() && sched(nextMs(0), false); return; }
+    if (d?.connected) { act = nowMs(); onPoll(d, 0, S.ep); liveOk() && sched(nextMs(0), 0); return; }
   } catch { offErr = Math.min(4, offErr + 1); } finally {
     oB = 0; !S.on && !isCn && schedOffP(offUrg ? 20 : undefined); offUrg = 0;
   }
 };
 const goOff = (err, pf) => {
-  S.on = S.pa = S.id = S.nt = S.cr = isDisc = isPa = false; S.dlg = null; S.st = true; S.th = S.cm = S.fm = ""; errMsg = err || null;
+  S.on = S.pa = S.id = S.nt = S.cr = false; isDisc = isPa = cErr = 0; S.dlg = null; S.st = true; S.th = S.cm = S.fm = ""; errMsg = err || null;
   fTimes = []; fpsVal = 0; pf && (portF = pf);
   dropIn(); clrTm(1); sView(); schedOffP();
 };
@@ -279,12 +280,12 @@ const mount = () => {
         [".ph#ph", 0, ["s#pm"], ["!.bs#n2!", ".i=11"]], ["b.g#pb!"],
         [".vw#vw", 0, ["canvas.c#vc!", ".a=32"]], [".z#ts", "role=status;@v=polite"],
         [".y#im!", 0, ["i.in#ti", ".p=41"], ["b.ch#ty", ".i=42"], ["b.ch.bs#te", ".i=43"], ["s.dv"],
-          ...IK.map((k, i) => ["b.ch", i < 3 ? `.k=${k};t=${k === "Escape" ? "Esc" : k}` : `.k=${k};.i=${41 + i}`]),
+          ...IK.map((k, i) => ["b.ch", `.k=${k};` + (i < 3 ? `t=${k === "Escape" ? "Esc" : k}` : `.i=${41 + i}`)]),
           ["b.ch", "t=↑;.sc=-360;.a=49"], ["b.ch", "t=↓;.sc=360;.a=50"]
         ]
       ],
       [".o#pp!", "role=dialog;.a=21", [".pl", ".i=21"], qRail, row(31, "sr"), row(32, "sv"), row(22, "sp"), row(23, "sm"), ["!.bs#sn", ".i=33"]],
-      [".o#mp!", "role=menu", mkLang(), [".wn", ".i=16"], ["!.dg#dc", ".i=15", ico(3)]]
+      [".o#mp!", "role=menu", mkLang(), [".mw", ".i=16"], ["!.dg#dc", ".i=15", ico(3)]]
     ]
   ));
 
@@ -297,37 +298,37 @@ const mount = () => {
   const openNT = () => { S.nt = S.id = false; S.ep++; rstF(1); setSw(1); evIn("new_tab", { url: "about:blank" }); };
   const doDisc = async () => {
     if (isDisc || !S.on || !canCall()) return;
-    clsP(); isDisc = true; S.ep++; dropIn(); clrTm(1); syncPauseUi(); toast(T[78]);
+    clsP(); isDisc = 1; S.ep++; dropIn(); clrTm(1); syncPauseUi(); toast(T[78]);
     try {
       const d = await rpcSc("disconnect", { mode: "revoke" });
       if (d?.connected === false && d?.ok !== false && !d?.unconfirmed) { S.tabs = []; S.aid = null; rstF(1); goOff(null, d.portFile); return toast(T[61]); }
-      setErr(d?.error || T[79]);
-    } catch (e) { setErr(eMsg(e, T[79])); }
-    isDisc = false; syncPauseUi(); askUrg(true);
+      throw d?.error || T[79];
+    } catch (e) { setErr(eMsg(e, T[79]), 1); }
+    isDisc = 0; syncPauseUi(); askUrg(1);
   };
   const togglePa = async () => {
     if (!S.on || isPa || isDisc || !canCall()) return;
-    const want = !S.pa; isPa = true; syncPauseUi(); want && clrTm(1);
+    const want = !S.pa; isPa = 1; syncPauseUi(); want && clrTm(1);
     try {
       const d = await sendIn([{ action: want ? "pause" : "resume" }]);
       if (d?.connected === false && !isRec(d)) return goOff(d.error, d.portFile);
       if (!d || d.ok === false) throw d?.error || T[80];
       const pe = Number(d.pauseEpoch); fin(pe) && pe >= S.pe && (S.pe = pe);
-      S.pa = typeof d.paused === "boolean" ? d.paused : want; S.st = !S.pa; S.ep++; wake(); setErr(null);
+      S.pa = typeof d.paused === "boolean" ? d.paused : want; S.st = !S.pa; S.ep++; wake(); setErr();
       toast(T[S.pa ? 51 : 62]);
-    } catch (e) { setErr(eMsg(e, T[80])); }
-    isPa = false; syncPauseUi(); S.pa ? clrTm(1) : askUrg(true);
+    } catch (e) { setErr(eMsg(e, T[80]), 1); }
+    isPa = 0; syncPauseUi(); S.pa ? clrTm(1) : askUrg(1);
   };
   const ansDlg = (accept) => {
     const g = S.dlg; if (!g) return;
-    S.dlg = null; syncBnr(); evIn("dialog", { accept, promptText: g.type === "prompt" ? D.di.value : undefined }); askUrg(true); focusSt();
+    S.dlg = null; syncBnr(); evIn("dialog", { accept, promptText: g.type === "prompt" ? D.di.value : undefined }); askUrg(1); focusSt();
   };
 
   const cbs = {
-    ob: () => conn("personal"), or: () => (ready ? conn(lastMode, true) : initBridge()), ol: () => conn("launch_remote", true),
-    nt: openNT, n2: openNT, er: () => (ready ? (setErr(null), askUrg(true)) : initBridge()), dx: () => setErr(null),
-    sn: () => { S.fh = ""; S.cr = false; wake(); setPop(0); toast(T[63]); poll(true); },
-    dc: doDisc, bp: togglePa, pb: () => S.on && (S.pa ? togglePa() : (wake(), syncPauseUi(), poll(true))),
+    ob: () => conn("personal"), or: () => (ready ? conn(lastMode, 1) : initBridge()), ol: () => conn("launch_remote", 1),
+    nt: openNT, n2: openNT, er: () => (ready ? (setErr(), askUrg(1)) : initBridge()), dx: () => setErr(),
+    sn: () => { S.fh = ""; S.cr = false; wake(); setPop(0); toast(T[63]); poll(1); },
+    dc: doDisc, bp: togglePa, pb: () => S.on && (S.pa ? togglePa() : (wake(), syncPauseUi(), poll(1))),
     dk: () => ansDlg(false), do: () => ansDlg(true), bi: () => setIme(!imeOn), ty: () => sendTx(false), te: () => sendTx(true),
     bq: (e) => (e.stopPropagation(), setPop(!popOn)), mo: (e) => (e.stopPropagation(), setMore(!moreOn)),
   };
@@ -348,13 +349,13 @@ const mount = () => {
     qMode = v; net.setMode(v); qApp = net.getEffectiveQuality(); S.fh = ""; S.cr = false; wake();
     qBtns.forEach((b) => { const onQ = b.dataset.q === v; sa(b, "aria-checked", onQ); tg(b, "on", onQ); });
     D.qt.style.transform = `translateX(${QK.indexOf(v) * 100}%)`;
-    uSt(); toast(`✓ ${qLbl()}`); askUrg(true);
+    uSt(); toast(`✓ ${qLbl()}`); askUrg(1);
   };
   on(D.qs, "keydown", (e) => { const dir = lrDir(e); if (!dir) return; pd(e); const nx = QK[(QK.indexOf(qMode) + dir + QK.length) % QK.length]; setQ(nx); qBtns[QK.indexOf(nx)].focus(); });
   onK(D.ti, () => sendTx(true), () => { setIme(0); focusSt(); });
   qAll(D.im, "[data-k]").forEach((ch) => ck(ch, async () => {
-    const k = ch.dataset.k;
-    if (k === "Paste" && navigator.clipboard?.readText) try { const txt = await navigator.clipboard.readText(); if (txt) return toast(T[69]), tyIn(txt); } catch {}
+    const k = ch.dataset.k, cb = navigator.clipboard;
+    if (k === "Paste" && cb?.readText) try { const txt = await cb.readText(); if (txt) return toast(T[69]), tyIn(txt); } catch {}
     toast(`✓ ${ch.textContent}`); kyIn(k);
   }));
   qAll(D.im, "[data-sc]").forEach((ch) => ck(ch, () => { const dm = vp(); evIn("scroll", { x: rnd(dm[0] / 2), y: rnd(dm[1] / 2), deltaY: Number(ch.dataset.sc) || 360 }); }));
@@ -366,7 +367,7 @@ const mount = () => {
     return { x: rnd(rx * vw), y: rnd(ry * vh), px: +(rx * 100).toFixed(2), py: +(ry * 100).toFixed(2), sx: vw / r.width, sy: vh / r.height };
   };
   let mM = 0, mN = "left", mvT = 0, mv = null, lRD = 0, supM = 0;
-  const flMv = () => { cTm(mvT); mvT = 0; if (mv) { const v = mv; mv = null; evIn("mousemove", v.p, false, v.t, v.e); } };
+  const flMv = () => { cTm(mvT); mvT = 0; if (mv) { const v = mv; mv = null; evIn("mousemove", v.p, 0, v.t, v.e); } };
   const ptrEv = (act, e, p, button, extra) => evIn(act, { x: p.x, y: p.y, button, clickCount: cl(e.detail || 1, 1, 3), modifiers: modsOf(e) || undefined, ...extra });
   const sup = () => nowMs() < supM, hyp = Math.hypot, onV = (ev, fn, o) => on(D.vc, ev, fn, o), bt = (e) => BN[e.button] || "left";
 
@@ -411,7 +412,7 @@ const mount = () => {
     lTp = dbl ? 0 : ts; lTx = c.x0; lTy = c.y0;
     focusSt(); ripple(c.pt.px, c.pt.py); clIn(c.pt, "left", dbl ? 2 : 1, c.t, c.e);
   };
-  onV("touchend", () => endT(false)); onV("touchcancel", () => endT(true));
+  onV("touchend", () => endT(0)); onV("touchcancel", () => endT(1));
 
   let wh = { x: 0, y: 0, p: null, t: null, e: 0 }, wt = 0;
   const qScr = (dx, dy, p) => {
@@ -420,7 +421,7 @@ const mount = () => {
     wt || (wt = sTm(() => {
       const sx = cl(rnd(wh.x), -1400, 1400), sy = cl(rnd(wh.y), -1400, 1400), pt = wh.p || { x: 500, y: 350 };
       wh.x = wh.y = wt = 0;
-      (Math.abs(sx) >= 2 || Math.abs(sy) >= 2) && evIn("scroll", { x: pt.x, y: pt.y, deltaX: sx, deltaY: sy }, true, wh.t, wh.e);
+      (Math.abs(sx) >= 2 || Math.abs(sy) >= 2) && evIn("scroll", { x: pt.x, y: pt.y, deltaX: sx, deltaY: sy }, 1, wh.t, wh.e);
     }, net.getWheelCoalesceMs()));
   };
   onV("wheel", (e) => { pd(e); const sc = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? vp()[1] * 0.85 : 1; qScr(e.deltaX * sc, e.deltaY * sc, ptOf(e)); }, { passive: false });
@@ -432,15 +433,15 @@ const mount = () => {
   on(D.si, "compositionend", (e) => { comp = 0; const v = e.data || D.si.value; D.si.value = ""; v && tyIn(v); });
   on(D.si, "beforeinput", (e) => {
     if (comp || e.isComposing) return;
-    e.inputType === "deleteContentBackward" ? (pd(e), kyIn("Backspace", 0, false)) : e.inputType === "insertLineBreak" && (pd(e), kyIn("Enter"));
+    e.inputType === "deleteContentBackward" ? (pd(e), kyIn("Backspace", 0, 0)) : e.inputType === "insertLineBreak" && (pd(e), kyIn("Enter"));
   });
-  on(D.si, "input", () => { if (comp) return; const v = D.si.value; v && (D.si.value = "", tyIn(v, false, false)); });
+  on(D.si, "input", () => { if (comp) return; const v = D.si.value; v && (D.si.value = "", tyIn(v, false, 0)); });
   on(D.st, "keydown", (e) => {
     if ((e.target !== D.st && e.target !== D.si) || comp || e.isComposing || e.key === "Process" || e.keyCode === 229) return;
     const mods = modsOf(e), low = e.key.toLowerCase();
     if ((e.metaKey || e.ctrlKey) && !e.altKey) {
       if (low === "l") return;
-      if (low === "v") return cTm(pArm), pArm = sTm(() => (pArm = 0, kyIn("Paste")), 45);
+      if (low === "v") { const a = S.aid, e0 = S.tep; return cTm(pArm), pArm = sTm(() => (pArm = 0, S.aid === a && S.tep === e0 && kyIn("Paste")), 45); }
       const cmd = { a: "SelectAll", c: "Copy", x: "Cut", z: e.shiftKey ? "Redo" : "Undo", y: "Redo" }[low];
       return cmd && (pd(e), low === "c" && toast(T[68]), kyIn(cmd));
     }
@@ -448,7 +449,7 @@ const mount = () => {
     if (k === "Space" || KEYS.has(k)) return pd(e), kyIn(k, mods, k === "Enter" || k === "Escape");
     if (e.key.length === 1 && !e.metaKey && (!e.ctrlKey || e.altKey)) {
       pd(e); const c = e.key.charCodeAt(0);
-      !e.altKey && c >= 33 && c <= 126 ? kyIn(e.key, mods, false) : tyIn(e.key, false, false);
+      !e.altKey && c >= 33 && c <= 126 ? kyIn(e.key, mods, 0) : tyIn(e.key, false, 0);
     }
   });
   on(doc, "paste", (e) => {
@@ -459,14 +460,14 @@ const mount = () => {
 };
 
 const chgTab = (tid) => { dropIn(); S.aid = tid; S.id = false; S.dlg = null; S.ep++; rstF(); setMeta(fTab(tid)); syncBnr(); setSw(1); };
-const swTab = (tid) => { if (!tid || tid === S.aid) return; chgTab(tid); uTabs(); uSt(); evIn("switch_tab", { targetId: tid }, true, tid, S.tep); };
+const swTab = (tid) => { if (!tid || tid === S.aid) return; chgTab(tid); uTabs(); uSt(); evIn("switch_tab", { targetId: tid }, 1, tid, S.tep); };
 const clTab = (tid) => {
   if (!tid || closing.has(tid)) return;
   closing.add(tid);
   const tep = S.tep, o = applyOptimisticTabClose(S.tabs, S.aid, tid);
   S.tabs = o.tabs; S.th = ""; S.id = false;
   o.wasActive && chgTab(o.activeTargetId);
-  uTabs(); uSt(); toast(T[64]); evIn("close_tab", { targetId: tid }, true, tid, tep);
+  uTabs(); uSt(); toast(T[64]); evIn("close_tab", { targetId: tid }, 1, tid, tep);
 };
 const lrDir = (e) => e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
 const mkTab = (tid) => {
@@ -491,9 +492,9 @@ const uTabs = () => {
   tMap.forEach((n, id) => !live.has(id) && (n.remove(), tMap.delete(id)));
   let cur = D.tb.firstChild;
   for (const t of S.tabs) {
-    let node = tMap.get(t.targetId);
-    node || tMap.set(t.targetId, node = mkTab(t.targetId));
-    const a = t.targetId === S.aid, u = t.url || "";
+    const id = t.targetId, a = id === S.aid, u = t.url || "";
+    let node = tMap.get(id);
+    node || tMap.set(id, node = mkTab(id));
     tg(node, "on", a); sa(node, "aria-selected", a);
     node.title !== u && (node.title = u);
     tx(node.firstChild, t.title || u || "Tab");
@@ -503,7 +504,7 @@ const uTabs = () => {
 };
 const uSt = () => {
   bumpFps(0);
-  const rtt = net.lastNetRttMs || net.ewmaRttMs, pend = (inB ? 1 : 0) + qIn.length, dm = vp(), mode = T[S.cm === "remote" ? 25 : 24];
+  const rtt = net.lastNetRttMs || net.ewmaRttMs, pend = inB + qIn.length, dm = vp(), mode = T[S.cm === "remote" ? 25 : 24];
   const tag = S.cr ? " · HD WebP" : S.fm ? ` · ${S.fm.toUpperCase()}` : "", idle = S.pa || S.id || S.nt;
   D.sd.className = `rd ${S.pa || S.id ? "wn" : S.nt ? "id" : rttBand(rtt)}`;
   tx(D.qm, idle ? T[S.pa ? 51 : S.id ? 52 : 37] : `${rtt ? `${rtt}ms` : "--ms"} · ${qName(qMode)}`);
@@ -515,14 +516,16 @@ const uSt = () => {
   tx(D.sv, `${dm[0]}×${dm[1]}`); tx(D.sp, qLbl() + tag); tx(D.sm, mode);
   hd(D.lb, !(S.nv || isSw));
 };
-const recover = (m) => (S.aid = S.dlg = null, rstF(1), m && toast(m), askUrg(true));
+const recover = (m) => (S.aid = S.dlg = null, rstF(1), m && toast(m), askUrg(1));
 const onPoll = (d, totalMs, reqEpoch = S.ep) => {
   if (!d) return;
   totalMs > 0 && (synced = 1);
   if (d.connected === false) return setPf(d), isRec(d) ? recover(T[65]) : goOff(d.error, d.portFile);
-  const wasPa = S.pa, paintIt = applyFramePayloadState(S, d, reqEpoch, totalMs);
-  if (paintIt === null) return liveOk() && askUrg(false);
+  const wasPa = S.pa, oA = S.aid, oE = S.tep, paintIt = applyFramePayloadState(S, d, reqEpoch, totalMs);
+  if (paintIt === null) return liveOk() && askUrg(0);
   setPf(d);
+  const sw = d.popupSwitched || d.recovered;
+  (sw || S.aid !== oA || S.tep !== oE) && dropTimers();
   if (totalMs > 0 && !d.screencastPausedIdle) {
     const s = net.recordSample({ totalMs, serverMs: d.serverMs || 0, imageBytes: d.changed ? d.imageBytes || 0 : 0 });
     qApp = d.qualityApplied || (s.tierChanged ? s.effectiveTier : qApp);
@@ -530,12 +533,12 @@ const onPoll = (d, totalMs, reqEpoch = S.ep) => {
   sView();
   wasPa !== S.pa && (syncPauseUi(), S.pa && clrTm(1));
   S.nt ? sUrl("") : d.page && sUrl(d.page.url);
-  d.popupSwitched || d.recovered ? (setErr(null), toast(T[d.popupSwitched ? 67 : 66])) : setErr(d.error || null);
+  sw ? (clrErr(), toast(T[d.popupSwitched ? 67 : 66])) : (d.error || !cErr) && setErr(d.error);
   uTabs(); syncBnr(); syncDots();
   paintIt ? paint(d.imageDataUrl) : (fitStage(), isSw && painted && S.fh && setSw(0), syncPh());
   uSt();
 };
-const pushIn = (ev, imm = true, tid = S.aid, tep = S.tep) => {
+const pushIn = (ev, imm = 1, tid = S.aid, tep = S.tep) => {
   const wasIdle = S.id; act = nowMs(); S.cr = false;
   ev.action !== "pause" && ev.action !== "disconnect" && (S.id = false);
   qIn.push([ev, tid, tep]);
@@ -552,7 +555,7 @@ const flIn = async () => {
   while (k < qIn.length && /_tab$/.test(qIn[k][0].action) === isTab && qIn[k][1] === bTid && qIn[k][2] === bTep) k++;
   const batch = coalesceInputEvents(qIn.splice(0, k).map((x) => x[0]));
   const closed = batch.filter((e) => e.action === "close_tab").map((e) => e.targetId);
-  const needEp = batch.some((e) => PAGE_ACT.has(e.action) || e.action === "close_tab"), ep = S.ep;
+  const needEp = batch.some((e) => PAGE_ACT.has(e.action)), ep = S.ep;
   const sendTid = isTab && batch.length === 1 && batch[0].targetId ? batch[0].targetId : bTid;
   uSt();
   try {
@@ -561,18 +564,18 @@ const flIn = async () => {
     if (d?.connected === false && !isRec(d)) return goOff(d.error, d.portFile);
     setPf(d);
     if (d?.staleTarget) {
-      dropIn(); setErr(null); toast(T[71]);
+      dropIn(); clrErr(); toast(T[71]);
       d.activeTargetId !== undefined && (S.aid = d.activeTargetId || null);
       syncTabList(d); "dialog" in d && (S.dlg = d.dialog || null, syncBnr());
-      rstF(); !S.pa && askUrg(true); return;
+      rstF(); !S.pa && askUrg(1); return;
     }
-    d?.recovered ? (setErr(null), toast(T[66])) : d?.error && !isTargetErrorText(d.error) && setErr(d.error);
+    d?.recovered ? (clrErr(), toast(T[66])) : d?.error && !isTargetErrorText(d.error) && setErr(d.error);
     syncPe(d) && syncPauseUi();
     if (ep === S.ep) {
       "dialog" in (d || {}) && (S.dlg = d.dialog || null, syncBnr());
       (S.nt = isNoTabsPayload(d)) ? clrTabs(d?.tabsHash || "") : (d?.activeTargetId && d.activeTargetId !== S.aid && (S.aid = d.activeTargetId, rstF()), syncTabList(d));
     }
-    !S.nt && !S.pa && askUrg(false);
+    !S.nt && !S.pa && askUrg(0);
   } catch (err) {
     tErr(err) ? recover() : setErr(eMsg(err));
   } finally {
@@ -580,13 +583,13 @@ const flIn = async () => {
     inB = 0; uSt(); qIn.length && flIn();
   }
 };
-const sched = (ms, f = false) => { clrTm(1); if (S.on && !isDisc && (!S.pa || f)) pT = sTm(() => { pT = 0; poll(f); }, ms); };
-const askUrg = (f = false) => { if (!S.on || isDisc || (S.pa && !f)) return; if (pB) urg = { f: !!(f || urg?.f) }; else sched(20, f); };
-const timing = (idleMs, inputBusy = false) => net.computePollTiming({ idleMs, inputBusy, screencastIdle: S.id, hidden: hid(), errCount: pErr, settled: S.cr });
-const nextMs = (idleMs, busy = false) => !hid() && S.nt ? 1200 : timing(idleMs, busy).nextDelayMs;
-const reqFrame = (f, w, keep = true) => rpcSc("frame", { targetId: S.aid || undefined, sinceSeq: !f && keep ? S.seq : 0, lastFrameHash: S.fh || undefined, knownTabsHash: S.th || undefined, ...qArgs(), waitMs: f ? 0 : w, forceRefresh: f });
-const poll = async (f = false) => {
-  if (pB || isDisc || !canCall() || (!f && S.pa)) { if (f && pB && !isDisc) urg = { f: true }; return; }
+const sched = (ms, f = 0) => { clrTm(1); if (S.on && !isDisc && (!S.pa || f)) pT = sTm(() => { pT = 0; poll(f); }, ms); };
+const askUrg = (f = 0) => { if (!S.on || isDisc || (S.pa && !f)) return; if (pB) urg = { f: !!(f || urg?.f) }; else sched(20, f); };
+const timing = (idleMs, inputBusy = 0) => net.computePollTiming({ idleMs, inputBusy: !!inputBusy, screencastIdle: S.id, hidden: hid(), errCount: pErr, settled: S.cr });
+const nextMs = (idleMs, busy = 0) => !hid() && S.nt ? 1200 : timing(idleMs, busy).nextDelayMs;
+const reqFrame = (f, w, keep = 1) => rpcSc("frame", { targetId: S.aid || undefined, sinceSeq: !f && keep ? S.seq : 0, lastFrameHash: S.fh || undefined, knownTabsHash: S.th || undefined, ...qArgs(), waitMs: f ? 0 : w, forceRefresh: !!f });
+const poll = async (f = 0) => {
+  if (pB || isDisc || !canCall() || (!f && S.pa)) { if (f && pB && !isDisc) urg = { f: 1 }; return; }
   pB = 1; const ep = S.ep, t0 = pNow();
   try {
     const d = await reqFrame(f, hid() ? 0 : S.nt ? 1000 : timing(nowMs() - act).waitMs);
@@ -594,37 +597,37 @@ const poll = async (f = false) => {
     onPoll(d, rnd(pNow() - t0), ep);
   } catch (err) {
     pErr = Math.min(4, pErr + 1);
-    tErr(err) ? (S.aid = null, rstF(1), urg = { f: true }) : setErr(eMsg(err));
+    tErr(err) ? (S.aid = null, rstF(1), urg = { f: 1 }) : setErr(eMsg(err));
   } finally {
     pB = 0;
-    if (S.on && !S.pa && !isDisc) urg ? (sched(20, urg.f), urg = 0) : S.st && sched(nextMs(nowMs() - act, !!(inB || qIn.length)), false);
+    if (S.on && !S.pa && !isDisc) urg ? (sched(20, urg.f), urg = 0) : S.st && sched(nextMs(nowMs() - act, inB || qIn.length), 0);
   }
 };
-const conn = async (mode = "personal", f = false) => {
+const conn = async (mode = "personal", f = 0) => {
   if (isCn || !canCall()) return;
-  lastMode = mode; isCn = true; errMsg = null; clrTm(0); !S.on && uOff();
+  lastMode = mode; isCn = 1; errMsg = null; cErr = 0; clrTm(0); !S.on && uOff();
   const ep = S.ep, t0 = pNow(), rem = mode === "launch_remote";
   try {
     const c = await rpcSc(rem ? mode : "connect", !rem && mode !== "auto" ? { ...qArgs(), mode } : qArgs());
-    if (!c?.connected) return isCn = false, goOff(c?.error || null, c?.portFile);
+    if (!c?.connected) return isCn = 0, goOff(c?.error || null, c?.portFile);
     act = nowMs(); S.on = S.st = true; S.pa = S.id = false; S.pe = Number(c.pauseEpoch) || 0;
     setPf(c); c.activeTargetId && (S.aid = c.activeTargetId); syncTabList(c);
     S.dlg = c.dialog || null; S.nt = isNoTabsPayload(c);
-    const d = await reqFrame(f || true, 0, false);
-    isCn = false; lastFetchAt = nowMs(); pErr = offErr = 0; onPoll(d, rnd(pNow() - t0), ep);
-    liveOk() && sched(nextMs(0), false);
-  } catch (err) { isCn = false; S.on && tErr(err) ? recover() : goOff(eMsg(err)); }
+    const d = await reqFrame(f || 1, 0, 0);
+    isCn = 0; lastFetchAt = nowMs(); pErr = offErr = 0; onPoll(d, rnd(pNow() - t0), ep);
+    liveOk() && sched(nextMs(0), 0);
+  } catch (err) { isCn = 0; S.on && tErr(err) ? recover() : goOff(eMsg(err)); }
 };
 const forceNow = () => {
   if (!ready) return;
   const t = nowMs(); if (t - lastForceAt < 250) return;
   lastForceAt = t; pErr = offErr = 0;
-  if (S.on) { if (S.pa) return; act = t; S.id && (S.id = false, syncPauseUi()); clrTm(1); poll(true); }
+  if (S.on) { if (S.pa) return; act = t; S.id && (S.id = false, syncPauseUi()); clrTm(1); poll(1); }
   else if (!isCn) { clrTm(0); oB ? (offUrg = 1) : probeOff(); }
 };
 const onHide = () => {
   if (!ready) return;
-  S.on && !S.pa && !pB && pT ? sched(nextMs(nowMs() - act, !!(inB || qIn.length)), false) : !S.on && !isCn && !oB && oT && schedOffP();
+  S.on && !S.pa && !pB && pT ? sched(nextMs(nowMs() - act, inB || qIn.length), 0) : !S.on && !isCn && !oB && oT && schedOffP();
 };
 
 ck(doc, (e) => { popOn && !e.target.closest?.("#pp,#bq") && setPop(0); moreOn && !e.target.closest?.("#mp,#mo") && setMore(0); });
@@ -640,11 +643,11 @@ const syncHostCtx = (ctx) => {
 const onResult = (r) => {
   const d = r?.structuredContent; if (!d) return;
   const sig = [!!d.connected, !!d.portFile?.valid, +d.portFile?.port || 0, d.activeTargetId, d.tabsHash, d.error].join("|");
-  if (sig === tSig) return d.connected && !started && ready && (started = 1, lastForceAt = nowMs(), !S.pa && poll(false));
+  if (sig === tSig) return d.connected && !started && ready && (started = 1, lastForceAt = nowMs(), !S.pa && poll(0));
   tSig = sig; setPf(d); syncPe(d, !synced);
   d.activeTargetId && !synced && (S.aid = d.activeTargetId);
   "dialog" in d && (S.dlg = d.dialog || null);
-  if (d.connected) { S.on = true; act = lastFetchAt = nowMs(); sView(); uTabs(); uSt(); ready && poll(false); return; }
+  if (d.connected) { S.on = true; act = lastFetchAt = nowMs(); sView(); uTabs(); uSt(); ready && poll(0); return; }
   (synced ? S.on : !isCn) && goOff(d.error, d.portFile);
 };
 
@@ -660,14 +663,14 @@ if (b0.connected) {
   !S.nt && b0.changed && isSafeImageUrl(b0.imageDataUrl) && paint(b0.imageDataUrl);
 }
 const initBridge = () => {
-  setErr(null);
+  setErr();
   return app.connect().then(() => {
     ready = 1; syncHostCtx(app.getHostContext());
     if (!canCall()) setErr(T[82]);
     uOff(); syncPauseUi();
     stopReveal?.();
     stopReveal = setupRevealObservers({ onReveal: forceNow, onHide, getLastFetchAt: () => lastFetchAt, bridgeApp: app });
-    if (!started && canCall()) { started = 1; lastForceAt = nowMs(); S.on ? !S.pa && poll(false) : schedOffP(); }
+    if (!started && canCall()) { started = 1; lastForceAt = nowMs(); S.on ? !S.pa && poll(0) : schedOffP(); }
   }).catch((err) => { ready = 0; uOff(); syncPauseUi(); setErr(T[77] + eMsg(err)); });
 };
 initBridge();

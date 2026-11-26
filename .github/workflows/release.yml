@@ -40,7 +40,6 @@ jobs:
       contents: write
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Validate tag format
         run: |
@@ -52,6 +51,8 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref_name }}
       - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists; will attach/update plugin archives."
@@ -77,7 +78,6 @@ jobs:
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
       TARGET: x86_64-unknown-linux-gnu
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -94,29 +94,35 @@ jobs:
           node --test panel/net-policy.test.mjs
       - name: Run Rust test suite
         run: cargo test --locked
-      - name: Build, verify, package, and upload Linux tarball
+      - name: Build, verify, and package Linux tarball
         run: |
-          RUSTFLAGS="--remap-path-prefix=${HOME}=/build" \
+          RUSTFLAGS="--remap-path-prefix=${HOME}=/build --remap-path-prefix=${PWD}=/src" \
             cargo build --release --locked --target "${TARGET}"
           bin="target/${TARGET}/release/chrome-stream-mcp"
-          if strings "$bin" | grep -F "${HOME}" >/dev/null 2>&1; then
-            echo "error: runner HOME path leaked into release binary" >&2
+          if strings "$bin" | grep -F -e "${HOME}" -e "${PWD}" >/dev/null 2>&1; then
+            echo "error: runner HOME or PWD path leaked into release binary" >&2
             exit 1
           fi
           archive="chrome-stream-mcp-${TAG}-${TARGET}.tar.gz"
           stage="$(mktemp -d)"
           trap 'rm -rf "$stage"' EXIT
-          mkdir -p "$stage/bin" "$stage/panel/dist" "$stage/skills/chrome-stream" "$stage/assets"
+          mkdir -p "$stage/bin" "$stage/panel/dist" "$stage/skills/chrome-stream" "$stage/assets" "$stage/docs"
           install -m 0755 "$bin" "$stage/bin/chrome-stream-mcp"
           cp panel/dist/panel.html "$stage/panel/dist/panel.html"
-          cp plugin.json mcp_config.json LICENSE README.md "$stage/"
+          cp plugin.json mcp_config.json LICENSE README.md llms.txt "$stage/"
+          cp docs/ai-guide.md "$stage/docs/ai-guide.md"
           cp skills/chrome-stream/SKILL.md "$stage/skills/chrome-stream/SKILL.md"
           cp assets/logo.svg "$stage/assets/logo.svg"
           tar -C "$stage" -czf "$archive" \
             bin/chrome-stream-mcp panel/dist/panel.html plugin.json mcp_config.json \
-            skills/chrome-stream/SKILL.md assets/logo.svg LICENSE README.md
+            skills/chrome-stream/SKILL.md assets/logo.svg docs/ai-guide.md llms.txt LICENSE README.md
           sha256sum "$archive" > "${archive}.sha256"
           cat "${archive}.sha256"
+      - name: Upload Linux release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          archive="chrome-stream-mcp-${TAG}-${TARGET}.tar.gz"
           gh release upload "$TAG" "$archive" "${archive}.sha256" --clobber
 
   build-macos:
@@ -128,7 +134,6 @@ jobs:
       contents: write
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -148,30 +153,38 @@ jobs:
           node --test panel/net-policy.test.mjs
       - name: Run Rust test suite
         run: cargo test --locked
-      - name: Build, verify, package, and upload macOS tarballs
+      - name: Build, verify, and package macOS tarballs
         run: |
           for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
             echo "=== Building ${TARGET} ==="
-            RUSTFLAGS="--remap-path-prefix=${HOME}=/build" \
+            RUSTFLAGS="--remap-path-prefix=${HOME}=/build --remap-path-prefix=${PWD}=/src" \
               cargo build --release --locked --target "${TARGET}"
             bin="target/${TARGET}/release/chrome-stream-mcp"
-            if strings "$bin" | grep -F "${HOME}" >/dev/null 2>&1; then
-              echo "error: runner HOME path leaked into release binary (${TARGET})" >&2
+            if strings "$bin" | grep -F -e "${HOME}" -e "${PWD}" >/dev/null 2>&1; then
+              echo "error: runner HOME or PWD path leaked into release binary (${TARGET})" >&2
               exit 1
             fi
             archive="chrome-stream-mcp-${TAG}-${TARGET}.tar.gz"
             stage="$(mktemp -d)"
-            mkdir -p "$stage/bin" "$stage/panel/dist" "$stage/skills/chrome-stream" "$stage/assets"
+            mkdir -p "$stage/bin" "$stage/panel/dist" "$stage/skills/chrome-stream" "$stage/assets" "$stage/docs"
             install -m 0755 "$bin" "$stage/bin/chrome-stream-mcp"
             cp panel/dist/panel.html "$stage/panel/dist/panel.html"
-            cp plugin.json mcp_config.json LICENSE README.md "$stage/"
+            cp plugin.json mcp_config.json LICENSE README.md llms.txt "$stage/"
+            cp docs/ai-guide.md "$stage/docs/ai-guide.md"
             cp skills/chrome-stream/SKILL.md "$stage/skills/chrome-stream/SKILL.md"
             cp assets/logo.svg "$stage/assets/logo.svg"
             COPYFILE_DISABLE=1 tar -C "$stage" -czf "$archive" \
               bin/chrome-stream-mcp panel/dist/panel.html plugin.json mcp_config.json \
-              skills/chrome-stream/SKILL.md assets/logo.svg LICENSE README.md
+              skills/chrome-stream/SKILL.md assets/logo.svg docs/ai-guide.md llms.txt LICENSE README.md
             rm -rf "$stage"
             shasum -a 256 "$archive" > "${archive}.sha256"
             cat "${archive}.sha256"
+          done
+      - name: Upload macOS release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
+            archive="chrome-stream-mcp-${TAG}-${TARGET}.tar.gz"
             gh release upload "$TAG" "$archive" "${archive}.sha256" --clobber
           done

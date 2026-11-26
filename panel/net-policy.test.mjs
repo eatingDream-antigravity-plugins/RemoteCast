@@ -295,11 +295,11 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       assert.ok(!/opacity\s*:\s*0\b/.test(kf), `@keyframes must not use opacity:0: ${kf}`);
     }
 
-    // All 16 family tokens defined in BOTH dark (:root) and light ([data-theme=light])
+    // All 16 family tokens defined in BOTH dark (:root) and light (:root[data-theme=light])
     const rootBlock = css.match(/:root\{([^}]+)\}/)?.[1] || "";
-    const lightBlock = css.match(/\[data-theme=["']?light["']?\]\{([^}]+)\}/)?.[1] || "";
+    const lightBlock = css.match(/:root\[data-theme=["']?light["']?\]\{([^}]+)\}/)?.[1] || "";
     assert.ok(rootBlock.length > 0, "expected :root token block");
-    assert.ok(lightBlock.length > 0, "expected [data-theme=light] token block");
+    assert.ok(lightBlock.length > 0, "expected :root[data-theme=light] token block");
     const familyTokens = [
       "--bg", "--s1", "--s2", "--s0",
       "--t1", "--t2", "--t3",
@@ -308,8 +308,9 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
     ];
     for (const tok of familyTokens) {
       assert.ok(rootBlock.includes(`${tok}:`), `dark :root missing token ${tok}`);
-      assert.ok(lightBlock.includes(`${tok}:`), `light [data-theme=light] missing token ${tok}`);
+      assert.ok(lightBlock.includes(`${tok}:`), `light :root[data-theme=light] missing token ${tok}`);
     }
+    assert.ok(!/(?:^|[},])\.wn\{/.test(css), "standalone .wn box rule must not collide with .ed.wn/.rd.wn dots");
     assert.ok(/--ok\s*:\s*#2f7d53\b/i.test(lightBlock), `light --ok must be #2F7D53, got: ${lightBlock}`);
     assert.ok(/--bg\s*:\s*#faf8f4\b/i.test(lightBlock), `light --bg must be #FAF8F4, got: ${lightBlock}`);
     assert.ok(!css.includes("--buncss-"), "panel.html must not contain --buncss-* declarations");
@@ -886,10 +887,20 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
         source: win.parent,
         data: { jsonrpc: "2.0", id: pauseFailCall.id, result: { structuredContent: { ok: false, connected: true, error: "relay busy" } } },
       });
-      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 30));
       assert.equal(els.get("bp").getAttribute("aria-pressed"), "false", "failed Standby must keep live state");
+      assert.equal(els.get("bn").hidden, false, "failed Standby must surface error banner");
+      // Follow-up live poll (20ms later) MUST NOT wipe sticky Standby failure banner
+      const stickyPoll1 = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_frame").pop();
+      msgHandler2({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: stickyPoll1.id, result: { structuredContent: { connected: true, activeTargetId: "t1", changed: false, unchanged: true } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("bn").hidden, false, "follow-up live poll must NOT erase sticky Standby failure banner");
+      assert.equal(els.get("dm").textContent, "relay busy");
 
-      // Confirmed Standby flips UI, then confirmed Wake resumes
+      // Confirmed Standby flips UI and clears sticky control error, then confirmed Wake resumes
       els.get("bp").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
       const pauseCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").pop();
@@ -899,6 +910,7 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       });
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(els.get("bp").getAttribute("aria-pressed"), "true", "confirmed Standby must update UI");
+      assert.equal(els.get("bn").hidden, true, "confirmed Standby must clear sticky error banner");
 
       els.get("bp").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
@@ -918,7 +930,42 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
         "slow chrome_stream_input RPC must not downgrade frame qualityPreset"
       );
 
-      // Overflow Revoke & Disconnect (#dc): unconfirmed error MUST keep panel online; confirmed revoke goes offline
+      // Delayed Cmd+V fallback timer (45ms) MUST abort if popupSwitched mutates S.aid/S.tep before it fires
+      const inputCountBeforePaste = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").length;
+      els.get("st").listeners.get("keydown")?.[0]?.({
+        target: els.get("si"),
+        key: "v",
+        metaKey: true,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        isComposing: false,
+        keyCode: 86,
+        preventDefault() {},
+      });
+      msgHandler2({
+        source: win.parent,
+        data: {
+          jsonrpc: "2.0",
+          id: lastCall.id,
+          result: {
+            structuredContent: {
+              connected: true,
+              activeTargetId: "t-popup",
+              epoch: 5,
+              popupSwitched: true,
+              tabs: [{ targetId: "t1" }, { targetId: "t-popup" }],
+              changed: false,
+              unchanged: true,
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      const inputCountAfterPaste = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").length;
+      assert.equal(inputCountAfterPaste, inputCountBeforePaste, "delayed Paste fallback must be dropped when popupSwitched mutates target/epoch");
+
+      // Overflow Revoke & Disconnect (#dc): unconfirmed error MUST keep panel online & banner sticky across live poll
       els.get("dc").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
       const discFailCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect").pop();
@@ -928,8 +975,18 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
         source: win.parent,
         data: { jsonrpc: "2.0", id: discFailCall.id, result: { structuredContent: { ok: false, unconfirmed: true, error: "relay busy" } } },
       });
-      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 30));
       assert.equal(els.get("vn").hidden, false, "unconfirmed Revoke must remain online for retry");
+      const stickyPoll2 = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_frame").pop();
+      msgHandler2({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: stickyPoll2.id, result: { structuredContent: { connected: true, activeTargetId: "t-popup", changed: false, unchanged: true } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("bn").hidden, false, "follow-up live poll must NOT erase sticky Revoke failure banner");
+      // Dismiss (#dx) clears sticky banner
+      els.get("dx").listeners.get("click")?.[0]?.();
+      assert.equal(els.get("bn").hidden, true, "Dismiss must clear sticky control error");
 
       // Retry Revoke and confirm connected:false -> now goes offline
       els.get("dc").listeners.get("click")?.[0]?.();

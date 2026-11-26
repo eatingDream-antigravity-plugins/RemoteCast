@@ -21,6 +21,7 @@ const APPS_EXTENSION: &str = "io.modelcontextprotocol/ui";
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 const SWR_FRESH_TTL: Duration = Duration::from_millis(500);
+const SWR_MAX_STALE_TTL: Duration = Duration::from_millis(2500);
 const HTML_STAT_TTL: Duration = Duration::from_millis(500);
 const BOOT_MARKER: &str = "/*__CHROME_STREAM_BOOT__*/";
 
@@ -249,14 +250,20 @@ impl SwrBootCache {
         generation: u64,
         previous_update: Option<Instant>,
         fetched: Option<BootSnapshot>,
+        clear_on_failure: bool,
     ) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if st.generation != generation {
             return;
         }
-        if let Some(snapshot) = fetched.filter(|_| st.updated_at == previous_update) {
-            st.snapshot = Some(snapshot);
-            st.updated_at = Some(Instant::now());
+        if st.updated_at == previous_update {
+            if let Some(snapshot) = fetched {
+                st.snapshot = Some(snapshot);
+                st.updated_at = Some(Instant::now());
+            } else if clear_on_failure {
+                st.snapshot = None;
+                st.updated_at = None;
+            }
         }
         st.refreshing = false;
         self.ready_cv.notify_all();
@@ -282,36 +289,46 @@ impl SwrBootCache {
                     let _ = me.relay.call("warm", json!({}), Duration::from_millis(800));
                 }
                 let fetched = me.fetch_from_relay(Duration::from_millis(1500));
-                me.finish_refresh(generation, previous_update, fetched);
+                me.finish_refresh(generation, previous_update, fetched, false);
             });
         if worker.is_err() {
-            self.finish_refresh(generation, previous_update, None);
+            self.finish_refresh(generation, previous_update, None, false);
         }
     }
 
-    /// Returns cached snapshot immediately (<0.1 ms) if warm and triggers async revalidation when stale.
-    /// Only blocks (bounded by `cold_wait`) if the cache has never been populated yet.
+    /// Returns cached snapshot immediately (<0.1 ms) if within `SWR_MAX_STALE_TTL` (triggering async
+    /// revalidation past `SWR_FRESH_TTL`). Revalidates synchronously when cold or expired (>2.5s).
     fn get_swr(self: &Arc<Self>, cold_wait: Duration) -> Option<BootSnapshot> {
-        let (cached, needs_bg_refresh, wait_in_flight, generation, previous_update) = {
+        let (
+            cached,
+            needs_bg_refresh,
+            wait_in_flight,
+            clear_on_failure,
+            generation,
+            previous_update,
+        ) = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.revokes_in_flight != 0 {
                 return None;
             }
-            if let Some(snap) = st.snapshot.clone() {
-                let stale = st
-                    .updated_at
-                    .map(|t| t.elapsed() >= SWR_FRESH_TTL)
-                    .unwrap_or(true);
+            let age = st.updated_at.map(|t| t.elapsed());
+            if let Some(snap) = st
+                .snapshot
+                .clone()
+                .filter(|_| age.is_some_and(|a| a <= SWR_MAX_STALE_TTL))
+            {
+                let stale = age.is_none_or(|a| a >= SWR_FRESH_TTL);
                 let bg = stale && !st.refreshing;
                 if bg {
                     st.refreshing = true;
                 }
-                (Some(snap), bg, false, st.generation, st.updated_at)
+                (Some(snap), bg, false, false, st.generation, st.updated_at)
             } else if st.refreshing {
-                (None, false, true, st.generation, st.updated_at)
+                (None, false, true, false, st.generation, st.updated_at)
             } else {
+                let expired = st.snapshot.is_some();
                 st.refreshing = true;
-                (None, false, false, st.generation, st.updated_at)
+                (None, false, false, expired, st.generation, st.updated_at)
             }
         };
 
@@ -322,10 +339,10 @@ impl SwrBootCache {
                     .name("chrome-stream-swr".to_string())
                     .spawn(move || {
                         let fetched = me.fetch_from_relay(Duration::from_millis(1500));
-                        me.finish_refresh(generation, previous_update, fetched);
+                        me.finish_refresh(generation, previous_update, fetched, false);
                     });
                 if worker.is_err() {
-                    self.finish_refresh(generation, previous_update, None);
+                    self.finish_refresh(generation, previous_update, None, false);
                 }
             }
             return Some(snap);
@@ -333,26 +350,39 @@ impl SwrBootCache {
 
         if wait_in_flight {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if st.snapshot.is_none() && st.refreshing && !cold_wait.is_zero() {
+            if st.refreshing && !cold_wait.is_zero() {
                 let (guard, _) = self
                     .ready_cv
                     .wait_timeout_while(st, cold_wait, |s| {
-                        s.snapshot.is_none() && s.refreshing && s.generation == generation
+                        s.refreshing
+                            && s.generation == generation
+                            && s.updated_at == previous_update
                     })
                     .unwrap_or_else(|e| e.into_inner());
                 st = guard;
             }
+            if st.revokes_in_flight != 0
+                || st
+                    .updated_at
+                    .is_none_or(|t| t.elapsed() > SWR_MAX_STALE_TTL)
+            {
+                return None;
+            }
             return st.snapshot.clone();
         }
 
-        // Cold path with no in-flight prewarm: fetch synchronously once (bounded) and populate cache.
+        // Cold or expired (>2.5s) path with no in-flight refresh: fetch synchronously once (bounded).
         let fetched = self.fetch_from_relay(cold_wait.max(Duration::from_millis(200)));
-        self.finish_refresh(generation, previous_update, fetched);
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .snapshot
-            .clone()
+        self.finish_refresh(generation, previous_update, fetched, clear_on_failure);
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.revokes_in_flight != 0
+            || st
+                .updated_at
+                .is_none_or(|t| t.elapsed() > SWR_MAX_STALE_TTL)
+        {
+            return None;
+        }
+        st.snapshot.clone()
     }
 
     pub fn stage_status(self: &Arc<Self>, cold_wait: Duration) -> Option<Value> {
@@ -1386,6 +1416,92 @@ mod tests {
             stage_us < 10_000,
             "warm chrome_stream_stage took {stage_us}us"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swr_expired_cache_revalidates_synchronously_on_reopen() {
+        struct CountingRelay {
+            calls: AtomicUsize,
+            connected: std::sync::atomic::AtomicBool,
+        }
+        impl RelayBackend for CountingRelay {
+            fn call(
+                &self,
+                _method: &str,
+                _args: Value,
+                _timeout: Duration,
+            ) -> Result<Value, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.connected.load(Ordering::SeqCst) {
+                    Ok(json!({
+                        "connected": true,
+                        "activeTargetId": "t-old",
+                        "tabs": [{ "targetId": "t-old", "title": "Stale Private Tab", "url": "https://private.test" }],
+                        "page": { "title": "Stale Private Tab", "url": "https://private.test" },
+                        "changed": true,
+                        "imageDataUrl": "data:image/webp;base64,U1RBTEU=",
+                    }))
+                } else {
+                    Ok(json!({
+                        "connected": false,
+                        "tabs": [],
+                        "tabsHash": "empty",
+                        "activeTargetId": Value::Null,
+                        "page": { "title": "", "url": "" },
+                        "changed": false,
+                        "unchanged": true,
+                        "imageDataUrl": "",
+                    }))
+                }
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-stream-swr-expire-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let html_path = dir.join("panel.html");
+        fs::write(&html_path, "<script>/*__CHROME_STREAM_BOOT__*/</script>").unwrap();
+
+        let relay = Arc::new(CountingRelay {
+            calls: AtomicUsize::new(0),
+            connected: std::sync::atomic::AtomicBool::new(true),
+        });
+        let srv = McpServer::new(Arc::clone(&relay) as Arc<dyn RelayBackend>, html_path);
+        initialize(&srv, apps_capabilities());
+
+        // Populate warm cache with connected snapshot, then simulate out-of-band revoke on relay.
+        let initial = srv.swr_cache.get_swr(Duration::from_millis(500)).unwrap();
+        assert_eq!(initial.metadata["connected"], true);
+        assert_eq!(relay.calls.load(Ordering::SeqCst), 1);
+        relay.connected.store(false, Ordering::SeqCst);
+
+        // Within <= 2500ms TTL, cache stays burst-fast without synchronous IPC.
+        let burst = srv.swr_cache.get_swr(Duration::from_millis(500)).unwrap();
+        assert_eq!(burst.metadata["connected"], true);
+        assert_eq!(relay.calls.load(Ordering::SeqCst), 1);
+
+        // Backdate updated_at past 2500ms -> resources/read MUST revalidate synchronously and never inject stale pixels/titles.
+        {
+            let mut st = srv.swr_cache.state.lock().unwrap();
+            st.updated_at = Some(Instant::now() - Duration::from_millis(2600));
+        }
+        let read_res = srv
+            .handle_message(&json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "resources/read",
+                "params": { "uri": STAGE_URI }
+            }))
+            .unwrap();
+        let html = read_res["result"]["contents"][0]["text"].as_str().unwrap();
+        assert_eq!(relay.calls.load(Ordering::SeqCst), 2);
+        assert!(html.contains("\"connected\":false"));
+        assert!(!html.contains("Stale Private Tab"));
+        assert!(!html.contains("U1RBTEU="));
 
         let _ = fs::remove_dir_all(&dir);
     }

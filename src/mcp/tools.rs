@@ -594,6 +594,12 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value, revoking: bool) -> V
     let t_start = Instant::now();
     match relay.call("input", args, Duration::from_secs(30)) {
         Ok(mut res) => {
+            if revoking && (res["ok"] != true || res["connected"] != false) {
+                return unconfirmed_control(
+                    current_lang(),
+                    "The relay did not confirm revoking the Chrome connection",
+                );
+            }
             if res.get("serverMs").and_then(|v| v.as_u64()).is_none() {
                 res["serverMs"] = json!(t_start.elapsed().as_millis() as u64);
             }
@@ -786,5 +792,33 @@ mod tests {
                 connected && paused
             );
         }
+    }
+
+    #[test]
+    fn multi_event_input_with_disconnect_surfaces_unconfirmed_on_stale_target() {
+        let relay: Arc<dyn RelayBackend> = Arc::new(ControlRelay(
+            Ok(json!({
+                "ok": false,
+                "staleTarget": true,
+                "connected": true,
+                "error": "The tab epoch changed. Refresh the panel before sending input again."
+            })),
+            "input",
+        ));
+        let result = dispatch_tool_with_cache(
+            &relay,
+            None,
+            "chrome_stream_input",
+            json!({
+                "targetEpoch": 1,
+                "events": [
+                    { "action": "click", "x": 10, "y": 20 },
+                    { "action": "disconnect" }
+                ]
+            }),
+        );
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["ok"], false);
+        assert_eq!(result["structuredContent"]["unconfirmed"], true);
     }
 }

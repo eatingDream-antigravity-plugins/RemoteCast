@@ -19,9 +19,9 @@ Invoke only the public tools below (app-only tools carry `_meta.ui.visibility: [
 
 ## Workflows
 
-- **Open viewer**: Call `chrome_stream_stage` to inspect `connected`, `connectionMode`, `portFile.valid`, `activeTargetId`, and `tabs`. Never assume Chrome is connected (staging never auto-dials). Call `chrome_stream_connect` only if the user asked to connect right away; otherwise let them choose **Connect Personal Chrome** or **Launch Remote Chrome (No Allow)** in the panel.
+- **Open viewer**: Call `chrome_stream_stage` to inspect `connected`, `connectionMode`, `portFile.valid`, and `noTabs`. Never assume Chrome is connected (staging never auto-dials). Call `chrome_stream_connect` only if the user asked to connect right away; otherwise let them choose **Connect Personal Chrome** or **Launch Remote Chrome (No Allow)** in the panel.
 - **Standby vs. Revoke (remote-safe)**: Prefer `chrome_stream_disconnect({ mode: "standby" })` (or panel header **Standby / Wake**) when the user wants to pause capture without losing Chrome's local **Allow** consent. Only use `mode: "revoke"` when the user explicitly wants to tear down the debugging connection.
-- **Zero open tabs**: Chrome Stream never auto-creates `about:blank`. If `connected: true` and `tabs` is empty (`activeTargetId: null`), tell the user they can click **New Tab (`+`)** in the panel or open a tab in Chrome.
+- **Zero open tabs**: Chrome Stream never auto-creates `about:blank`. If `connected: true` and `noTabs: true`, tell the user they can click **New Tab (`+`)** in the panel or open a tab in Chrome.
 - **Weak networks**: Default to `qualityPreset: "auto"`. The relay uses EWMA RTT smoothing with asymmetric hysteresis and automatically settles to a crisp WebP still frame ~380 ms after motion/input stops, with 0-byte unchanged deduplication.
 
 ## Local Chrome Debugging & Guardrails

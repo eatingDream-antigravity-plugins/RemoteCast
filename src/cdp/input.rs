@@ -33,6 +33,13 @@ impl InputDispatcher {
             }));
         }
 
+        let has_disconnect = params.events.iter().any(|ev| ev.action == "disconnect");
+        let early_before_disconnect = |mut res: Value| {
+            if has_disconnect {
+                res["unconfirmed"] = json!(true);
+            }
+            Ok(res)
+        };
         let mut was_idle_paused = false;
         let mut tab_mutated = false;
         let mut nav_mutated = false;
@@ -53,7 +60,7 @@ impl InputDispatcher {
             if action == "pause" {
                 client.capture.lock().unwrap().mark_poll();
                 client.pause();
-                return Ok(json!({
+                return early_before_disconnect(json!({
                     "ok": true,
                     "connected": client.is_connected(),
                     "paused": true,
@@ -83,7 +90,7 @@ impl InputDispatcher {
                 let mut res = client.close_tab(tid, batch_epoch, None)?;
                 if res["ok"] == false {
                     res["serverMs"] = json!(t_start.elapsed().as_millis() as u64);
-                    return Ok(res);
+                    return early_before_disconnect(res);
                 }
                 if let Some(arr) = res.get("tabs") {
                     if let Ok(parsed) = serde_json::from_value::<Vec<TabInfo>>(arr.clone()) {
@@ -166,14 +173,18 @@ impl InputDispatcher {
             let current_epoch = client.tab_epoch();
             let expected_epoch = *batch_epoch.get_or_insert(current_epoch);
             if expected_epoch != current_epoch {
-                return Ok(Self::stale_target(client, "The tab epoch changed", t_start));
+                return early_before_disconnect(Self::stale_target(
+                    client,
+                    "The tab epoch changed",
+                    t_start,
+                ));
             }
             let bound_target = params.target_id.as_deref().or(batch_target.as_deref());
             if let (Some(event_target), Some(bound_target)) =
                 (ev.target_id.as_deref(), bound_target)
             {
                 if event_target != bound_target {
-                    return Ok(Self::stale_target(
+                    return early_before_disconnect(Self::stale_target(
                         client,
                         "The event target differs from the batch target",
                         t_start,
@@ -195,15 +206,23 @@ impl InputDispatcher {
                     tab_mutated = true;
                     continue;
                 }
-                Ok(None) => return Ok(Self::stale_target(client, "No active tab", t_start)),
-                Err(reason) => return Ok(Self::stale_target(client, reason, t_start)),
+                Ok(None) => {
+                    return early_before_disconnect(Self::stale_target(
+                        client,
+                        "No active tab",
+                        t_start,
+                    ));
+                }
+                Err(reason) => {
+                    return early_before_disconnect(Self::stale_target(client, reason, t_start));
+                }
             };
             batch_target.get_or_insert_with(|| tid.clone());
             let sid = match client.attach(&tid) {
                 Ok(sid) => sid,
                 Err(err) if err.is_target_gone() && client.is_connected() => {
                     client.handle_target_gone(&tid, true);
-                    return Ok(Self::stale_target(
+                    return early_before_disconnect(Self::stale_target(
                         client,
                         "The input target closed",
                         t_start,
@@ -225,7 +244,7 @@ impl InputDispatcher {
                 check
             };
             if let Err(reason) = check {
-                return Ok(Self::stale_target(client, reason, t_start));
+                return early_before_disconnect(Self::stale_target(client, reason, t_start));
             }
             was_idle_paused |= client.capture.lock().unwrap().begin_input();
 
@@ -498,7 +517,7 @@ impl InputDispatcher {
             if let Err(err) = step_res {
                 if err.is_target_gone() && client.is_connected() {
                     client.handle_target_gone(&tid, true);
-                    return Ok(Self::stale_target(
+                    return early_before_disconnect(Self::stale_target(
                         client,
                         "The input target closed",
                         t_start,
