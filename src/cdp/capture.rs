@@ -1,15 +1,18 @@
 use crate::cdp::client::{now_iso, CdpClient, CdpError, FrameRecord, PollFrameParams};
 use crate::i18n::current_lang;
 use crate::stream::dedup::{hash_frame_data, hash_tabs};
-use crate::stream::profiles::{profile_by_name, resolve_profile, QualityProfile, TabInfo};
+use crate::stream::profiles::{
+    profile_by_name, resolve_profile, AdaptiveProfile, QualityProfile, TabInfo,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const CRISP_SETTLE_DELAY: Duration = Duration::from_millis(380);
 pub const SCREENCAST_IDLE_STOP: Duration = Duration::from_secs(12);
 pub const SCREENCAST_TIER_DWELL: Duration = Duration::from_secs(2);
 const FALLBACK_ACTIVE_WINDOW: Duration = Duration::from_millis(2500);
-const FALLBACK_ACTIVE_INTERVAL: Duration = Duration::from_millis(350);
+const FALLBACK_ACTIVE_INTERVAL: Duration = Duration::from_millis(450);
 const FALLBACK_IDLE_INTERVAL: Duration = Duration::from_millis(1100);
 
 /// Authoritative owner of screencast/fallback frame capture, SHA-1 dedup state,
@@ -26,7 +29,14 @@ pub struct FramePipeline {
     pub(crate) last_poll_at: Instant,
     pub(crate) frame_seq: u64,
     pub(crate) deduped_frames: u64,
-    pub(crate) latest_frame: Option<FrameRecord>,
+    pub(crate) latest_frame: Option<Arc<FrameRecord>>,
+    latest_frame_captured_at: String,
+    adaptive_profile: AdaptiveProfile,
+    last_motion_hash: String,
+    settle_at: Option<Instant>,
+    settle_attempted: bool,
+    settle_in_flight: bool,
+    inputs_in_flight: usize,
 }
 
 impl FramePipeline {
@@ -45,6 +55,13 @@ impl FramePipeline {
             frame_seq: 0,
             deduped_frames: 0,
             latest_frame: None,
+            latest_frame_captured_at: String::new(),
+            adaptive_profile: AdaptiveProfile::default(),
+            last_motion_hash: String::new(),
+            settle_at: None,
+            settle_attempted: false,
+            settle_in_flight: false,
+            inputs_in_flight: 0,
         }
     }
 
@@ -53,7 +70,8 @@ impl FramePipeline {
         self.screencast_target_id = None;
         self.screencast_profile = None;
         self.screencast_started_at = None;
-        self.latest_frame = None;
+        self.clear_latest_frame();
+        self.adaptive_profile = AdaptiveProfile::default();
         self.last_fallback_shot_at = None;
         self.fallback_active_at = None;
     }
@@ -87,15 +105,67 @@ impl FramePipeline {
             .map(|f| f.target_id.as_str() == target_id)
             .unwrap_or(false)
         {
-            self.latest_frame = None;
+            self.clear_latest_frame();
         }
     }
 
     pub fn clear_latest_frame(&mut self) {
         self.latest_frame = None;
+        self.last_motion_hash.clear();
+        self.settle_at = None;
+        self.settle_attempted = false;
+    }
+
+    fn select_profile(&mut self, preset: &str, rtt_ms: Option<f64>) -> &'static QualityProfile {
+        if preset == "auto" {
+            match rtt_ms {
+                Some(sample) => self.adaptive_profile.observe(sample),
+                None => self.adaptive_profile.profile(),
+            }
+        } else {
+            profile_by_name(preset)
+        }
+    }
+
+    pub fn begin_input(&mut self) -> bool {
+        self.inputs_in_flight += 1;
+        self.notify_activity()
+    }
+
+    pub fn finish_input(&mut self, still_active: bool) {
+        self.inputs_in_flight -= 1;
+        if still_active {
+            self.notify_activity();
+            self.schedule_settle();
+        }
+    }
+
+    fn schedule_settle(&mut self) {
+        self.settle_at = Some(Instant::now() + CRISP_SETTLE_DELAY);
+        self.settle_attempted = false;
+    }
+
+    pub fn latest_frame_is_crisp(&self) -> bool {
+        self.settle_at.is_none() && self.latest_frame.as_ref().is_some_and(|frame| frame.crisp)
+    }
+
+    pub fn settle_deadline(&self, target_id: &str) -> Option<Instant> {
+        self.settle_at.filter(|_| {
+            self.inputs_in_flight == 0
+                && !self.settle_attempted
+                && !self.settle_in_flight
+                && !self.screencast_idle_paused
+                && self
+                    .latest_frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.target_id == target_id)
+        })
     }
 
     pub fn is_fallback_due(&self) -> bool {
+        if self.settle_in_flight {
+            return false;
+        }
         let active_recently = self
             .fallback_active_at
             .map(|t| t.elapsed() < FALLBACK_ACTIVE_WINDOW)
@@ -122,43 +192,68 @@ impl FramePipeline {
         }
     }
 
-    /// SHA-1 deduplicates and stores an incoming screencast or fallback JPEG frame.
-    /// Returns `true` if a new unique frame was committed.
-    pub fn ingest_frame(
-        &mut self,
-        target_id: &str,
-        epoch: u64,
-        data: &str,
-        vw: u32,
-        vh: u32,
-    ) -> bool {
+    /// Keeps the last motion hash across the WebP upgrade, so a duplicate
+    /// screencast frame cannot replace a settled still.
+    pub fn ingest_motion_frame(&mut self, target_id: &str, data: &str, vw: u32, vh: u32) -> bool {
         let hash = hash_frame_data(data);
-        let is_dup = self
+        let same_target = self
             .latest_frame
             .as_ref()
-            .map(|f| f.target_id == target_id && f.hash == hash)
-            .unwrap_or(false);
-        if is_dup {
+            .is_some_and(|f| f.target_id == target_id);
+        if same_target && self.last_motion_hash == hash {
             self.deduped_frames += 1;
-            if let Some(f) = self.latest_frame.as_mut() {
-                f.captured_at = now_iso();
+            if self.latest_frame.as_ref().is_some_and(|f| !f.crisp) {
+                self.latest_frame_captured_at = now_iso();
+                if !self.settle_attempted {
+                    self.schedule_settle();
+                }
             }
             return false;
         }
+        self.last_motion_hash.clone_from(&hash);
+        self.schedule_settle();
+        self.store_frame(target_id, data, hash, (vw, vh), false);
+        true
+    }
+
+    fn ingest_crisp_frame(&mut self, target_id: &str, data: &str, viewport: (u32, u32)) {
+        // Include the format in the hash domain when switching encodings.
+        let hash = format!("webp-{}", hash_frame_data(data));
+        self.settle_at = None;
+        if self
+            .latest_frame
+            .as_ref()
+            .is_some_and(|f| f.target_id == target_id && f.hash == hash)
+        {
+            self.deduped_frames += 1;
+            self.latest_frame_captured_at = now_iso();
+            return;
+        }
+        self.store_frame(target_id, data, hash, viewport, true);
+    }
+
+    fn store_frame(
+        &mut self,
+        target_id: &str,
+        data: &str,
+        hash: String,
+        (viewport_width, viewport_height): (u32, u32),
+        crisp: bool,
+    ) {
+        let format = if crisp { "webp" } else { "jpeg" };
+        self.latest_frame_captured_at = now_iso();
         self.frame_seq += 1;
-        let seq = self.frame_seq;
-        self.latest_frame = Some(FrameRecord {
-            seq,
-            epoch,
+        self.latest_frame = Some(Arc::new(FrameRecord {
+            seq: self.frame_seq,
             target_id: target_id.to_string(),
             hash,
-            image_data_url: format!("data:image/jpeg;base64,{data}"),
+            image_data_url: format!("data:image/{format};base64,{data}"),
             image_bytes: (data.len() * 3) / 4,
-            viewport_width: vw,
-            viewport_height: vh,
-            captured_at: now_iso(),
-        });
-        true
+            crisp,
+            format: format.into(),
+            viewport_width,
+            viewport_height,
+        }));
     }
 }
 
@@ -178,6 +273,11 @@ pub(crate) fn check_idle_screencast_stop(client: &Arc<CdpClient>) -> bool {
 }
 
 pub(crate) fn stop_screencast(client: &Arc<CdpClient>) {
+    let _guard = client.screencast_lock.lock().unwrap();
+    stop_screencast_locked(client);
+}
+
+fn stop_screencast_locked(client: &Arc<CdpClient>) {
     let prev_tid = {
         let mut cap = client.capture.lock().unwrap();
         let Some(tid) = cap.screencast_target_id.take() else {
@@ -204,22 +304,25 @@ pub(crate) fn ensure_screencast(
     client: &Arc<CdpClient>,
     target_id: &str,
     quality_preset: &str,
-    rtt_ms: f64,
+    rtt_ms: Option<f64>,
     force_profile: bool,
 ) -> Result<(String, &'static QualityProfile), CdpError> {
-    let qp = resolve_profile(quality_preset, rtt_ms);
-    {
+    let _guard = client.screencast_lock.lock().unwrap();
+    let qp = {
         let existing_sid = client.tabs.lock().unwrap().session_for(target_id);
         let mut cap = client.capture.lock().unwrap();
         cap.mark_poll();
+        let qp = cap.select_profile(quality_preset, rtt_ms);
         if cap.screencast_target_id.as_deref() == Some(target_id) {
             if let (Some(cur_name), Some(sid)) = (cap.screencast_profile.as_deref(), existing_sid) {
                 if cur_name == qp.name {
+                    cap.screencast_quality = quality_preset.to_string();
                     return Ok((sid, qp));
                 }
                 // Minimum tier dwell-time hysteresis prevents tearing down & restarting Chrome's
                 // GPU screencast on noisy back-to-back non-forced tier oscillations.
                 let in_dwell = !force_profile
+                    && quality_preset != "auto"
                     && cap
                         .screencast_started_at
                         .map(|t| t.elapsed() < SCREENCAST_TIER_DWELL)
@@ -229,12 +332,21 @@ pub(crate) fn ensure_screencast(
                 }
             }
         }
-    }
+        qp
+    };
 
-    stop_screencast(client);
+    stop_screencast_locked(client);
     let sid = client.attach(target_id)?;
     {
+        let tabs = client.tabs.lock().unwrap();
         let mut cap = client.capture.lock().unwrap();
+        if tabs.paused
+            || tabs.active_target_id.as_deref() != Some(target_id)
+            || tabs.has_dialog(target_id)
+            || cap.screencast_idle_paused
+        {
+            return Ok((sid, qp));
+        }
         cap.screencast_target_id = Some(target_id.to_string());
         cap.screencast_quality = quality_preset.to_string();
         cap.screencast_profile = Some(qp.name.to_string());
@@ -245,7 +357,7 @@ pub(crate) fn ensure_screencast(
             .map(|f| f.target_id.as_str() != target_id)
             .unwrap_or(false)
         {
-            cap.latest_frame = None;
+            cap.clear_latest_frame();
         }
     }
 
@@ -281,11 +393,7 @@ pub(crate) fn ensure_screencast(
 
 /// Warms the active tab screencast ONLY when no screencast is currently active.
 /// Never stops or downgrades an already-active high/medium stream (cuts DP7 -> FR3 side-effect).
-pub(crate) fn warm_active_tab(
-    client: &Arc<CdpClient>,
-    quality_preset: Option<&str>,
-    rtt_ms: f64,
-) {
+pub(crate) fn warm_active_tab(client: &Arc<CdpClient>, quality_preset: Option<&str>, rtt_ms: f64) {
     if !client.is_connected() || client.is_paused() {
         return;
     }
@@ -301,16 +409,34 @@ pub(crate) fn warm_active_tab(
     };
     let active = client.active_target_id();
     if let Ok((Some(tid), _)) = client.resolve_target_id(active.as_deref(), false, true) {
-        let _ = ensure_screencast(client, &tid, &effective_preset, rtt_ms, false);
+        let _ = ensure_screencast(
+            client,
+            &tid,
+            &effective_preset,
+            (rtt_ms > 0.0).then_some(rtt_ms),
+            false,
+        );
     }
 }
 
 fn extract_layout_viewport(metrics: &Value) -> Option<(u32, u32)> {
     for ptr_pair in [
-        ("/cssVisualViewport/clientWidth", "/cssVisualViewport/clientHeight"),
-        ("/visualViewport/clientWidth", "/visualViewport/clientHeight"),
-        ("/cssLayoutViewport/clientWidth", "/cssLayoutViewport/clientHeight"),
-        ("/layoutViewport/clientWidth", "/layoutViewport/clientHeight"),
+        (
+            "/cssVisualViewport/clientWidth",
+            "/cssVisualViewport/clientHeight",
+        ),
+        (
+            "/visualViewport/clientWidth",
+            "/visualViewport/clientHeight",
+        ),
+        (
+            "/cssLayoutViewport/clientWidth",
+            "/cssLayoutViewport/clientHeight",
+        ),
+        (
+            "/layoutViewport/clientWidth",
+            "/layoutViewport/clientHeight",
+        ),
     ] {
         let w = metrics.pointer(ptr_pair.0).and_then(|v| v.as_f64());
         let h = metrics.pointer(ptr_pair.1).and_then(|v| v.as_f64());
@@ -327,8 +453,7 @@ pub(crate) fn capture_fallback_frame(
     client: &Arc<CdpClient>,
     target_id: &str,
     session_id: &str,
-    quality_preset: &str,
-    rtt_ms: f64,
+    qp: &QualityProfile,
 ) -> Result<(), CdpError> {
     if client.tabs.lock().unwrap().has_dialog(target_id) {
         return Ok(());
@@ -343,7 +468,6 @@ pub(crate) fn capture_fallback_frame(
             .unwrap_or((1280, 800))
     };
 
-    let qp = resolve_profile(quality_preset, rtt_ms);
     let mut got_vp = false;
 
     match client.send_cdp(
@@ -392,7 +516,7 @@ pub(crate) fn capture_fallback_frame(
 
     let mut capture_params = json!({
         "format": "jpeg",
-        "quality": qp.quality.min(55),
+        "quality": qp.quality,
         "fromSurface": true,
     });
     if got_vp {
@@ -423,7 +547,7 @@ pub(crate) fn capture_fallback_frame(
                     "Page.captureScreenshot",
                     json!({
                         "format": "jpeg",
-                        "quality": qp.quality.min(46),
+                        "quality": qp.quality,
                         "fromSurface": true,
                     }),
                     Some(session_id),
@@ -442,19 +566,93 @@ pub(crate) fn capture_fallback_frame(
         return Ok(());
     }
 
-    let (closed, epoch) = {
-        let mut ts = client.tabs.lock().unwrap();
-        (ts.is_recently_closed(target_id), ts.tab_epoch)
-    };
-    if closed {
+    if client.tabs.lock().unwrap().is_recently_closed(target_id) {
         return Ok(());
     }
     client
         .capture
         .lock()
         .unwrap()
-        .ingest_frame(target_id, epoch, data, vw, vh);
+        .ingest_motion_frame(target_id, data, vw, vh);
+    client.notify_frame_waiters();
     Ok(())
+}
+
+fn capture_crisp_if_due(
+    client: &Arc<CdpClient>,
+    target_id: &str,
+    session_id: &str,
+) -> Result<(), CdpError> {
+    let (deadline, epoch, pause_epoch, viewport) = {
+        let tabs = client.tabs.lock().unwrap();
+        if tabs.paused
+            || tabs.active_target_id.as_deref() != Some(target_id)
+            || tabs.session_for(target_id).as_deref() != Some(session_id)
+            || tabs.has_dialog(target_id)
+        {
+            return Ok(());
+        }
+        let mut cap = client.capture.lock().unwrap();
+        let Some(deadline) = cap
+            .settle_deadline(target_id)
+            .filter(|due| *due <= Instant::now())
+        else {
+            return Ok(());
+        };
+        cap.settle_attempted = true;
+        cap.settle_in_flight = true;
+        let frame = cap.latest_frame.as_ref().unwrap();
+        (
+            deadline,
+            tabs.tab_epoch,
+            tabs.pause_epoch,
+            (frame.viewport_width, frame.viewport_height),
+        )
+    };
+
+    let shot = client.send_cdp(
+        "Page.captureScreenshot",
+        json!({ "format": "webp", "quality": 86 }),
+        Some(session_id),
+        Duration::from_secs(8),
+    );
+
+    let result = {
+        let tabs = client.tabs.lock().unwrap();
+        let mut cap = client.capture.lock().unwrap();
+        cap.settle_in_flight = false;
+        if cap.settle_at != Some(deadline) {
+            Ok(())
+        } else if tabs.paused
+            || tabs.pause_epoch != pause_epoch
+            || tabs.tab_epoch != epoch
+            || tabs.session_for(target_id).as_deref() != Some(session_id)
+            || tabs.has_dialog(target_id)
+            || cap.inputs_in_flight != 0
+            || cap.screencast_idle_paused
+        {
+            // The still arrived after a state change. Let the next eligible poll try again.
+            cap.settle_attempted = false;
+            Ok(())
+        } else {
+            match shot {
+                Ok(shot) => {
+                    if let Some(data) = shot
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .filter(|data| !data.is_empty())
+                    {
+                        cap.ingest_crisp_frame(target_id, data, viewport);
+                    }
+                    Ok(())
+                }
+                Err(err) if err.is_target_gone() => Err(err),
+                Err(_) => Ok(()),
+            }
+        }
+    };
+    client.notify_frame_waiters();
+    result
 }
 
 /// Polls the active tab frame and tab state WITHOUT ever auto-dialing Chrome when disconnected.
@@ -477,6 +675,9 @@ pub(crate) fn poll_frame(
         };
         return Ok(json!({
             "connected": false,
+            "connectionMode": Value::Null,
+            "crisp": false,
+            "format": Value::Null,
             "paused": false,
             "pauseEpoch": pause_epoch,
             "screencastPausedIdle": false,
@@ -492,7 +693,6 @@ pub(crate) fn poll_frame(
             "unchanged": true,
             "seq": params.since_seq,
             "frameHash": "",
-            "imageDataUrl": "",
             "imageBytes": 0,
             "qualityApplied": profile.name,
             "locale": current_lang().as_str(),
@@ -549,8 +749,12 @@ pub(crate) fn poll_frame(
             let t_hash = hash_tabs(&resolved_tabs);
             let include_tabs =
                 params.known_tabs_hash.is_empty() || params.known_tabs_hash != t_hash;
+            let connection_mode = client.connection_mode();
             let mut resp = json!({
-                "connected": client.is_connected(),
+                "connected": connection_mode.is_some(),
+                "connectionMode": connection_mode,
+                "crisp": false,
+                "format": Value::Null,
                 "paused": is_paused,
                 "pauseEpoch": pause_epoch,
                 "screencastPausedIdle": is_idle,
@@ -569,7 +773,6 @@ pub(crate) fn poll_frame(
                 "unchanged": true,
                 "seq": seq,
                 "frameHash": "",
-                "imageDataUrl": "",
                 "imageBytes": 0,
                 "qualityApplied": profile.name,
                 "locale": current_lang().as_str(),
@@ -592,13 +795,7 @@ pub(crate) fn poll_frame(
                 // While paused or idle-stopped, never restart continuous screencast.
                 if params.force_refresh && !has_open_dialog {
                     let sid = client.attach(&target_id)?;
-                    capture_fallback_frame(
-                        client,
-                        &target_id,
-                        &sid,
-                        &params.quality_preset,
-                        params.rtt_ms,
-                    )?;
+                    capture_fallback_frame(client, &target_id, &sid, profile)?;
                 }
                 return Ok(());
             }
@@ -612,7 +809,7 @@ pub(crate) fn poll_frame(
                 client,
                 &target_id,
                 &params.quality_preset,
-                params.rtt_ms,
+                Some(params.rtt_ms),
                 params.force_refresh,
             )?;
             profile = qp;
@@ -622,10 +819,11 @@ pub(crate) fn poll_frame(
                 return Ok(());
             }
 
-            let (has_valid_frame, same_as_client_hash, cur_seq, sc_running, fb_due) = {
+            let (has_valid_frame, same_as_client_hash, cur_seq, sc_running, fb_due, settle_due) = {
                 let cap = client.capture.lock().unwrap();
                 let sc_on = cap.screencast_target_id.as_deref() == Some(target_id.as_str());
                 let due = cap.is_fallback_due();
+                let settle_due = cap.settle_deadline(&target_id);
                 match &cap.latest_frame {
                     Some(f) if f.target_id == target_id => (
                         true,
@@ -633,8 +831,9 @@ pub(crate) fn poll_frame(
                         f.seq,
                         sc_on,
                         due,
+                        settle_due,
                     ),
-                    _ => (false, false, cap.frame_seq, sc_on, due),
+                    _ => (false, false, cap.frame_seq, sc_on, due, settle_due),
                 }
             };
 
@@ -645,6 +844,7 @@ pub(crate) fn poll_frame(
                         prev_seq,
                         Duration::from_millis(160),
                         Some(&target_id),
+                        false,
                     );
                 }
                 let has_dlg_now = client.tabs.lock().unwrap().has_dialog(&target_id);
@@ -658,17 +858,16 @@ pub(crate) fn poll_frame(
                             .unwrap_or(true)
                 };
                 if need_fallback {
-                    capture_fallback_frame(
-                        client,
-                        &target_id,
-                        &sid,
-                        &params.quality_preset,
-                        params.rtt_ms,
-                    )?;
+                    capture_fallback_frame(client, &target_id, &sid, profile)?;
                 }
             } else if !has_valid_frame {
                 if sc_running {
-                    client.wait_for_next_frame(0, Duration::from_millis(300), Some(&target_id));
+                    client.wait_for_next_frame(
+                        0,
+                        Duration::from_millis(300),
+                        Some(&target_id),
+                        false,
+                    );
                 }
                 let has_dlg_now = client.tabs.lock().unwrap().has_dialog(&target_id);
                 let need_fallback = !has_dlg_now && {
@@ -679,34 +878,22 @@ pub(crate) fn poll_frame(
                         .unwrap_or(true)
                 };
                 if need_fallback {
-                    capture_fallback_frame(
-                        client,
-                        &target_id,
-                        &sid,
-                        &params.quality_preset,
-                        params.rtt_ms,
-                    )?;
+                    capture_fallback_frame(client, &target_id, &sid, profile)?;
                 }
-            } else if !sc_running {
-                // Restricted page (e.g. `chrome://`): periodically refresh via throttled screenshot fallback.
-                if fb_due {
-                    capture_fallback_frame(
-                        client,
-                        &target_id,
-                        &sid,
-                        &params.quality_preset,
-                        params.rtt_ms,
-                    )?;
-                } else if params.wait_ms > 0 {
-                    let _ = client.wait_for_notify(Duration::from_millis(params.wait_ms.min(350)));
-                }
+            } else if settle_due.is_some_and(|due| due <= Instant::now()) {
+                capture_crisp_if_due(client, &target_id, &sid)?;
+            } else if !sc_running && fb_due {
+                // Restricted pages periodically refresh through the screenshot fallback.
+                capture_fallback_frame(client, &target_id, &sid, profile)?;
             } else if (cur_seq <= params.since_seq || same_as_client_hash) && params.wait_ms > 0 {
                 let wait = params.wait_ms.clamp(40, 1200);
                 client.wait_for_next_frame(
                     params.since_seq.max(cur_seq),
                     Duration::from_millis(wait),
                     Some(&target_id),
+                    true,
                 );
+                capture_crisp_if_due(client, &target_id, &sid)?;
             }
 
             Ok(())
@@ -739,14 +926,16 @@ pub(crate) fn poll_frame(
         let popped = ts.take_popup_switched(&target_id);
         (ts.tab_epoch, ts.paused, ts.pause_epoch, dlg, popped)
     };
-    let (frame, cur_idle_paused) = {
+    let (frame, crisp, cur_idle_paused, captured_at) = {
         let cap = client.capture.lock().unwrap();
         let f = cap
             .latest_frame
             .as_ref()
             .filter(|f| f.target_id == target_id)
             .cloned();
-        (f, cap.screencast_idle_paused)
+        let captured_at = f.as_ref().map(|_| cap.latest_frame_captured_at.clone());
+        let crisp = f.is_some() && cap.latest_frame_is_crisp();
+        (f, crisp, cap.screencast_idle_paused, captured_at)
     };
 
     let same_hash = frame
@@ -766,8 +955,12 @@ pub(crate) fn poll_frame(
     let include_tabs = params.known_tabs_hash.is_empty() || params.known_tabs_hash != t_hash;
     let tab_meta = tabs.iter().find(|t| t.target_id == target_id);
 
+    let connection_mode = client.connection_mode();
     let mut resp = json!({
-        "connected": client.is_connected(),
+        "connected": connection_mode.is_some(),
+        "connectionMode": connection_mode,
+        "crisp": crisp,
+        "format": frame.as_ref().map(|f| f.format.as_str()),
         "paused": cur_paused,
         "pauseEpoch": pause_epoch,
         "screencastPausedIdle": cur_idle_paused,
@@ -786,13 +979,17 @@ pub(crate) fn poll_frame(
         "unchanged": !changed,
         "seq": frame.as_ref().map(|f| f.seq).unwrap_or(params.since_seq),
         "frameHash": frame.as_ref().map(|f| f.hash.as_str()).unwrap_or(""),
-        "imageDataUrl": if changed { frame.as_ref().map(|f| f.image_data_url.as_str()).unwrap_or("") } else { "" },
         "imageBytes": if changed { frame.as_ref().map(|f| f.image_bytes).unwrap_or(0) } else { 0 },
         "qualityApplied": profile.name,
         "locale": current_lang().as_str(),
         "serverMs": t_start.elapsed().as_millis() as u64,
-        "capturedAt": frame.as_ref().map(|f| f.captured_at.as_str()).unwrap_or(&now_iso()),
+        "capturedAt": captured_at.unwrap_or_else(now_iso),
     });
+    if let Some(frame) = frame.as_ref().filter(|_| changed) {
+        resp["imageDataUrl"] = json!(frame.image_data_url.as_str());
+    } else if crisp {
+        resp["imageDataUrl"] = json!("");
+    }
     if include_tabs {
         resp["tabs"] = json!(tabs);
     }

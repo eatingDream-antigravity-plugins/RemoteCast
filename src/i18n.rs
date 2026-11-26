@@ -149,7 +149,13 @@ mod tests {
             Lang::ZhCn
         );
         assert_eq!(
-            resolve_lang_chain(None, None, None, Some("ja_JP.UTF-8"), Some("(\"zh-Hans-CN\")")),
+            resolve_lang_chain(
+                None,
+                None,
+                None,
+                Some("ja_JP.UTF-8"),
+                Some("(\"zh-Hans-CN\")")
+            ),
             Lang::En
         );
         assert_eq!(

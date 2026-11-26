@@ -17,24 +17,10 @@ impl InputDispatcher {
         params: InputBatchParams,
     ) -> Result<Value, CdpError> {
         let t_start = Instant::now();
-        if params.events.iter().any(|e| e.action == "disconnect") {
-            if client.is_connected() {
-                client.stop_screencast();
-            }
-            client.disconnect();
-            return Ok(json!({
-                "ok": true,
-                "connected": false,
-                "paused": false,
-                "pauseEpoch": client.pause_epoch(),
-                "screencastPausedIdle": false,
-                "portFile": client.public_port_file(),
-                "locale": current_lang().as_str(),
-                "serverMs": t_start.elapsed().as_millis() as u64,
-            }));
-        }
-
         if !client.is_connected() {
+            if params.events.iter().any(|ev| ev.action == "disconnect") {
+                return Ok(Self::disconnect(client, t_start));
+            }
             return Ok(json!({
                 "ok": false,
                 "connected": false,
@@ -47,36 +33,25 @@ impl InputDispatcher {
             }));
         }
 
-        let is_pause_only = params.events.iter().all(|e| e.action == "pause");
-        let was_idle_paused = if !is_pause_only {
-            client.capture.lock().unwrap().notify_activity()
-        } else {
-            client.capture.lock().unwrap().mark_poll();
-            false
-        };
-
-        // Only real interactive page events arm `last_popup_trigger_at` for OAuth/popup auto-follow.
-        if params.events.iter().any(|e| {
-            matches!(
-                e.action.as_str(),
-                "click" | "mousedown" | "mouseup" | "key" | "type" | "navigate"
-            )
-        }) {
-            client.tabs.lock().unwrap().mark_popup_trigger();
-        }
-
+        let mut was_idle_paused = false;
         let mut tab_mutated = false;
         let mut nav_mutated = false;
         let mut recovered = false;
         let mut latest_tabs: Option<Vec<TabInfo>> = None;
+        let mut batch_epoch = params.target_epoch;
+        let mut batch_target: Option<String> = None;
 
         for ev in &params.events {
             let action = ev.action.as_str();
             if action.is_empty() {
                 continue;
             }
+            if action == "disconnect" {
+                return Ok(Self::disconnect(client, t_start));
+            }
 
             if action == "pause" {
+                client.capture.lock().unwrap().mark_poll();
                 client.pause();
                 return Ok(json!({
                     "ok": true,
@@ -89,32 +64,16 @@ impl InputDispatcher {
                 }));
             }
 
+            if matches!(action, "resume" | "new_tab" | "close_tab" | "switch_tab") {
+                was_idle_paused |= client.capture.lock().unwrap().notify_activity();
+            }
             if action == "resume" {
                 client.resume();
                 continue;
             }
 
             if action == "new_tab" {
-                let target_url = normalize_url(ev.url.as_deref().unwrap_or("about:blank"));
-                let created = client.send_cdp(
-                    "Target.createTarget",
-                    json!({ "url": target_url }),
-                    None,
-                    CMD_TIMEOUT,
-                )?;
-                let new_tid = created
-                    .get("targetId")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| CdpError::new("Target.createTarget missing targetId"))?
-                    .to_string();
-                client.tabs.lock().unwrap().activate_new_tab(&new_tid);
-                client.capture.lock().unwrap().clear_latest_frame();
-                let _ = client.send_cdp(
-                    "Target.activateTarget",
-                    json!({ "targetId": new_tid }),
-                    None,
-                    Duration::from_secs(3),
-                );
+                Self::open_tab(client, ev.url.as_deref())?;
                 tab_mutated = true;
                 continue;
             }
@@ -133,8 +92,20 @@ impl InputDispatcher {
 
             if action == "switch_tab" {
                 let req = ev.target_id.as_deref().or(params.target_id.as_deref());
-                let (maybe_tid, cur_tabs) = client.resolve_target_id(req, false, true)?;
-                let Some(tid) = maybe_tid else {
+                let cur_tabs = client.list_tabs(false)?;
+                let active = client.active_target_id();
+                let chosen = req
+                    .and_then(|id| cur_tabs.iter().find(|tab| tab.target_id == id))
+                    .or_else(|| {
+                        cur_tabs
+                            .iter()
+                            .find(|tab| Some(tab.target_id.as_str()) == active.as_deref())
+                    })
+                    .or_else(|| cur_tabs.first());
+                let Some(tid) = chosen.map(|tab| tab.target_id.as_str()) else {
+                    client.stop_screencast();
+                    client.tabs.lock().unwrap().clear_no_tabs();
+                    client.capture.lock().unwrap().clear_latest_frame();
                     latest_tabs = Some(cur_tabs);
                     tab_mutated = true;
                     continue;
@@ -146,12 +117,12 @@ impl InputDispatcher {
                     Duration::from_secs(3),
                 ) {
                     Ok(_) => {
-                        client.tabs.lock().unwrap().set_active_target(&tid, false);
+                        client.tabs.lock().unwrap().set_active_target(tid, true);
                         client.capture.lock().unwrap().clear_latest_frame();
                         tab_mutated = true;
                     }
                     Err(err) if err.is_target_gone() && client.is_connected() => {
-                        client.handle_target_gone(&tid, true);
+                        client.handle_target_gone(tid, true);
                         let (fb_tid, fb_tabs) = client.resolve_target_id(None, true, true)?;
                         if let Some(fb) = fb_tid {
                             let _ = client.send_cdp(
@@ -170,46 +141,91 @@ impl InputDispatcher {
                 continue;
             }
 
-            let ask_tid = ev.target_id.as_deref().or(params.target_id.as_deref());
-            let mut resolved_tid = String::new();
+            if !matches!(
+                action,
+                "click"
+                    | "mousedown"
+                    | "mouseup"
+                    | "mousemove"
+                    | "scroll"
+                    | "type"
+                    | "key"
+                    | "dialog"
+                    | "navigate"
+                    | "back"
+                    | "forward"
+                    | "reload"
+            ) {
+                continue;
+            }
+
+            let current_epoch = client.tab_epoch();
+            let expected_epoch = *batch_epoch.get_or_insert(current_epoch);
+            if expected_epoch != current_epoch {
+                return Ok(Self::stale_target(client, "The tab epoch changed", t_start));
+            }
+            let bound_target = params.target_id.as_deref().or(batch_target.as_deref());
+            if let (Some(event_target), Some(bound_target)) =
+                (ev.target_id.as_deref(), bound_target)
+            {
+                if event_target != bound_target {
+                    return Ok(Self::stale_target(
+                        client,
+                        "The event target differs from the batch target",
+                        t_start,
+                    ));
+                }
+            }
+            client.list_tabs(batch_target.is_none())?;
+            let ask_tid = ev.target_id.as_deref().or(bound_target);
+            let target = client
+                .tabs
+                .lock()
+                .unwrap()
+                .validate_input_target(ask_tid, expected_epoch);
+            let tid = match target {
+                Ok(Some(tid)) => tid,
+                Ok(None) if action == "navigate" => {
+                    was_idle_paused |= client.capture.lock().unwrap().notify_activity();
+                    Self::open_tab(client, ev.url.as_deref())?;
+                    tab_mutated = true;
+                    continue;
+                }
+                Ok(None) => return Ok(Self::stale_target(client, "No active tab", t_start)),
+                Err(reason) => return Ok(Self::stale_target(client, reason, t_start)),
+            };
+            batch_target.get_or_insert_with(|| tid.clone());
+            let sid = match client.attach(&tid) {
+                Ok(sid) => sid,
+                Err(err) if err.is_target_gone() && client.is_connected() => {
+                    client.handle_target_gone(&tid, true);
+                    return Ok(Self::stale_target(
+                        client,
+                        "The input target closed",
+                        t_start,
+                    ));
+                }
+                Err(err) => return Err(err),
+            };
+            let check = {
+                let mut tabs = client.tabs.lock().unwrap();
+                let check = tabs.validate_input_target(Some(&tid), expected_epoch);
+                if check.is_ok()
+                    && matches!(
+                        action,
+                        "click" | "mousedown" | "mouseup" | "key" | "type" | "navigate"
+                    )
+                {
+                    tabs.mark_popup_trigger();
+                }
+                check
+            };
+            if let Err(reason) = check {
+                return Ok(Self::stale_target(client, reason, t_start));
+            }
+            was_idle_paused |= client.capture.lock().unwrap().begin_input();
+
             let step_res: Result<(), CdpError> = (|| {
-                let (maybe_tid, cur_tabs) = client.resolve_target_id(ask_tid, false, true)?;
-                let tid = match maybe_tid {
-                    Some(t) => t,
-                    None if action == "navigate" => {
-                        // Explicit URL navigation when 0 tabs exist opens a tab for that URL.
-                        let target_url = normalize_url(ev.url.as_deref().unwrap_or("about:blank"));
-                        let created = client.send_cdp(
-                            "Target.createTarget",
-                            json!({ "url": target_url }),
-                            None,
-                            CMD_TIMEOUT,
-                        )?;
-                        let new_tid = created
-                            .get("targetId")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| CdpError::new("Target.createTarget missing targetId"))?
-                            .to_string();
-                        client.tabs.lock().unwrap().activate_new_tab(&new_tid);
-                        client.capture.lock().unwrap().clear_latest_frame();
-                        let _ = client.send_cdp(
-                            "Target.activateTarget",
-                            json!({ "targetId": new_tid }),
-                            None,
-                            Duration::from_secs(3),
-                        );
-                        tab_mutated = true;
-                        nav_mutated = true;
-                        return Ok(());
-                    }
-                    None => {
-                        latest_tabs = Some(cur_tabs);
-                        tab_mutated = true;
-                        return Ok(());
-                    }
-                };
-                resolved_tid = tid.clone();
-                let sid = client.attach(&tid)?;
                 let mods = ev.modifiers.unwrap_or(0).clamp(0, 15);
 
                 match action {
@@ -231,7 +247,6 @@ impl InputDispatcher {
                                 return Err(err);
                             }
                         }
-                        client.notify_frame_waiters();
                     }
                     "mousemove" => {
                         let mx = ev.x.unwrap_or(0.0).max(0.0).round() as i64;
@@ -464,20 +479,22 @@ impl InputDispatcher {
                 Ok(())
             })();
 
+            {
+                let tabs = client.tabs.lock().unwrap();
+                let still_active = tabs.tab_epoch == expected_epoch
+                    && tabs.active_target_id.as_deref() == Some(&tid);
+                client.capture.lock().unwrap().finish_input(still_active);
+            }
+            client.notify_frame_waiters();
+
             if let Err(err) = step_res {
                 if err.is_target_gone() && client.is_connected() {
-                    let dead_id = if !resolved_tid.is_empty() {
-                        resolved_tid.as_str()
-                    } else {
-                        ask_tid.unwrap_or("")
-                    };
-                    client.handle_target_gone(dead_id, true);
-                    let (_, fb_tabs) = client.resolve_target_id(None, true, true)?;
-                    latest_tabs = Some(fb_tabs);
-                    recovered = true;
-                    tab_mutated = true;
-                    // Drop remaining stale coordinate/key events intended for the closed tab
-                    break;
+                    client.handle_target_gone(&tid, true);
+                    return Ok(Self::stale_target(
+                        client,
+                        "The input target closed",
+                        t_start,
+                    ));
                 }
                 return Err(err);
             }
@@ -550,6 +567,76 @@ impl InputDispatcher {
         Ok(resp)
     }
 
+    fn disconnect(client: &Arc<CdpClient>, started_at: Instant) -> Value {
+        client.stop_screencast();
+        client.disconnect();
+        json!({
+            "ok": true,
+            "connected": false,
+            "paused": false,
+            "pauseEpoch": client.pause_epoch(),
+            "screencastPausedIdle": false,
+            "portFile": client.public_port_file(),
+            "locale": current_lang().as_str(),
+            "serverMs": started_at.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn open_tab(client: &Arc<CdpClient>, url: Option<&str>) -> Result<(), CdpError> {
+        let target_url = normalize_url(url.unwrap_or("about:blank"));
+        let created = client.send_cdp(
+            "Target.createTarget",
+            json!({ "url": target_url }),
+            None,
+            CMD_TIMEOUT,
+        )?;
+        let tid = created
+            .get("targetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CdpError::new("Target.createTarget missing targetId"))?;
+        client.tabs.lock().unwrap().activate_new_tab(tid);
+        client.capture.lock().unwrap().clear_latest_frame();
+        let _ = client.send_cdp(
+            "Target.activateTarget",
+            json!({ "targetId": tid }),
+            None,
+            Duration::from_secs(3),
+        );
+        Ok(())
+    }
+
+    fn stale_target(client: &Arc<CdpClient>, reason: &str, started_at: Instant) -> Value {
+        let _ = client.list_tabs(false);
+        let (active, epoch, tabs, dialog, pause_epoch, paused) = {
+            let state = client.tabs.lock().unwrap();
+            (
+                state.active_target_id.clone(),
+                state.tab_epoch,
+                state.cached_tabs.clone(),
+                state.active_dialog_value(),
+                state.pause_epoch,
+                state.paused,
+            )
+        };
+        json!({
+            "ok": false,
+            "staleTarget": true,
+            "needsRefresh": true,
+            "recoverable": true,
+            "connected": true,
+            "error": format!("{reason}. Refresh the panel before sending input again."),
+            "activeTargetId": active,
+            "epoch": epoch,
+            "tabsHash": hash_tabs(&tabs),
+            "tabs": tabs,
+            "dialog": dialog,
+            "pauseEpoch": pause_epoch,
+            "paused": paused,
+            "seq": client.capture.lock().unwrap().frame_seq,
+            "serverMs": started_at.elapsed().as_millis() as u64,
+        })
+    }
+
     fn dispatch_key(
         client: &Arc<CdpClient>,
         session_id: &str,
@@ -573,7 +660,12 @@ impl InputDispatcher {
                 down["unmodifiedText"] = json!(txt.to_ascii_lowercase());
             }
         }
-        client.send_cdp("Input.dispatchKeyEvent", down, Some(session_id), CMD_TIMEOUT)?;
+        client.send_cdp(
+            "Input.dispatchKeyEvent",
+            down,
+            Some(session_id),
+            CMD_TIMEOUT,
+        )?;
 
         if emit_char {
             if let Some(txt) = text {

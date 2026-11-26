@@ -8,12 +8,14 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
+const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18"];
+const APPS_EXTENSION: &str = "io.modelcontextprotocol/ui";
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 const SWR_FRESH_TTL: Duration = Duration::from_millis(500);
 const HTML_STAT_TTL: Duration = Duration::from_millis(500);
@@ -44,7 +46,8 @@ impl HtmlCache {
         let mtime = meta.modified().ok();
         let size = meta.len();
         self.checked_at = Some(Instant::now());
-        if self.path == path && self.mtime == mtime && self.size == size && !self.prefix.is_empty() {
+        if self.path == path && self.mtime == mtime && self.size == size && !self.prefix.is_empty()
+        {
             return Ok(());
         }
         let text = fs::read_to_string(path)
@@ -83,8 +86,9 @@ impl HtmlCache {
                 Ok(out)
             }
             None => {
-                let mut out =
-                    String::with_capacity(self.prefix.len() + BOOT_MARKER.len() + self.suffix.len());
+                let mut out = String::with_capacity(
+                    self.prefix.len() + BOOT_MARKER.len() + self.suffix.len(),
+                );
                 out.push_str(&self.prefix);
                 out.push_str(BOOT_MARKER);
                 out.push_str(&self.suffix);
@@ -118,14 +122,18 @@ fn sanitize_boot_snapshot(mut bd: Value) -> Value {
         .map(|s| s.len() > BOOT_SNAPSHOT_MAX_DATA_URL_CHARS)
         .unwrap_or(false);
     if too_big {
-        bd["seq"] = json!(0);
-        bd["frameHash"] = json!("");
-        bd["imageDataUrl"] = json!("");
-        bd["imageBytes"] = json!(0);
-        bd["changed"] = json!(false);
-        bd["unchanged"] = json!(true);
+        clear_boot_frame(&mut bd);
     }
     bd
+}
+
+fn clear_boot_frame(snapshot: &mut Value) {
+    snapshot["seq"] = json!(0);
+    snapshot["frameHash"] = json!("");
+    snapshot["imageDataUrl"] = json!("");
+    snapshot["imageBytes"] = json!(0);
+    snapshot["changed"] = json!(false);
+    snapshot["unchanged"] = json!(true);
 }
 
 /// Builds a lightweight status payload for `chrome_stream_stage` (omits base64 image data so
@@ -188,15 +196,26 @@ impl SwrBootCache {
             .map(sanitize_boot_snapshot)
     }
 
+    fn finish_refresh(&self, previous_update: Option<Instant>, fetched: Option<Value>) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(snapshot) = fetched.filter(|_| st.updated_at == previous_update) {
+            st.snapshot = Some(snapshot);
+            st.updated_at = Some(Instant::now());
+        }
+        st.refreshing = false;
+        self.ready_cv.notify_all();
+    }
+
     /// Triggers a single-flight background refresh (warms relay connection + fetches snapshot).
     pub fn prewarm_async(self: &Arc<Self>, warm_relay: bool) {
-        {
+        let previous_update = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.refreshing {
                 return;
             }
             st.refreshing = true;
-        }
+            st.updated_at
+        };
         let me = Arc::clone(self);
         let _ = thread::Builder::new()
             .name("chrome-stream-warm".to_string())
@@ -204,25 +223,17 @@ impl SwrBootCache {
                 if warm_relay {
                     let _ = me.relay.warm();
                     // Also nudge relay's Chrome readiness check asynchronously without downgrading active streams.
-                    let _ = me
-                        .relay
-                        .call("warm", json!({}), Duration::from_millis(800));
+                    let _ = me.relay.call("warm", json!({}), Duration::from_millis(800));
                 }
                 let fetched = me.fetch_from_relay(Duration::from_millis(1500));
-                let mut st = me.state.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(snap) = fetched {
-                    st.snapshot = Some(snap);
-                    st.updated_at = Some(Instant::now());
-                }
-                st.refreshing = false;
-                me.ready_cv.notify_all();
+                me.finish_refresh(previous_update, fetched);
             });
     }
 
     /// Returns cached snapshot immediately (<0.1 ms) if warm and triggers async revalidation when stale.
     /// Only blocks (bounded by `cold_wait`) if the cache has never been populated yet.
     pub fn get_swr(self: &Arc<Self>, cold_wait: Duration) -> Option<Value> {
-        let (cached, needs_bg_refresh, wait_in_flight) = {
+        let (cached, needs_bg_refresh, wait_in_flight, previous_update) = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(snap) = st.snapshot.clone() {
                 let stale = st
@@ -233,12 +244,12 @@ impl SwrBootCache {
                 if bg {
                     st.refreshing = true;
                 }
-                (Some(snap), bg, false)
+                (Some(snap), bg, false, st.updated_at)
             } else if st.refreshing {
-                (None, false, true)
+                (None, false, true, st.updated_at)
             } else {
                 st.refreshing = true;
-                (None, false, false)
+                (None, false, false, st.updated_at)
             }
         };
 
@@ -249,13 +260,7 @@ impl SwrBootCache {
                     .name("chrome-stream-swr".to_string())
                     .spawn(move || {
                         let fetched = me.fetch_from_relay(Duration::from_millis(1500));
-                        let mut st = me.state.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(next) = fetched {
-                            st.snapshot = Some(next);
-                            st.updated_at = Some(Instant::now());
-                        }
-                        st.refreshing = false;
-                        me.ready_cv.notify_all();
+                        me.finish_refresh(previous_update, fetched);
                     });
             }
             return Some(snap);
@@ -275,24 +280,25 @@ impl SwrBootCache {
 
         // Cold path with no in-flight prewarm: fetch synchronously once (bounded) and populate cache.
         let fetched = self.fetch_from_relay(cold_wait.max(Duration::from_millis(200)));
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(snap) = fetched.clone() {
-            st.snapshot = Some(snap);
-            st.updated_at = Some(Instant::now());
-        }
-        st.refreshing = false;
-        self.ready_cv.notify_all();
-        fetched
+        self.finish_refresh(previous_update, fetched);
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot
+            .clone()
     }
 
     /// Opportunistically merges live tool results into the SWR cache so reopening the panel
     /// immediately reflects the exact latest connection state, tabs, and frame with zero IPC.
-    pub fn update_from_tool_result(&self, tool_name: &str, sc: &Value) {
+    pub fn update_from_tool_result(&self, sc: &Value) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut snap = st.snapshot.clone().unwrap_or_else(|| {
             json!({
                 "hostname": "localhost",
                 "connected": false,
+                "connectionMode": Value::Null,
+                "crisp": false,
+                "format": Value::Null,
                 "connecting": false,
                 "tabs": [],
                 "tabsHash": "empty",
@@ -311,6 +317,16 @@ impl SwrBootCache {
         if let Some(c) = connected {
             snap["connected"] = json!(c);
         }
+        let mut mode_changed = false;
+        if let Some(mode) = sc.get("connectionMode") {
+            mode_changed = snap.get("connectionMode") != Some(mode);
+            snap["connectionMode"] = mode.clone();
+        }
+        for key in ["locale", "pauseEpoch", "connecting"] {
+            if let Some(value) = sc.get(key) {
+                snap[key] = value.clone();
+            }
+        }
         if let Some(pf) = sc.get("portFile") {
             if !pf.is_null() {
                 snap["portFile"] = pf.clone();
@@ -320,8 +336,10 @@ impl SwrBootCache {
             }
         }
 
-        if tool_name == "chrome_stream_disconnect" || connected == Some(false) {
-            snap["connected"] = json!(false);
+        if connected == Some(false) {
+            snap["connectionMode"] = Value::Null;
+            snap["crisp"] = json!(false);
+            snap["format"] = Value::Null;
             snap["paused"] = json!(false);
             snap["screencastPausedIdle"] = json!(false);
             snap["noTabs"] = json!(false);
@@ -329,18 +347,10 @@ impl SwrBootCache {
             snap["tabs"] = json!([]);
             snap["tabsHash"] = json!("empty");
             snap["activeTargetId"] = Value::Null;
-            snap["seq"] = json!(0);
-            snap["frameHash"] = json!("");
-            snap["imageDataUrl"] = json!("");
-            snap["imageBytes"] = json!(0);
-            snap["changed"] = json!(false);
-            snap["unchanged"] = json!(true);
+            clear_boot_frame(&mut snap);
         } else {
             if let Some(p) = sc.get("paused").and_then(|v| v.as_bool()) {
                 snap["paused"] = json!(p);
-            }
-            if let Some(pe) = sc.get("pauseEpoch").and_then(|v| v.as_u64()) {
-                snap["pauseEpoch"] = json!(pe);
             }
             if let Some(idle) = sc.get("screencastPausedIdle").and_then(|v| v.as_bool()) {
                 snap["screencastPausedIdle"] = json!(idle);
@@ -348,15 +358,11 @@ impl SwrBootCache {
             if let Some(dlg) = sc.get("dialog") {
                 snap["dialog"] = dlg.clone();
             }
-            if let Some(loc) = sc.get("locale").and_then(|v| v.as_str()) {
-                snap["locale"] = json!(loc);
-            }
-            let no_tabs = sc.get("noTabs").and_then(|v| v.as_bool()).unwrap_or(false)
-                || sc
-                    .get("tabs")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.is_empty())
-                    .unwrap_or(false);
+            let no_tabs = sc
+                .get("noTabs")
+                .and_then(Value::as_bool)
+                .or_else(|| sc.get("tabs").and_then(Value::as_array).map(Vec::is_empty))
+                .unwrap_or_else(|| snap["noTabs"] == true);
             let prev_tid = snap
                 .get("activeTargetId")
                 .and_then(|v| v.as_str())
@@ -402,29 +408,35 @@ impl SwrBootCache {
                 snap["qualityApplied"] = json!(q);
             }
 
-            let changed = sc.get("changed").and_then(|v| v.as_bool()).unwrap_or(false);
-            if changed && !no_tabs {
-                let img = sc.get("imageDataUrl").and_then(|v| v.as_str()).unwrap_or("");
-                if !img.is_empty() && img.len() <= BOOT_SNAPSHOT_MAX_DATA_URL_CHARS {
-                    snap["imageDataUrl"] = json!(img);
-                    snap["imageBytes"] = sc.get("imageBytes").cloned().unwrap_or(json!(0));
-                    snap["seq"] = sc.get("seq").cloned().unwrap_or(json!(0));
-                    snap["frameHash"] = sc.get("frameHash").cloned().unwrap_or(json!(""));
-                    snap["changed"] = json!(true);
-                    snap["unchanged"] = json!(false);
+            if target_changed || mode_changed || no_tabs {
+                clear_boot_frame(&mut snap);
+                snap["crisp"] = json!(false);
+                snap["format"] = Value::Null;
+            }
+            if !no_tabs {
+                for key in ["crisp", "format"] {
+                    if let Some(value) = sc.get(key) {
+                        snap[key] = value.clone();
+                    }
                 }
-            } else if target_changed || no_tabs {
-                snap["imageDataUrl"] = json!("");
-                snap["imageBytes"] = json!(0);
-                snap["seq"] = json!(0);
-                snap["frameHash"] = json!("");
-                snap["changed"] = json!(false);
-                snap["unchanged"] = json!(true);
+                if sc["changed"] == true {
+                    let img = sc["imageDataUrl"].as_str().unwrap_or("");
+                    if !img.is_empty() && img.len() <= BOOT_SNAPSHOT_MAX_DATA_URL_CHARS {
+                        for key in ["imageDataUrl", "imageBytes", "seq", "frameHash"] {
+                            snap[key] = sc[key].clone();
+                        }
+                        snap["changed"] = json!(true);
+                        snap["unchanged"] = json!(false);
+                    } else {
+                        clear_boot_frame(&mut snap);
+                    }
+                }
             }
         }
 
         st.snapshot = Some(sanitize_boot_snapshot(snap));
         st.updated_at = Some(Instant::now());
+        self.ready_cv.notify_all();
     }
 }
 
@@ -433,6 +445,32 @@ pub struct McpServer {
     panel_html_path: PathBuf,
     html_cache: Arc<Mutex<HtmlCache>>,
     swr_cache: Arc<SwrBootCache>,
+    client_supports_apps: AtomicBool,
+}
+
+fn supports_apps(capabilities: &Value) -> bool {
+    let has_app_mime = |ext: &Value| {
+        ext.get("mimeTypes")
+            .and_then(Value::as_array)
+            .is_some_and(|types| types.iter().any(|mime| mime == APP_MIME))
+    };
+    let sep_1865 = has_app_mime(&capabilities["extensions"][APPS_EXTENSION])
+        || has_app_mime(&capabilities["experimental"][APPS_EXTENSION]);
+    // Legacy vendor hosts may advertise UI via explicit vendor/ui capabilities.
+    sep_1865
+        || [
+            &capabilities["extensions"]["com.google.antigravity/ui"],
+            &capabilities["ui"],
+        ]
+        .into_iter()
+        .any(|cap| cap.is_object() || cap.as_bool() == Some(true))
+}
+
+fn is_app_only_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "chrome_stream_frame" | "chrome_stream_input" | "chrome_stream_launch_remote"
+    )
 }
 
 impl McpServer {
@@ -443,6 +481,7 @@ impl McpServer {
             panel_html_path,
             html_cache: Arc::new(Mutex::new(HtmlCache::default())),
             swr_cache,
+            client_supports_apps: AtomicBool::new(false),
         })
     }
 
@@ -482,23 +521,25 @@ impl McpServer {
         let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
 
         // JSON-RPC notifications have no `id` and expect no reply.
-        let Some(req_id) = id else {
-            return None;
-        };
+        let req_id = id?;
 
         let result = match method {
             "initialize" => {
                 let ver = params
                     .get("protocolVersion")
                     .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+                    .filter(|version| SUPPORTED_PROTOCOL_VERSIONS.contains(version))
+                    .unwrap_or(LATEST_PROTOCOL_VERSION);
+                let client_supports_apps = supports_apps(&params["capabilities"]);
+                self.client_supports_apps
+                    .store(client_supports_apps, Ordering::Relaxed);
+                let mut capabilities = json!({ "tools": {}, "resources": {} });
+                if client_supports_apps {
+                    capabilities["extensions"] = json!({ (APPS_EXTENSION): {} });
+                }
                 Ok(json!({
                     "protocolVersion": ver,
-                    "capabilities": {
-                        "tools": {},
-                        "resources": {}
-                    },
+                    "capabilities": capabilities,
                     "serverInfo": {
                         "name": "chrome-stream-mcp",
                         "version": APP_VERSION
@@ -520,19 +561,28 @@ impl McpServer {
                 }]
             })),
             "resources/read" => self.handle_read_resource(&params),
-            "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+            "tools/list" => Ok(json!({
+                "tools": tool_definitions(self.client_supports_apps.load(Ordering::Relaxed))
+            })),
             "tools/call" => {
                 let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let args = params
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                Ok(dispatch_tool_with_cache(
-                    &self.relay,
-                    Some(&self.swr_cache),
-                    name,
-                    args,
-                ))
+                if is_app_only_tool(name) && !self.client_supports_apps.load(Ordering::Relaxed) {
+                    Err((
+                        -32602,
+                        format!("Tool {name} requires MCP Apps UI capability"),
+                    ))
+                } else {
+                    let args = params
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    Ok(dispatch_tool_with_cache(
+                        &self.relay,
+                        Some(&self.swr_cache),
+                        name,
+                        args,
+                    ))
+                }
             }
             _ => Err((-32601, format!("Method not found: {method}"))),
         };
@@ -582,14 +632,21 @@ impl McpServer {
 
 pub fn run_stdio_server(cfg: &Config) -> Result<(), String> {
     let relay_client = RelayClient::from_config(cfg);
-    let server = McpServer::new(relay_client as Arc<dyn RelayBackend>, cfg.panel_html.clone());
+    let server = McpServer::new(
+        relay_client as Arc<dyn RelayBackend>,
+        cfg.panel_html.clone(),
+    );
 
     // Immediately pre-warm panel HTML, detached relay connection, Chrome readiness,
     // and SWR boot snapshot off the critical stdio startup path.
     server.prewarm_startup();
 
     let stdin = io::stdin();
-    run_stdio_loop(server, BufReader::new(stdin.lock()), BufWriter::new(io::stdout()))
+    run_stdio_loop(
+        server,
+        BufReader::new(stdin.lock()),
+        BufWriter::new(io::stdout()),
+    )
 }
 
 pub fn run_stdio_loop<R: BufRead, W: Write + Send + 'static>(
@@ -699,7 +756,33 @@ mod tests {
                     "portFile": { "exists": true, "valid": true, "port": 9222 },
                     "activeTargetId": "t2"
                 })),
+                "launch_remote" => Ok(json!({
+                    "ok": true,
+                    "connected": true,
+                    "connectionMode": "remote",
+                    "paused": false,
+                    "activeTargetId": "t1",
+                    "changed": true,
+                    "seq": 1,
+                    "frameHash": "still",
+                    "imageDataUrl": "data:image/webp;base64,QUFB",
+                    "imageBytes": 3,
+                    "crisp": true,
+                    "format": "webp",
+                    "qualityApplied": params["qualityPreset"],
+                })),
+                "disconnect" if params["mode"] == "standby" => Ok(json!({
+                    "ok": true,
+                    "connected": true,
+                    "connectionMode": "remote",
+                    "paused": true,
+                    "standby": true,
+                    "mode": "standby",
+                    "pauseEpoch": 1,
+                })),
                 "poll_frame" => {
+                    assert_eq!(params["qualityPreset"], "auto");
+                    let rtt_ms = params["rttMs"].as_f64().unwrap();
                     if self.poll_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                         Err("No target with given id found".into())
                     } else {
@@ -712,18 +795,188 @@ mod tests {
                             "seq": 4,
                             "imageDataUrl": "data:image/jpeg;base64,QUFB",
                             "imageBytes": 3,
-                            "qualityApplied": params["qualityPreset"],
+                            "qualityApplied": crate::stream::profiles::resolve_profile("auto", rtt_ms).name,
                         }))
                     }
                 }
+                "input" if params["targetEpoch"] == 7 => Ok(json!({
+                    "ok": false,
+                    "staleTarget": true,
+                    "needsRefresh": true,
+                    "recoverable": true,
+                    "connected": true,
+                    "error": "The tab epoch changed. Refresh the panel before sending input again.",
+                    "epoch": 8,
+                })),
                 _ => Ok(json!({ "ok": true, "connected": true })),
             }
         }
     }
 
     #[test]
+    fn mcp_negotiates_only_supported_protocol_versions() {
+        let server = McpServer::new(
+            Arc::new(DummyRelay {
+                delay_ms: 0,
+                poll_attempts: AtomicUsize::new(0),
+            }),
+            PathBuf::new(),
+        );
+        for (requested, expected) in [
+            ("2025-11-25", "2025-11-25"),
+            ("2025-06-18", "2025-06-18"),
+            ("2025-03-26", "2025-11-25"),
+            ("2024-11-05", "2025-11-25"),
+            ("2099-01-01", "2025-11-25"),
+            ("", "2025-11-25"),
+        ] {
+            let reply = server
+                .handle_message(&json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": { "protocolVersion": requested },
+                }))
+                .unwrap();
+            assert_eq!(reply["result"]["protocolVersion"], expected);
+        }
+    }
+
+    #[test]
+    fn mcp_lists_app_only_tools_for_clients_that_advertise_apps() {
+        let server = McpServer::new(
+            Arc::new(DummyRelay {
+                delay_ms: 0,
+                poll_attempts: AtomicUsize::new(0),
+            }),
+            PathBuf::new(),
+        );
+        let list_tools = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        assert_eq!(
+            server.handle_message(&list_tools).unwrap()["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        for (capabilities, apps) in [
+            (
+                json!({ "extensions": { (APPS_EXTENSION): { "mimeTypes": [APP_MIME, "text/plain"] } } }),
+                true,
+            ),
+            (
+                json!({ "experimental": { (APPS_EXTENSION): { "mimeTypes": [APP_MIME] } } }),
+                true,
+            ),
+            (
+                json!({ "extensions": { "com.google.antigravity/ui": {} } }),
+                true,
+            ),
+            (json!({ "ui": {} }), true),
+            (json!({}), false),
+            (json!({ "extensions": { (APPS_EXTENSION): {} } }), false),
+            (json!({ "experimental": { (APPS_EXTENSION): {} } }), false),
+            (json!({ "extensions": { (APPS_EXTENSION): null } }), false),
+            (
+                json!({ "extensions": { (APPS_EXTENSION): { "mimeTypes": ["text/html"] } } }),
+                false,
+            ),
+        ] {
+            let reply = server
+                .handle_message(&json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": { "protocolVersion": "2025-11-25", "capabilities": capabilities },
+                }))
+                .unwrap();
+            let extension = reply["result"]["capabilities"]["extensions"].get(APPS_EXTENSION);
+            assert_eq!(extension, apps.then(|| json!({})).as_ref());
+
+            let listing = server.handle_message(&list_tools).unwrap();
+            let tools = listing["result"]["tools"].as_array().unwrap();
+            let names: Vec<_> = tools
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            if apps {
+                assert_eq!(
+                    names,
+                    [
+                        "chrome_stream_stage",
+                        "chrome_stream_connect",
+                        "chrome_stream_frame",
+                        "chrome_stream_input",
+                        "chrome_stream_disconnect",
+                        "chrome_stream_launch_remote",
+                    ]
+                );
+                assert_eq!(
+                    tools[3]["inputSchema"]["properties"]["targetEpoch"]["type"],
+                    "integer"
+                );
+                assert_eq!(tools[3]["inputSchema"]["required"], json!(["events"]));
+                assert_eq!(tools[5]["_meta"]["ui"]["visibility"], json!(["app"]));
+                assert_eq!(
+                    tools[1]["inputSchema"]["properties"]["mode"]["enum"],
+                    json!(["auto", "personal", "remote"])
+                );
+                assert_eq!(
+                    tools[4]["inputSchema"]["properties"]["mode"]["default"],
+                    "revoke"
+                );
+            } else {
+                assert_eq!(
+                    names,
+                    [
+                        "chrome_stream_stage",
+                        "chrome_stream_connect",
+                        "chrome_stream_disconnect"
+                    ]
+                );
+            }
+        }
+
+        // Plain session (last iteration had apps=false) MUST reject app-only tools in tools/call.
+        for blocked in [
+            "chrome_stream_frame",
+            "chrome_stream_input",
+            "chrome_stream_launch_remote",
+        ] {
+            let err_reply = server
+                .handle_message(&json!({
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": { "name": blocked, "arguments": {} },
+                }))
+                .unwrap();
+            assert_eq!(err_reply["error"]["code"], -32602);
+        }
+
+        // Re-initialize with SEP-1865 Apps mimeTypes so app-only tools succeed.
+        server.handle_message(&json!({
+            "jsonrpc": "2.0", "id": 4, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": { "extensions": { (APPS_EXTENSION): { "mimeTypes": [APP_MIME] } } },
+            },
+        }));
+        let input_reply = server
+            .handle_message(&json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": {
+                    "name": "chrome_stream_input",
+                    "arguments": { "targetId": "t1", "targetEpoch": 7, "events": [{ "action": "click" }] },
+                },
+            }))
+            .unwrap();
+        let result = &input_reply["result"]["structuredContent"];
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["staleTarget"], true);
+        assert_eq!(result["epoch"], 8);
+        assert_eq!(input_reply["result"]["content"][0]["text"], result["error"]);
+    }
+
+    #[test]
     fn mcp_stdio_initialize_resources_and_tools_end_to_end() {
-        let dir = std::env::temp_dir().join(format!("chrome-stream-mcp-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chrome-stream-mcp-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let html_path = dir.join("panel.html");
         fs::write(
@@ -733,11 +986,17 @@ mod tests {
         .unwrap();
 
         let srv = McpServer::new(
-            Arc::new(DummyRelay { delay_ms: 0, poll_attempts: AtomicUsize::new(0) }),
+            Arc::new(DummyRelay {
+                delay_ms: 0,
+                poll_attempts: AtomicUsize::new(0),
+            }),
             html_path,
         );
         let input = [
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "extensions": { (APPS_EXTENSION): { "mimeTypes": [APP_MIME] } } }
+            } }).to_string(),
             json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
             json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }).to_string(),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": STAGE_URI } }).to_string(),
@@ -760,8 +1019,12 @@ mod tests {
             }
         }
 
-        run_stdio_loop(srv, Cursor::new(input.into_bytes()), SharedVec(Arc::clone(&out_buf)))
-            .unwrap();
+        run_stdio_loop(
+            srv,
+            Cursor::new(input.into_bytes()),
+            SharedVec(Arc::clone(&out_buf)),
+        )
+        .unwrap();
 
         let raw = String::from_utf8(out_buf.lock().unwrap().clone()).unwrap();
         let responses: Vec<Value> = raw
@@ -795,19 +1058,30 @@ mod tests {
                 "chrome_stream_frame",
                 "chrome_stream_input",
                 "chrome_stream_disconnect",
+                "chrome_stream_launch_remote",
             ]
         );
         for tool in tools {
             let desc = tool["description"].as_str().unwrap();
-            assert!(desc.is_ascii(), "tool description must be clean English ASCII: {desc}");
+            assert!(
+                desc.is_ascii(),
+                "tool description must be clean English ASCII: {desc}"
+            );
         }
 
         let r5 = responses.iter().find(|r| r["id"] == 5).unwrap();
         assert_eq!(r5["result"]["structuredContent"]["connected"], true);
         assert_eq!(r5["result"]["structuredContent"]["hostname"], "localhost");
-        assert!(r5["result"]["structuredContent"]["portFile"].get("path").is_none());
-        assert!(r5["result"]["structuredContent"]["portFile"].get("wsUrl").is_none());
-        assert!(!r5["result"]["content"][0]["text"].as_str().unwrap().contains("private-laptop"));
+        assert!(r5["result"]["structuredContent"]["portFile"]
+            .get("path")
+            .is_none());
+        assert!(r5["result"]["structuredContent"]["portFile"]
+            .get("wsUrl")
+            .is_none());
+        assert!(!r5["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("private-laptop"));
 
         let r6 = responses.iter().find(|r| r["id"] == 6).unwrap();
         let fsc = &r6["result"]["structuredContent"];
@@ -818,7 +1092,10 @@ mod tests {
 
         // Verify handle_input measures and returns serverMs even when relay omits it
         let in_resp = dispatch_tool_with_cache(
-            &(Arc::new(DummyRelay { delay_ms: 0, poll_attempts: AtomicUsize::new(0) }) as Arc<dyn RelayBackend>),
+            &(Arc::new(DummyRelay {
+                delay_ms: 0,
+                poll_attempts: AtomicUsize::new(0),
+            }) as Arc<dyn RelayBackend>),
             None,
             "chrome_stream_input",
             json!({ "events": [{ "action": "click", "x": 10, "y": 20 }] }),
@@ -829,8 +1106,56 @@ mod tests {
     }
 
     #[test]
+    fn swr_preserves_remote_metadata_and_crisp_pixels_through_standby() {
+        let relay: Arc<dyn RelayBackend> = Arc::new(DummyRelay {
+            delay_ms: 0,
+            poll_attempts: AtomicUsize::new(0),
+        });
+        let cache = SwrBootCache::new(Arc::clone(&relay));
+        let launched = dispatch_tool_with_cache(
+            &relay,
+            Some(&cache),
+            "chrome_stream_launch_remote",
+            json!({ "qualityPreset": "high", "rttMs": 700 }),
+        );
+        assert_eq!(launched["structuredContent"]["connectionMode"], "remote");
+        assert_eq!(
+            cache.get_swr(Duration::ZERO).unwrap()["qualityApplied"],
+            "high"
+        );
+
+        cache.update_from_tool_result(&json!({
+            "connected": true, "connectionMode": "remote", "activeTargetId": "t1",
+            "unchanged": true, "changed": false, "crisp": true, "format": "webp",
+            "seq": 1, "frameHash": "still", "imageBytes": 0, "imageDataUrl": "",
+        }));
+        let standby = dispatch_tool_with_cache(
+            &relay,
+            Some(&cache),
+            "chrome_stream_disconnect",
+            json!({ "mode": "standby" }),
+        );
+        assert_eq!(standby["structuredContent"]["connected"], true);
+        let snapshot = cache.get_swr(Duration::ZERO).unwrap();
+        assert_eq!(snapshot["connectionMode"], "remote");
+        assert_eq!(snapshot["paused"], true);
+        assert_eq!(snapshot["pauseEpoch"], 1);
+        assert_eq!(snapshot["crisp"], true);
+        assert_eq!(snapshot["format"], "webp");
+        assert_eq!(snapshot["imageDataUrl"], "data:image/webp;base64,QUFB");
+
+        cache.update_from_tool_result(&json!({ "connected": false, "mode": "revoke" }));
+        let snapshot = cache.get_swr(Duration::ZERO).unwrap();
+        assert!(snapshot["connectionMode"].is_null());
+        assert_eq!(snapshot["crisp"], false);
+        assert!(snapshot["format"].is_null());
+        assert_eq!(snapshot["imageDataUrl"], "");
+    }
+
+    #[test]
     fn swr_prewarm_returns_resources_read_and_stage_sub_millisecond() {
-        let dir = std::env::temp_dir().join(format!("chrome-stream-swr-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("chrome-stream-swr-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let html_path = dir.join("panel.html");
         fs::write(
@@ -840,7 +1165,10 @@ mod tests {
         .unwrap();
 
         let srv = McpServer::new(
-            Arc::new(DummyRelay { delay_ms: 60, poll_attempts: AtomicUsize::new(0) }),
+            Arc::new(DummyRelay {
+                delay_ms: 60,
+                poll_attempts: AtomicUsize::new(0),
+            }),
             html_path,
         );
         srv.prewarm_startup();
@@ -867,10 +1195,16 @@ mod tests {
             .unwrap();
         let stage_us = t1.elapsed().as_micros();
 
-        assert!(r_res["result"]["contents"][0]["text"].as_str().unwrap().contains("window.__CHROME_STREAM_BOOT__="));
+        assert!(r_res["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("window.__CHROME_STREAM_BOOT__="));
         assert_eq!(s_res["result"]["structuredContent"]["connected"], true);
         assert!(read_us < 10_000, "warm resources/read took {read_us}us");
-        assert!(stage_us < 10_000, "warm chrome_stream_stage took {stage_us}us");
+        assert!(
+            stage_us < 10_000,
+            "warm chrome_stream_stage took {stage_us}us"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

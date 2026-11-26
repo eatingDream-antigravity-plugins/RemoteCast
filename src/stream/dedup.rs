@@ -19,9 +19,9 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut w = [0u32; 80];
-    for chunk in padded.chunks_exact(64) {
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+    for chunk in padded.as_chunks::<64>().0 {
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..80 {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
@@ -76,7 +76,7 @@ pub fn base64url_no_pad(input: &[u8]) -> String {
 }
 
 fn encode_b64_with(input: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= input.len() {
         let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
@@ -311,7 +311,10 @@ mod tests {
     fn sha1_and_frame_tab_hashing_deduplicates_reliably() {
         // RFC 6455 Section 1.3 handshake accept vector & NIST empty string
         let combined = b"dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-        assert_eq!(base64_encode(&sha1(combined)), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(
+            base64_encode(&sha1(combined)),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
         let empty = sha1(b"");
         let hex: String = empty.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
@@ -334,25 +337,55 @@ mod tests {
 
     #[test]
     fn error_classification_and_url_normalization() {
-        assert!(is_target_gone_error("No target with given id found", Some(-32000)));
-        assert!(is_target_gone_error("Session with given id not found", Some(-32001)));
+        assert!(is_target_gone_error(
+            "No target with given id found",
+            Some(-32000)
+        ));
+        assert!(is_target_gone_error(
+            "Session with given id not found",
+            Some(-32001)
+        ));
         assert!(!is_target_gone_error("Chrome CDP connection closed", None));
         assert!(is_disconnected_error("Chrome CDP connection closed"));
 
-        assert_eq!(normalize_url("example.com/docs"), "https://example.com/docs");
-        assert_eq!(normalize_url("example.com:8443/app"), "https://example.com:8443/app");
+        assert_eq!(
+            normalize_url("example.com/docs"),
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            normalize_url("example.com:8443/app"),
+            "https://example.com:8443/app"
+        );
         assert_eq!(normalize_url("localhost"), "http://localhost");
         assert_eq!(normalize_url("localhost:3000"), "http://localhost:3000");
-        assert_eq!(normalize_url("localhost:3000/api?x=1"), "http://localhost:3000/api?x=1");
-        assert_eq!(normalize_url("dev.localhost:5173"), "http://dev.localhost:5173");
+        assert_eq!(
+            normalize_url("localhost:3000/api?x=1"),
+            "http://localhost:3000/api?x=1"
+        );
+        assert_eq!(
+            normalize_url("dev.localhost:5173"),
+            "http://dev.localhost:5173"
+        );
         assert_eq!(normalize_url("127.0.0.1"), "http://127.0.0.1");
-        assert_eq!(normalize_url("127.0.0.1:8080/health"), "http://127.0.0.1:8080/health");
+        assert_eq!(
+            normalize_url("127.0.0.1:8080/health"),
+            "http://127.0.0.1:8080/health"
+        );
         assert_eq!(normalize_url("[::1]"), "http://[::1]");
         assert_eq!(normalize_url("[::1]:5173/ui"), "http://[::1]:5173/ui");
         assert_eq!(normalize_url("192.0.2.10"), "http://192.0.2.10");
-        assert_eq!(normalize_url("203.0.113.5:8080/status"), "http://203.0.113.5:8080/status");
-        assert_eq!(normalize_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
-        assert_eq!(normalize_url("chrome://inspect/#remote-debugging"), "chrome://inspect/#remote-debugging");
+        assert_eq!(
+            normalize_url("203.0.113.5:8080/status"),
+            "http://203.0.113.5:8080/status"
+        );
+        assert_eq!(
+            normalize_url("http://127.0.0.1:8080"),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            normalize_url("chrome://inspect/#remote-debugging"),
+            "chrome://inspect/#remote-debugging"
+        );
         assert_eq!(
             normalize_url("rust cdp"),
             "https://www.google.com/search?q=rust%20cdp"

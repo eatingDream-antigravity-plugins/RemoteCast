@@ -1,11 +1,8 @@
 use crate::cdp::capture::{self, FramePipeline};
-use crate::cdp::discovery::{
-    discover_port_file, probe_debug_port_ws_url, resolve_ws_url_candidates, PortFileStatus,
-};
+use crate::cdp::discovery::{discover_port_file, probe_debug_port_ws_url, PortFileStatus};
 use crate::cdp::input::InputDispatcher;
-use crate::cdp::protocol::{
-    default_ws_factory, CdpTransport, TransportEvent, TransportFactory,
-};
+use crate::cdp::launcher;
+use crate::cdp::protocol::{default_ws_factory, CdpTransport, TransportEvent, TransportFactory};
 use crate::cdp::targets::{self, TabStateStore};
 use crate::i18n::{chrome_not_found_error, current_lang};
 use crate::stream::dedup::{hash_tabs, is_target_gone_error};
@@ -14,7 +11,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
@@ -61,18 +58,17 @@ impl std::fmt::Display for CdpError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct FrameRecord {
     pub seq: u64,
-    pub epoch: u64,
     pub target_id: String,
     pub hash: String,
     pub image_data_url: String,
     pub image_bytes: usize,
+    pub crisp: bool,
+    pub format: String,
     pub viewport_width: u32,
     pub viewport_height: u32,
-    pub captured_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +114,8 @@ fn default_wait_ms() -> u64 {
 #[serde(rename_all = "camelCase")]
 pub struct InputBatchParams {
     pub target_id: Option<String>,
+    #[serde(rename = "targetEpoch")]
+    pub target_epoch: Option<u64>,
     #[serde(default)]
     pub events: Vec<InputEvent>,
 }
@@ -165,9 +163,18 @@ struct PendingCall {
     method: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ConnectionMode {
+    Personal,
+    Remote,
+}
+
 struct TransportState {
     transport: Option<Arc<dyn CdpTransport>>,
     connecting: bool,
+    connection_mode: Option<ConnectionMode>,
+    connect_generation: u64,
     last_keepalive_at: Instant,
 }
 
@@ -176,12 +183,21 @@ impl TransportState {
         Self {
             transport: None,
             connecting: false,
+            connection_mode: None,
+            connect_generation: 0,
             last_keepalive_at: Instant::now(),
         }
     }
 
+    fn connection_mode(&self) -> Option<ConnectionMode> {
+        self.connection_mode.filter(|_| self.is_open())
+    }
+
     fn is_open(&self) -> bool {
-        self.transport.as_ref().map(|t| t.is_open()).unwrap_or(false)
+        self.transport
+            .as_ref()
+            .map(|t| t.is_open())
+            .unwrap_or(false)
     }
 }
 
@@ -196,10 +212,12 @@ pub struct CdpClient {
     transport_state: Mutex<TransportState>,
     pub(crate) tabs: Mutex<TabStateStore>,
     pub(crate) capture: Mutex<FramePipeline>,
+    pub(crate) screencast_lock: Mutex<()>,
     pending: Mutex<HashMap<u64, PendingCall>>,
     next_id: AtomicU64,
     frame_notify: (Mutex<u64>, Condvar),
     fallback_port_ready: AtomicBool,
+    warming: AtomicBool,
     disposed: AtomicBool,
 }
 
@@ -213,6 +231,7 @@ impl CdpClient {
         Self::new_with_candidates(vec![port_file], debug_port)
     }
 
+    #[cfg(test)]
     pub fn with_factory(
         port_file: PathBuf,
         debug_port: u16,
@@ -245,10 +264,12 @@ impl CdpClient {
             transport_state: Mutex::new(TransportState::new()),
             tabs: Mutex::new(TabStateStore::new()),
             capture: Mutex::new(FramePipeline::new()),
+            screencast_lock: Mutex::new(()),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             frame_notify: (Mutex::new(0), Condvar::new()),
             fallback_port_ready: AtomicBool::new(false),
+            warming: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
         });
 
@@ -256,15 +277,13 @@ impl CdpClient {
             let weak = Arc::downgrade(&client);
             let _ = thread::Builder::new()
                 .name("chrome-stream-keepalive".to_string())
-                .spawn(move || {
-                    loop {
-                        thread::sleep(Duration::from_secs(2));
-                        let Some(c) = weak.upgrade() else { break };
-                        if c.disposed.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        c.keepalive_tick();
+                .spawn(move || loop {
+                    thread::sleep(Duration::from_secs(2));
+                    let Some(c) = weak.upgrade() else { break };
+                    if c.disposed.load(Ordering::SeqCst) {
+                        break;
                     }
+                    c.keepalive_tick();
                 });
         }
 
@@ -281,14 +300,20 @@ impl CdpClient {
         let need_ping = {
             let mut tr = self.transport_state.lock().unwrap();
             let now = Instant::now();
-            let ping = tr.is_open() && now.duration_since(tr.last_keepalive_at) >= KEEPALIVE_INTERVAL;
+            let ping =
+                tr.is_open() && now.duration_since(tr.last_keepalive_at) >= KEEPALIVE_INTERVAL;
             if ping {
                 tr.last_keepalive_at = now;
             }
             ping
         };
         if need_ping {
-            let _ = self.send_cdp("Browser.getVersion", json!({}), None, Duration::from_secs(5));
+            let _ = self.send_cdp(
+                "Browser.getVersion",
+                json!({}),
+                None,
+                Duration::from_secs(5),
+            );
         }
         capture::check_idle_screencast_stop(self);
     }
@@ -331,6 +356,13 @@ impl CdpClient {
         self.transport_state.lock().unwrap().is_open()
     }
 
+    pub fn connection_mode(&self) -> Option<&'static str> {
+        match self.transport_state.lock().unwrap().connection_mode()? {
+            ConnectionMode::Personal => Some("personal"),
+            ConnectionMode::Remote => Some("remote"),
+        }
+    }
+
     pub fn is_connecting(&self) -> bool {
         self.transport_state.lock().unwrap().connecting
     }
@@ -357,7 +389,8 @@ impl CdpClient {
     #[cfg(test)]
     pub fn rewind_screencast_started_at(&self, age: Duration) {
         let mut cap = self.capture.lock().unwrap();
-        cap.screencast_started_at = Some(Instant::now().checked_sub(age).unwrap_or_else(Instant::now));
+        cap.screencast_started_at =
+            Some(Instant::now().checked_sub(age).unwrap_or_else(Instant::now));
     }
 
     pub fn pause(self: &Arc<Self>) {
@@ -420,9 +453,9 @@ impl CdpClient {
             .get("valid")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let (connected, connecting) = {
+        let (connected, connecting, connection_mode) = {
             let tr = self.transport_state.lock().unwrap();
-            (tr.is_open(), tr.connecting)
+            (tr.is_open(), tr.connecting, tr.connection_mode())
         };
         let (paused, pause_epoch, no_tabs, active_tid, dialog, epoch) = {
             let ts = self.tabs.lock().unwrap();
@@ -453,6 +486,7 @@ impl CdpClient {
             "hostname": "localhost",
             "locale": current_lang().as_str(),
             "connected": connected,
+            "connectionMode": connection_mode,
             "connecting": connecting,
             "paused": paused,
             "pauseEpoch": pause_epoch,
@@ -481,7 +515,8 @@ impl CdpClient {
         quality_preset: Option<&str>,
         rtt_ms: f64,
     ) -> Value {
-        let connected = self.is_connected();
+        let connection_mode = self.connection_mode();
+        let connected = connection_mode.is_some();
         let (paused, pause_epoch, tabs, active_tid, epoch, dialog) = {
             let ts = self.tabs.lock().unwrap();
             (
@@ -501,14 +536,12 @@ impl CdpClient {
                 },
             )
         };
-        let (idle_paused, frame, profile, has_active_sc) = {
+        let (idle_paused, frame, crisp, profile, has_active_sc) = {
             let cap = self.capture.lock().unwrap();
             let f = if connected {
                 cap.latest_frame.as_ref().and_then(|f| {
-                    if active_tid.as_deref() == Some(f.target_id.as_str())
-                        && f.image_data_url.len() < BOOT_SNAPSHOT_MAX_DATA_URL_CHARS
-                    {
-                        Some(f.clone())
+                    if active_tid.as_deref() == Some(f.target_id.as_str()) {
+                        Some(Arc::clone(f))
                     } else {
                         None
                     }
@@ -519,6 +552,7 @@ impl CdpClient {
             (
                 connected && cap.screencast_idle_paused,
                 f,
+                cap.latest_frame_is_crisp(),
                 cap.screencast_profile
                     .clone()
                     .unwrap_or_else(|| "low".into()),
@@ -528,13 +562,12 @@ impl CdpClient {
 
         // Only warm on cold start when NO screencast is active; never downgrade an active stream!
         if connected && !paused && !idle_paused && !tabs.is_empty() && !has_active_sc {
-            let c = Arc::clone(self);
-            let qp = quality_preset.map(String::from);
-            let _ = thread::spawn(move || {
-                c.warm_active_tab(qp.as_deref(), rtt_ms);
-            });
+            self.warm_in_background(quality_preset.map(String::from), rtt_ms);
         }
 
+        let embedded_frame = frame
+            .as_ref()
+            .filter(|f| f.image_data_url.len() <= BOOT_SNAPSHOT_MAX_DATA_URL_CHARS);
         let tab_meta = active_tid
             .as_deref()
             .and_then(|id| tabs.iter().find(|t| t.target_id == id));
@@ -551,6 +584,7 @@ impl CdpClient {
             "hostname": "localhost",
             "locale": current_lang().as_str(),
             "connected": connected,
+            "connectionMode": connection_mode,
             "connecting": self.is_connecting(),
             "paused": paused,
             "pauseEpoch": pause_epoch,
@@ -569,12 +603,14 @@ impl CdpClient {
                 "viewportWidth": frame.as_ref().map(|f| f.viewport_width).unwrap_or(1280),
                 "viewportHeight": frame.as_ref().map(|f| f.viewport_height).unwrap_or(800),
             },
-            "changed": frame.is_some(),
-            "unchanged": frame.is_none(),
-            "seq": frame.as_ref().map(|f| f.seq).unwrap_or(0),
-            "frameHash": frame.as_ref().map(|f| f.hash.as_str()).unwrap_or(""),
-            "imageDataUrl": frame.as_ref().map(|f| f.image_data_url.as_str()).unwrap_or(""),
-            "imageBytes": frame.as_ref().map(|f| f.image_bytes).unwrap_or(0),
+            "changed": embedded_frame.is_some(),
+            "unchanged": embedded_frame.is_none(),
+            "seq": embedded_frame.map(|f| f.seq).unwrap_or(0),
+            "frameHash": embedded_frame.map(|f| f.hash.as_str()).unwrap_or(""),
+            "imageDataUrl": embedded_frame.map(|f| f.image_data_url.as_str()).unwrap_or(""),
+            "imageBytes": embedded_frame.map(|f| f.image_bytes).unwrap_or(0),
+            "crisp": frame.is_some() && crisp,
+            "format": frame.as_ref().map(|f| f.format.as_str()),
             "qualityApplied": profile,
             "relayVersion": relay_version,
             "relayPid": relay_pid,
@@ -594,6 +630,7 @@ impl CdpClient {
         since_seq: u64,
         timeout: Duration,
         expected_target_id: Option<&str>,
+        wait_for_settle: bool,
     ) {
         let deadline = Instant::now() + timeout;
         let (lock, cvar) = &self.frame_notify;
@@ -616,7 +653,8 @@ impl CdpClient {
                     }
                 }
             }
-            {
+            let now = Instant::now();
+            let next_wake = {
                 let cap = self.capture.lock().unwrap();
                 if cap.screencast_idle_paused {
                     return;
@@ -629,17 +667,19 @@ impl CdpClient {
                         return;
                     }
                 }
-            }
-            let now = Instant::now();
-            if now >= deadline {
+                if wait_for_settle {
+                    expected_target_id
+                        .and_then(|target_id| cap.settle_deadline(target_id))
+                        .map_or(deadline, |settle_at| deadline.min(settle_at))
+                } else {
+                    deadline
+                }
+            };
+            if now >= next_wake {
                 return;
             }
-            let wait = deadline.saturating_duration_since(now);
-            let (next_gen, res) = cvar.wait_timeout(gen, wait).unwrap();
+            let (next_gen, _) = cvar.wait_timeout(gen, next_wake - now).unwrap();
             gen = next_gen;
-            if res.timed_out() {
-                return;
-            }
         }
     }
 
@@ -654,16 +694,23 @@ impl CdpClient {
     pub fn disconnect(&self) {
         let old_transport = {
             let mut tr = self.transport_state.lock().unwrap();
+            tr.connect_generation += 1;
             tr.connecting = false;
-            tr.transport.take()
+            let old = tr.transport.take();
+            tr.connection_mode = None;
+            self.reset_connection_state(old.is_some());
+            old
         };
-        self.tabs.lock().unwrap().reset_on_disconnect();
-        self.capture.lock().unwrap().reset_on_disconnect();
-        self.fail_all_pending("Chrome CDP connection closed");
         self.notify_frame_waiters();
         if let Some(t) = old_transport {
             t.close();
         }
+    }
+
+    fn reset_connection_state(&self, had_transport: bool) {
+        self.tabs.lock().unwrap().reset_on_disconnect(had_transport);
+        self.capture.lock().unwrap().reset_on_disconnect();
+        self.fail_all_pending("Chrome CDP connection closed");
     }
 
     fn fail_all_pending(&self, reason: &str) {
@@ -679,78 +726,166 @@ impl CdpClient {
     /// Explicitly establishes a CDP WebSocket connection to Chrome.
     /// ONLY invoked by explicit `connect` RPC (never by background polls or input batches).
     pub fn ensure_connected(self: &Arc<Self>) -> Result<(), CdpError> {
-        if self.is_connected() {
-            self.capture.lock().unwrap().notify_activity();
-            return Ok(());
-        }
+        self.ensure_connected_with_mode("auto")
+    }
+
+    pub fn ensure_connected_with_mode(self: &Arc<Self>, mode: &str) -> Result<(), CdpError> {
+        let requested = match mode {
+            "auto" => None,
+            "personal" => Some(ConnectionMode::Personal),
+            "remote" => Some(ConnectionMode::Remote),
+            _ => {
+                return Err(CdpError::new(
+                    "Invalid connect mode. Expected auto, personal, or remote.",
+                ))
+            }
+        };
+        self.connect(requested, None)
+    }
+
+    pub fn launch_remote(self: &Arc<Self>, data_dir: &Path) -> Result<(), CdpError> {
+        self.connect(Some(ConnectionMode::Remote), Some(data_dir))
+    }
+
+    fn connect(
+        self: &Arc<Self>,
+        requested: Option<ConnectionMode>,
+        launch_dir: Option<&Path>,
+    ) -> Result<(), CdpError> {
         let _connect_guard = self.connect_lock.lock().unwrap();
-        if self.is_connected() {
-            self.capture.lock().unwrap().notify_activity();
-            return Ok(());
+        let cancelled = || CdpError::new("CDP connection cancelled by disconnect");
+        let discovery_generation = {
+            let mut tr = self.transport_state.lock().unwrap();
+            if self.disposed.load(Ordering::SeqCst) {
+                return Err(cancelled());
+            }
+            if tr.is_open() && requested.is_none_or(|mode| tr.connection_mode == Some(mode)) {
+                self.capture.lock().unwrap().notify_activity();
+                return Ok(());
+            }
+            tr.connecting = true;
+            tr.connect_generation
+        };
+
+        let endpoint = self.resolve_endpoint(requested, launch_dir);
+        let (generation, old_transport, url, mode) = {
+            let mut tr = self.transport_state.lock().unwrap();
+            if tr.connect_generation != discovery_generation || self.disposed.load(Ordering::SeqCst)
+            {
+                return Err(cancelled());
+            }
+            let (url, mode) = match endpoint {
+                Ok(endpoint) => endpoint,
+                Err(err) => {
+                    tr.connecting = false;
+                    return Err(err);
+                }
+            };
+            let old = tr.transport.take();
+            tr.connection_mode = None;
+            if old.is_some() {
+                self.reset_connection_state(true);
+            }
+            tr.connect_generation += 1;
+            (tr.connect_generation, old, url, mode)
+        };
+        if let Some(old) = old_transport {
+            old.close();
+            self.notify_frame_waiters();
         }
-
-        let ws_url = self
-            .ws_url_override
-            .clone()
-            .or_else(|| resolve_ws_url_candidates(&self.port_files, self.debug_port))
-            .ok_or_else(|| CdpError::new(chrome_not_found_error(current_lang())))?;
-
-        self.transport_state.lock().unwrap().connecting = true;
 
         let weak = Arc::downgrade(self);
         let on_event = Arc::new(move |ev: TransportEvent| {
             let Some(client) = weak.upgrade() else { return };
             match ev {
-                TransportEvent::Text(raw) => client.handle_incoming_message(&raw),
-                TransportEvent::Closed => client.handle_transport_closed(),
+                TransportEvent::Text(raw) => client.handle_incoming_message(generation, &raw),
+                TransportEvent::Closed => client.handle_transport_closed(generation),
             }
         });
 
-        let connect_res = (self.ws_factory)(&ws_url, CONNECT_TIMEOUT, on_event);
-        match connect_res {
-            Ok(transport) => {
-                {
-                    let mut tr = self.transport_state.lock().unwrap();
-                    tr.transport = Some(Arc::clone(&transport));
-                    tr.connecting = false;
-                    tr.last_keepalive_at = Instant::now();
-                }
-                self.tabs.lock().unwrap().set_paused(false);
-                self.capture.lock().unwrap().notify_activity();
-                // Subscribe to target lifecycle events so external tab closures & popups sync immediately
-                self.send_no_wait("Target.setDiscoverTargets", json!({ "discover": true }), None);
-                Ok(())
-            }
-            Err(msg) => {
-                self.transport_state.lock().unwrap().connecting = false;
-                Err(CdpError::new(msg))
-            }
-        }
-    }
-
-    fn handle_transport_closed(&self) {
-        let should_clean = {
+        let connect_res = (self.ws_factory)(&url, CONNECT_TIMEOUT, on_event).map_err(CdpError::new);
+        let transport = {
             let mut tr = self.transport_state.lock().unwrap();
-            if !tr.is_open() {
-                tr.transport = None;
-                tr.connecting = false;
-                true
-            } else {
-                false
+            if tr.connect_generation != generation || self.disposed.load(Ordering::SeqCst) {
+                drop(tr);
+                if let Ok(late) = connect_res {
+                    late.close();
+                }
+                return Err(cancelled());
             }
+            tr.connecting = false;
+            let transport = connect_res?;
+            tr.transport = Some(Arc::clone(&transport));
+            tr.connection_mode = Some(mode);
+            if mode == ConnectionMode::Remote {
+                self.fallback_port_ready.store(true, Ordering::Relaxed);
+            }
+            tr.last_keepalive_at = Instant::now();
+            self.tabs.lock().unwrap().set_paused(false);
+            self.capture.lock().unwrap().notify_activity();
+            transport
         };
-        if should_clean {
-            self.tabs.lock().unwrap().reset_on_disconnect();
-            self.capture.lock().unwrap().reset_on_disconnect();
-            self.fail_all_pending("Chrome CDP connection closed");
-            self.notify_frame_waiters();
-        }
+        self.send_on_transport(
+            transport.as_ref(),
+            "Target.setDiscoverTargets",
+            json!({ "discover": true }),
+            None,
+        );
+        Ok(())
     }
 
-    fn handle_incoming_message(&self, raw: &str) {
+    fn resolve_endpoint(
+        &self,
+        requested: Option<ConnectionMode>,
+        launch_dir: Option<&Path>,
+    ) -> Result<(String, ConnectionMode), CdpError> {
+        if let Some(data_dir) = launch_dir {
+            let url = launcher::launch_remote(data_dir, self.debug_port).map_err(CdpError::new)?;
+            return Ok((url, ConnectionMode::Remote));
+        }
+        if let Some(url) = &self.ws_url_override {
+            return Ok((url.clone(), requested.unwrap_or(ConnectionMode::Personal)));
+        }
+        if requested != Some(ConnectionMode::Remote) {
+            if let Some(url) = self.port_file_status().ws_url {
+                return Ok((url, ConnectionMode::Personal));
+            }
+        }
+        if requested != Some(ConnectionMode::Personal) {
+            if let Some(url) = probe_debug_port_ws_url(self.debug_port) {
+                return Ok((url, ConnectionMode::Remote));
+            }
+        }
+        Err(CdpError::new(chrome_not_found_error(current_lang())))
+    }
+
+    fn handle_transport_closed(&self, generation: u64) {
+        {
+            let mut tr = self.transport_state.lock().unwrap();
+            if tr.connect_generation != generation {
+                return;
+            }
+            tr.connect_generation += 1;
+            tr.connecting = false;
+            let had_transport = tr.transport.take().is_some();
+            tr.connection_mode = None;
+            self.reset_connection_state(had_transport);
+        }
+        self.notify_frame_waiters();
+    }
+
+    fn handle_incoming_message(&self, generation: u64, raw: &str) {
         let Ok(msg) = serde_json::from_str::<Value>(raw) else {
             return;
         };
+
+        let tr = self.transport_state.lock().unwrap();
+        let Some(transport) = tr.transport.as_ref() else {
+            return;
+        };
+        if tr.connect_generation != generation || self.disposed.load(Ordering::SeqCst) {
+            return;
+        }
 
         if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
             let entry = { self.pending.lock().unwrap().remove(&id) };
@@ -778,27 +913,44 @@ impl CdpClient {
         let Some(method) = msg.get("method").and_then(|v| v.as_str()) else {
             return;
         };
+        let ack = (method == "Page.screencastFrame")
+            .then(|| {
+                Some((
+                    Arc::clone(transport),
+                    msg.get("sessionId")?.as_str()?,
+                    msg.pointer("/params/sessionId")?.as_i64()?,
+                ))
+            })
+            .flatten();
+        let wake = self.handle_target_event(method, &msg);
+        drop(tr);
+
+        if let Some((transport, session_id, frame_ack)) = ack {
+            self.send_on_transport(
+                transport.as_ref(),
+                "Page.screencastFrameAck",
+                json!({ "sessionId": frame_ack }),
+                Some(session_id),
+            );
+        }
+        if wake {
+            self.notify_frame_waiters();
+        }
+    }
+
+    fn handle_target_event(&self, method: &str, msg: &Value) -> bool {
         let params = msg.get("params");
 
         match method {
             "Page.screencastFrame" => {
-                let Some(p) = params else { return };
+                let Some(p) = params else { return false };
                 let sid = msg.get("sessionId").and_then(|v| v.as_str());
-                let ack_id = p.get("sessionId").and_then(|v| v.as_i64());
-                // Immediately ack Chrome so screencast never stalls
-                if let (Some(session_id), Some(frame_ack)) = (sid, ack_id) {
-                    self.send_no_wait(
-                        "Page.screencastFrameAck",
-                        json!({ "sessionId": frame_ack }),
-                        Some(session_id),
-                    );
-                }
 
                 let Some(data) = p.get("data").and_then(|v| v.as_str()) else {
-                    return;
+                    return false;
                 };
                 if data.is_empty() {
-                    return;
+                    return false;
                 }
                 let vw = p
                     .pointer("/metadata/deviceWidth")
@@ -813,35 +965,27 @@ impl CdpClient {
                     .filter(|&n| n > 0)
                     .unwrap_or(800);
 
-                let target_and_epoch = {
+                let target = {
                     let mut ts = self.tabs.lock().unwrap();
                     let tid = sid
                         .and_then(|s| ts.target_for_session(s))
                         .or_else(|| self.capture.lock().unwrap().screencast_target_id.clone());
-                    tid.and_then(|t| {
-                        if ts.active_target_id.as_deref() == Some(t.as_str())
-                            && !ts.is_recently_closed(&t)
-                        {
-                            Some((t, ts.tab_epoch))
-                        } else {
-                            None
-                        }
+                    tid.filter(|t| {
+                        !ts.paused
+                            && ts.active_target_id.as_deref() == Some(t.as_str())
+                            && !ts.is_recently_closed(t)
                     })
                 };
 
-                if let Some((tid, epoch)) = target_and_epoch {
-                    let committed = self
-                        .capture
+                target.is_some_and(|tid| {
+                    self.capture
                         .lock()
                         .unwrap()
-                        .ingest_frame(&tid, epoch, data, vw, vh);
-                    if committed {
-                        self.notify_frame_waiters();
-                    }
-                }
+                        .ingest_motion_frame(&tid, data, vw, vh)
+                })
             }
             "Page.javascriptDialogOpening" => {
-                let Some(p) = params else { return };
+                let Some(p) = params else { return false };
                 let sid = msg.get("sessionId").and_then(|v| v.as_str());
                 let dtype = p
                     .get("type")
@@ -863,30 +1007,19 @@ impl CdpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let wake = self
-                    .tabs
+                self.tabs
                     .lock()
                     .unwrap()
-                    .open_dialog(sid, dtype, message, default_prompt, url);
-                if wake {
-                    self.notify_frame_waiters();
-                }
+                    .open_dialog(sid, dtype, message, default_prompt, url)
             }
             "Page.javascriptDialogClosed" => {
                 let sid = msg.get("sessionId").and_then(|v| v.as_str());
-                let wake = self.tabs.lock().unwrap().close_dialog_for_session(sid);
-                if wake {
-                    self.notify_frame_waiters();
-                }
+                self.tabs.lock().unwrap().close_dialog_for_session(sid)
             }
-            "Target.targetDestroyed" => {
-                if let Some(tid) = params.and_then(|p| p.get("targetId")).and_then(|v| v.as_str()) {
-                    let wake = self.handle_target_gone(tid, true);
-                    if wake {
-                        self.notify_frame_waiters();
-                    }
-                }
-            }
+            "Target.targetDestroyed" => msg
+                .pointer("/params/targetId")
+                .and_then(Value::as_str)
+                .is_some_and(|tid| self.handle_target_gone(tid, true)),
             "Target.detachedFromTarget" => {
                 let sid = params
                     .and_then(|p| p.get("sessionId"))
@@ -895,8 +1028,12 @@ impl CdpClient {
                     .and_then(|p| p.get("targetId"))
                     .and_then(|v| v.as_str());
                 if let Some(tid) = self.tabs.lock().unwrap().detach_session(sid, param_tid) {
-                    self.capture.lock().unwrap().clear_screencast_if_target(&tid);
+                    self.capture
+                        .lock()
+                        .unwrap()
+                        .clear_screencast_if_target(&tid);
                 }
+                false
             }
             "Target.targetCreated" => {
                 let switched = self
@@ -909,19 +1046,31 @@ impl CdpClient {
                     cap.clear_latest_frame();
                     cap.notify_activity();
                 }
-                self.notify_frame_waiters();
+                true
             }
             "Target.targetInfoChanged" => {
                 self.tabs.lock().unwrap().invalidate_tab_cache();
+                false
             }
-            _ => {}
+            _ => false,
         }
     }
 
     pub fn send_no_wait(&self, method: &str, params: Value, session_id: Option<&str>) {
         let transport = self.transport_state.lock().unwrap().transport.clone();
-        let Some(t) = transport else { return };
-        if !t.is_open() {
+        if let Some(t) = transport {
+            self.send_on_transport(t.as_ref(), method, params, session_id);
+        }
+    }
+
+    fn send_on_transport(
+        &self,
+        transport: &dyn CdpTransport,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+    ) {
+        if !transport.is_open() {
             return;
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -929,7 +1078,7 @@ impl CdpClient {
         if let Some(sid) = session_id {
             payload["sessionId"] = json!(sid);
         }
-        let _ = t.send_text(&payload.to_string());
+        let _ = transport.send_text(&payload.to_string());
     }
 
     pub fn send_cdp(
@@ -939,17 +1088,6 @@ impl CdpClient {
         session_id: Option<&str>,
         timeout: Duration,
     ) -> Result<Value, CdpError> {
-        let transport = self
-            .transport_state
-            .lock()
-            .unwrap()
-            .transport
-            .clone()
-            .ok_or_else(|| CdpError::new("Chrome CDP connection closed"))?;
-        if !transport.is_open() {
-            return Err(CdpError::new("Chrome CDP connection closed"));
-        }
-
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut payload = json!({ "id": id, "method": method, "params": params });
         if let Some(sid) = session_id {
@@ -957,13 +1095,22 @@ impl CdpClient {
         }
 
         let (tx, rx) = mpsc::channel();
-        self.pending.lock().unwrap().insert(
-            id,
-            PendingCall {
-                tx,
-                method: method.to_string(),
-            },
-        );
+        let transport = {
+            let state = self.transport_state.lock().unwrap();
+            let transport = state
+                .transport
+                .as_ref()
+                .filter(|transport| transport.is_open())
+                .ok_or_else(|| CdpError::new("Chrome CDP connection closed"))?;
+            self.pending.lock().unwrap().insert(
+                id,
+                PendingCall {
+                    tx,
+                    method: method.to_string(),
+                },
+            );
+            Arc::clone(transport)
+        };
 
         if let Err(err_msg) = transport.send_text(&payload.to_string()) {
             self.pending.lock().unwrap().remove(&id);
@@ -1010,11 +1157,37 @@ impl CdpClient {
         quality_preset: &str,
         rtt_ms: f64,
     ) -> Result<(String, &'static QualityProfile), CdpError> {
-        capture::ensure_screencast(self, target_id, quality_preset, rtt_ms, false)
+        capture::ensure_screencast(
+            self,
+            target_id,
+            quality_preset,
+            (rtt_ms > 0.0).then_some(rtt_ms),
+            false,
+        )
     }
 
     pub fn warm_active_tab(self: &Arc<Self>, quality_preset: Option<&str>, rtt_ms: f64) {
         capture::warm_active_tab(self, quality_preset, rtt_ms);
+    }
+
+    pub fn warm_in_background(self: &Arc<Self>, quality_preset: Option<String>, rtt_ms: f64) {
+        if self.disposed.load(Ordering::Acquire) || self.warming.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let client = Arc::clone(self);
+        let worker = thread::Builder::new()
+            .name("chrome-stream-warm".to_string())
+            .spawn(move || {
+                if client.is_connected() {
+                    client.warm_active_tab(quality_preset.as_deref(), rtt_ms);
+                } else {
+                    client.prewarm_readiness();
+                }
+                client.warming.store(false, Ordering::Release);
+            });
+        if worker.is_err() {
+            self.warming.store(false, Ordering::Release);
+        }
     }
 
     pub fn close_tab(
@@ -1050,6 +1223,8 @@ pub mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::AtomicUsize;
 
+    type MockTransportHolder = Arc<Mutex<Option<Arc<MockTransport>>>>;
+
     struct MockState {
         tabs: Vec<TabInfo>,
         sent: Vec<Value>,
@@ -1063,6 +1238,7 @@ pub mod tests {
         fail_eval_for: HashSet<String>,
         layout_metrics_vp: Option<(u32, u32)>,
         auto_screencast_b64: Option<String>,
+        popup_after_mouse_press: bool,
     }
 
     struct MockTransport {
@@ -1088,6 +1264,7 @@ pub mod tests {
                     fail_eval_for: HashSet::new(),
                     layout_metrics_vp: None,
                     auto_screencast_b64: None,
+                    popup_after_mouse_press: false,
                 }),
                 on_event,
             })
@@ -1305,6 +1482,17 @@ pub mod tests {
                             st.tabs.retain(|t| t.target_id != tid);
                             Err((-32000, "No target with given id found".into()))
                         } else {
+                            if params["type"] == "mousePressed" && st.popup_after_mouse_press {
+                                st.popup_after_mouse_press = false;
+                                st.tabs.push(tab("t-popup", "Popup", "https://popup.test"));
+                                post_events.push((
+                                    "Target.targetCreated".into(),
+                                    json!({ "targetInfo": {
+                                        "targetId": "t-popup", "type": "page", "openerId": tid,
+                                    }}),
+                                    None,
+                                ));
+                            }
                             Ok(json!({}))
                         }
                     }
@@ -1336,12 +1524,8 @@ pub mod tests {
 
     fn make_unconnected_mock_client(
         tabs: Vec<TabInfo>,
-    ) -> (
-        Arc<CdpClient>,
-        Arc<Mutex<Option<Arc<MockTransport>>>>,
-        Arc<AtomicUsize>,
-    ) {
-        let holder: Arc<Mutex<Option<Arc<MockTransport>>>> = Arc::new(Mutex::new(None));
+    ) -> (Arc<CdpClient>, MockTransportHolder, Arc<AtomicUsize>) {
+        let holder: MockTransportHolder = Arc::new(Mutex::new(None));
         let dials = Arc::new(AtomicUsize::new(0));
         let h_clone = Arc::clone(&holder);
         let d_clone = Arc::clone(&dials);
@@ -1361,9 +1545,7 @@ pub mod tests {
         (client, holder, dials)
     }
 
-    fn make_mock_client(
-        tabs: Vec<TabInfo>,
-    ) -> (Arc<CdpClient>, Arc<Mutex<Option<Arc<MockTransport>>>>) {
+    fn make_mock_client(tabs: Vec<TabInfo>) -> (Arc<CdpClient>, MockTransportHolder) {
         let (client, holder, _) = make_unconnected_mock_client(tabs);
         client.ensure_connected().unwrap();
         (client, holder)
@@ -1375,6 +1557,227 @@ pub mod tests {
             title: title.into(),
             url: url.into(),
         }
+    }
+
+    #[test]
+    fn disconnect_and_dispose_cancel_a_pending_handshake() {
+        for dispose in [false, true] {
+            let (started_tx, started_rx) = mpsc::sync_channel(0);
+            let (release_tx, release_rx) = mpsc::channel();
+            let release = Mutex::new(Some(release_rx));
+            let factory: TransportFactory = Arc::new(move |_, _, on_event| {
+                let transport =
+                    MockTransport::new(vec![tab("t1", "Home", "https://home.test")], on_event);
+                let release = release.lock().unwrap().take();
+                if let Some(release) = release {
+                    started_tx.send(Arc::clone(&transport)).unwrap();
+                    release.recv_timeout(Duration::from_secs(3)).unwrap();
+                }
+                Ok(transport)
+            });
+            let client = CdpClient::with_factory(
+                PathBuf::from("/tmp/nonexistent-port-file"),
+                9222,
+                Some("ws://127.0.0.1:9222/devtools/browser/mock".into()),
+                factory,
+                false,
+            );
+            client.pause();
+            let pause_epoch = client.pause_epoch();
+            let connecting_client = Arc::clone(&client);
+            let attempt = thread::spawn(move || connecting_client.ensure_connected());
+            let late = started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(client.is_connecting());
+            if dispose {
+                client.dispose();
+            } else {
+                client.disconnect();
+            }
+            assert!(!client.is_connecting());
+            release_tx.send(()).unwrap();
+
+            assert_eq!(
+                attempt.join().unwrap().unwrap_err().message,
+                "CDP connection cancelled by disconnect"
+            );
+            assert!(!late.is_open());
+            assert!(late.state.lock().unwrap().sent.is_empty());
+            assert!(!client.is_connected());
+            assert!(!client.is_connecting());
+            assert!(client.is_paused());
+            assert_eq!(client.pause_epoch(), pause_epoch);
+
+            if !dispose {
+                client.ensure_connected().unwrap();
+                client.resolve_target_id(None, true, true).unwrap();
+                let epoch = client.tab_epoch();
+                late.push_event(
+                    "Target.targetCreated",
+                    json!({ "targetInfo": { "targetId": "late", "type": "page", "openerId": "t1" } }),
+                    None,
+                );
+                (late.on_event)(TransportEvent::Closed);
+                assert!(client.is_connected());
+                assert_eq!(client.active_target_id().as_deref(), Some("t1"));
+                assert_eq!(client.tab_epoch(), epoch);
+                client.dispose();
+            }
+        }
+    }
+
+    fn assert_stale_input(result: &Value, active: &str, epoch: u64) {
+        assert_eq!(result["ok"], false);
+        for flag in ["staleTarget", "needsRefresh", "recoverable", "connected"] {
+            assert_eq!(result[flag], true, "{flag}");
+        }
+        assert_eq!(result["activeTargetId"], active);
+        assert_eq!(result["epoch"], epoch);
+        assert!(result["tabs"].is_array());
+        assert!(result["tabsHash"].is_string());
+        assert!(result.get("dialog").is_some());
+        assert!(result["paused"].is_boolean());
+        for counter in ["pauseEpoch", "seq", "serverMs"] {
+            assert!(result[counter].is_u64(), "{counter}");
+        }
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .contains("Refresh the panel"));
+    }
+
+    #[test]
+    fn missing_closed_and_mismatched_target_ids_do_not_send_input_to_the_active_tab() {
+        let (client, holder) = make_mock_client(vec![
+            tab("t1", "Live", "https://live.test"),
+            tab("t2", "Closed", "https://closed.test"),
+        ]);
+        client.resolve_target_id(Some("t1"), true, true).unwrap();
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        // Chrome may still include a recently destroyed target in a concurrent list result.
+        mock.push_event("Target.targetDestroyed", json!({ "targetId": "t2" }), None);
+
+        for args in [
+            json!({ "targetId": "missing", "events": [{ "action": "click" }, { "action": "type" }] }),
+            json!({ "events": [{ "action": "type", "targetId": "t2", "text": "discard" }, { "action": "click" }] }),
+            json!({ "targetId": "t2", "events": [{ "action": "click", "targetId": "t1" }, { "action": "disconnect" }] }),
+        ] {
+            let result = client
+                .dispatch_input_batch(serde_json::from_value(args).unwrap())
+                .unwrap();
+            assert_stale_input(&result, "t1", client.tab_epoch());
+            assert_eq!(result["tabs"].as_array().unwrap().len(), 1);
+        }
+        assert!(client.is_connected());
+
+        assert!(!mock
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .any(|call| { call["method"].as_str().unwrap().starts_with("Input.") }));
+        client.dispose();
+    }
+
+    #[test]
+    fn stale_target_epoch_rejects_input_even_when_the_target_is_still_active() {
+        let (client, holder) = make_mock_client(vec![tab("t1", "Live", "https://live.test")]);
+        client.resolve_target_id(Some("t1"), true, true).unwrap();
+        let epoch = client.tab_epoch();
+        let result = client
+            .dispatch_input_batch(
+                serde_json::from_value(json!({
+                    "targetId": "t1",
+                    "targetEpoch": epoch + 1,
+                    "events": [{ "action": "click" }, { "action": "type", "text": "discard" }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_stale_input(&result, "t1", epoch);
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        assert!(!mock
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .any(|call| { call["method"].as_str().unwrap().starts_with("Input.") }));
+        client.dispose();
+    }
+
+    #[test]
+    fn a_popup_mid_batch_drops_remaining_input_even_without_an_explicit_epoch() {
+        let (client, holder) = make_mock_client(vec![tab("t1", "Live", "https://live.test")]);
+        client.resolve_target_id(Some("t1"), true, true).unwrap();
+        let old_epoch = client.tab_epoch();
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        mock.state.lock().unwrap().popup_after_mouse_press = true;
+
+        let result = client
+            .dispatch_input_batch(
+                serde_json::from_value(json!({
+                    "events": [
+                        { "action": "mousedown", "targetId": "t1" },
+                        { "action": "type", "text": "discard" },
+                        { "action": "click", "targetId": "t-popup" },
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_stale_input(&result, "t-popup", old_epoch + 1);
+        let state = mock.state.lock().unwrap();
+        let input_calls: Vec<_> = state
+            .sent
+            .iter()
+            .filter(|call| call["method"].as_str().unwrap().starts_with("Input."))
+            .collect();
+        assert_eq!(input_calls.len(), 1);
+        assert_eq!(input_calls[0]["params"]["type"], "mousePressed");
+        let session = input_calls[0]["sessionId"].as_str().unwrap();
+        assert_eq!(state.session_to_target[session], "t1");
+        drop(state);
+        client.dispose();
+    }
+
+    #[test]
+    fn empty_browser_navigation_only_creates_a_tab_for_an_unbound_current_request() {
+        let (client, holder) = make_mock_client(Vec::new());
+        let epoch = client.tab_epoch();
+        for args in [
+            json!({ "targetId": "closed", "targetEpoch": epoch, "events": [{ "action": "navigate" }] }),
+            json!({ "targetEpoch": epoch + 1, "events": [{ "action": "navigate" }] }),
+        ] {
+            let result = client
+                .dispatch_input_batch(serde_json::from_value(args).unwrap())
+                .unwrap();
+            assert_eq!(result["staleTarget"], true);
+            assert!(result["activeTargetId"].is_null());
+        }
+        let result = client
+            .dispatch_input_batch(
+                serde_json::from_value(json!({
+                    "targetEpoch": epoch,
+                    "events": [{ "action": "navigate", "url": "https://fresh.test" }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["tabs"][0]["url"], "https://fresh.test");
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        assert_eq!(
+            mock.state
+                .lock()
+                .unwrap()
+                .sent
+                .iter()
+                .filter(|call| { call["method"] == "Target.createTarget" })
+                .count(),
+            1
+        );
+        client.dispose();
     }
 
     #[test]
@@ -1396,6 +1799,7 @@ pub mod tests {
         let in0 = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "click".into(),
                     x: Some(100.0),
@@ -1477,12 +1881,16 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(poll_with_dlg["dialog"]["type"], "prompt");
-        assert_eq!(poll_with_dlg["dialog"]["message"], "Enter verification code:");
+        assert_eq!(
+            poll_with_dlg["dialog"]["message"],
+            "Enter verification code:"
+        );
         assert_eq!(poll_with_dlg["dialog"]["defaultPrompt"], "000000");
 
         let res = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "dialog".into(),
                     accept: Some(true),
@@ -1541,6 +1949,7 @@ pub mod tests {
         let wake = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "scroll".into(),
                     x: Some(400.0),
@@ -1566,6 +1975,7 @@ pub mod tests {
                 ..Default::default()
             })
             .unwrap();
+        let parent_epoch = client.tab_epoch();
 
         let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
         mock.state
@@ -1592,6 +2002,18 @@ pub mod tests {
             None,
         );
 
+        let old_input = client
+            .dispatch_input_batch(
+                serde_json::from_value(json!({
+                    "targetId": "t1",
+                    "targetEpoch": parent_epoch,
+                    "events": [{ "action": "click" }, { "action": "type", "text": "discard" }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_stale_input(&old_input, "t-oauth", parent_epoch + 1);
+
         let f_pop = client
             .poll_frame(PollFrameParams {
                 target_id: Some("t1".into()),
@@ -1602,6 +2024,23 @@ pub mod tests {
             .unwrap();
         assert_eq!(f_pop["activeTargetId"], "t-oauth");
         assert_eq!(f_pop["popupSwitched"], true);
+        let old_input = client
+            .dispatch_input_batch(
+                serde_json::from_value(json!({
+                    "targetId": "t1",
+                    "events": [{ "action": "type", "text": "discard" }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_stale_input(&old_input, "t-oauth", parent_epoch + 1);
+        assert!(!mock
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .any(|call| { call["method"].as_str().unwrap().starts_with("Input.") }));
         let h1 = f_pop["frameHash"].as_str().unwrap().to_string();
         assert!(!h1.is_empty());
 
@@ -1627,6 +2066,7 @@ pub mod tests {
         client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
+                target_epoch: None,
                 events: vec![
                     InputEvent {
                         action: "click".into(),
@@ -1700,7 +2140,16 @@ pub mod tests {
             })
             .unwrap();
 
-        let sent = holder.lock().unwrap().as_ref().unwrap().state.lock().unwrap().sent.clone();
+        let sent = holder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .clone();
         let dbl_presses: Vec<&Value> = sent
             .iter()
             .filter(|m| {
@@ -1771,6 +2220,7 @@ pub mod tests {
         let r_active = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t2".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "close_tab".into(),
                     target_id: Some("t2".into()),
@@ -1788,7 +2238,16 @@ pub mod tests {
             .collect();
         assert_eq!(ids, vec!["t3"]);
         assert_eq!(client.screencast_target_id().as_deref(), Some("t3"));
-        let sent = holder.lock().unwrap().as_ref().unwrap().state.lock().unwrap().sent.clone();
+        let sent = holder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .clone();
         assert!(sent.iter().any(|m| m["method"] == "Page.stopScreencast"));
         assert!(sent
             .iter()
@@ -1810,7 +2269,9 @@ pub mod tests {
             .unwrap()
             .sent
             .clone();
-        assert!(!sent_after.iter().any(|m| m["method"] == "Target.createTarget"));
+        assert!(!sent_after
+            .iter()
+            .any(|m| m["method"] == "Target.createTarget"));
         client.dispose();
     }
 
@@ -1857,6 +2318,7 @@ pub mod tests {
         let inp = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t2".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "click".into(),
                     x: Some(50.0),
@@ -1867,9 +2329,9 @@ pub mod tests {
                 }],
             })
             .unwrap();
-        assert_eq!(inp["ok"], true);
+        assert_eq!(inp["ok"], false);
         assert_eq!(inp["connected"], true);
-        assert_eq!(inp["recovered"], true);
+        assert_eq!(inp["staleTarget"], true);
         assert!(client.is_connected());
         client.dispose();
     }
@@ -1895,6 +2357,15 @@ pub mod tests {
         let h1 = f1["frameHash"].as_str().unwrap().to_string();
         let th1 = f1["tabsHash"].as_str().unwrap().to_string();
         let seq1 = f1["seq"].as_u64().unwrap();
+        let stored = Arc::clone(
+            client
+                .capture
+                .lock()
+                .unwrap()
+                .latest_frame
+                .as_ref()
+                .unwrap(),
+        );
 
         let sid = client.tabs.lock().unwrap().session_for("t1").unwrap();
         mock.push_event(
@@ -1921,9 +2392,19 @@ pub mod tests {
             .unwrap();
         assert_eq!(f2["changed"], false);
         assert_eq!(f2["unchanged"], true);
-        assert_eq!(f2["imageDataUrl"], "");
+        assert!(f2.get("imageDataUrl").is_none());
         assert_eq!(f2["imageBytes"], 0);
         assert!(f2.get("tabs").is_none());
+        assert!(Arc::ptr_eq(
+            &stored,
+            client
+                .capture
+                .lock()
+                .unwrap()
+                .latest_frame
+                .as_ref()
+                .unwrap()
+        ));
 
         mock.push_event(
             "Page.screencastFrame",
@@ -1950,6 +2431,140 @@ pub mod tests {
     }
 
     #[test]
+    fn switches_auto_motion_profiles_only_after_confirming_rtt_samples() {
+        let (client, holder) = make_mock_client(vec![tab("t1", "Doc", "https://doc.test")]);
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        mock.state.lock().unwrap().auto_screencast_b64 = Some(base64_encode(b"motion"));
+
+        for (rtt_ms, expected) in [
+            (120.0, "high"),
+            (240.0, "high"),
+            (120.0, "high"),
+            (180.0, "high"),
+            (180.0, "medium"),
+            (0.0, "medium"),
+            (0.0, "medium"),
+            (0.0, "high"),
+        ] {
+            let result = client
+                .poll_frame(PollFrameParams {
+                    quality_preset: "auto".into(),
+                    rtt_ms,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(result["qualityApplied"], expected);
+        }
+
+        let state = mock.state.lock().unwrap();
+        let qualities: Vec<_> = state
+            .sent
+            .iter()
+            .filter(|call| call["method"] == "Page.startScreencast")
+            .map(|call| call["params"]["quality"].as_u64().unwrap())
+            .collect();
+        assert_eq!(qualities, [84, 70, 84]);
+    }
+
+    #[test]
+    fn long_poll_delivers_one_crisp_webp_and_input_wakes_it_for_a_new_settle() {
+        let (client, holder) = make_mock_client(vec![tab("t1", "Doc", "https://doc.test")]);
+        let mock = Arc::clone(holder.lock().unwrap().as_ref().unwrap());
+        let motion_b64 = base64_encode(b"motion");
+        mock.state.lock().unwrap().auto_screencast_b64 = Some(motion_b64.clone());
+        let poll = |previous: &Value, wait_ms| PollFrameParams {
+            quality_preset: "low".into(),
+            since_seq: previous["seq"].as_u64().unwrap_or(0),
+            last_frame_hash: previous["frameHash"].as_str().unwrap_or("").into(),
+            wait_ms,
+            ..Default::default()
+        };
+
+        let motion_at = Instant::now();
+        let motion = client.poll_frame(poll(&Value::Null, 0)).unwrap();
+        assert_eq!(motion["crisp"], false);
+        assert_eq!(motion["format"], "jpeg");
+        let crisp = client.poll_frame(poll(&motion, 1200)).unwrap();
+        assert!(motion_at.elapsed() >= Duration::from_millis(380));
+        assert!(motion_at.elapsed() < Duration::from_millis(1000));
+        assert_eq!(crisp["crisp"], true);
+        assert_eq!(crisp["format"], "webp");
+        assert!(crisp["imageDataUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/webp;base64,"));
+
+        let sid = client.tabs.lock().unwrap().session_for("t1").unwrap();
+        mock.push_event(
+            "Page.screencastFrame",
+            json!({ "data": motion_b64, "sessionId": 2 }),
+            Some(&sid),
+        );
+        let stored = Arc::clone(
+            client
+                .capture
+                .lock()
+                .unwrap()
+                .latest_frame
+                .as_ref()
+                .unwrap(),
+        );
+        let deduped = client.poll_frame(poll(&crisp, 40)).unwrap();
+        assert_eq!(deduped["crisp"], true);
+        assert_eq!(deduped["unchanged"], true);
+        assert_eq!(deduped["imageDataUrl"], "");
+        assert_eq!(deduped["imageBytes"], 0);
+        assert!(Arc::ptr_eq(
+            &stored,
+            client
+                .capture
+                .lock()
+                .unwrap()
+                .latest_frame
+                .as_ref()
+                .unwrap()
+        ));
+
+        let boot = client.boot_snapshot(1, "test", None, 0.0);
+        assert_eq!(boot["crisp"], true);
+        assert_eq!(boot["format"], "webp");
+        assert_eq!(boot["imageDataUrl"], crisp["imageDataUrl"]);
+
+        let waiting = Arc::clone(&client);
+        let params = poll(&crisp, 1200);
+        let waiter = thread::spawn(move || waiting.poll_frame(params).unwrap());
+        thread::sleep(Duration::from_millis(60));
+        let before_input = Instant::now();
+        client
+            .dispatch_input_batch(InputBatchParams {
+                target_id: Some("t1".into()),
+                events: vec![InputEvent {
+                    action: "click".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!client.capture.lock().unwrap().latest_frame_is_crisp());
+
+        let refreshed = waiter.join().unwrap();
+        assert!(before_input.elapsed() >= Duration::from_millis(380));
+        assert!(before_input.elapsed() < Duration::from_millis(1000));
+        assert_eq!(refreshed["crisp"], true);
+        assert_ne!(refreshed["frameHash"], crisp["frameHash"]);
+        let state = mock.state.lock().unwrap();
+        let shots: Vec<_> = state
+            .sent
+            .iter()
+            .filter(|call| call["method"] == "Page.captureScreenshot")
+            .collect();
+        assert_eq!(shots.len(), 2);
+        for shot in shots {
+            assert_eq!(shot["params"], json!({ "format": "webp", "quality": 86 }));
+        }
+    }
+
+    #[test]
     fn applies_ultra_profile_and_scales_fallback_screenshot() {
         let (client, holder) = make_mock_client(vec![tab("t1", "Heavy", "https://heavy.test")]);
         client
@@ -1961,13 +2576,28 @@ pub mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let sent = holder.lock().unwrap().as_ref().unwrap().state.lock().unwrap().sent.clone();
-        let sc = sent.iter().find(|m| m["method"] == "Page.startScreencast").unwrap();
+        let sent = holder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .clone();
+        let sc = sent
+            .iter()
+            .find(|m| m["method"] == "Page.startScreencast")
+            .unwrap();
         assert_eq!(sc["params"]["quality"], PROFILE_ULTRA.quality);
         assert_eq!(sc["params"]["maxWidth"], PROFILE_ULTRA.max_width);
-        assert_eq!(sc["params"]["everyNthFrame"], 3);
+        assert_eq!(sc["params"]["everyNthFrame"], 4);
 
-        let shot = sent.iter().find(|m| m["method"] == "Page.captureScreenshot").unwrap();
+        let shot = sent
+            .iter()
+            .find(|m| m["method"] == "Page.captureScreenshot")
+            .unwrap();
         assert!(shot["params"]["clip"]["scale"].as_f64().unwrap() < 1.0);
         client.dispose();
     }
@@ -1990,6 +2620,7 @@ pub mod tests {
         client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "switch_tab".into(),
                     target_id: Some("t2".into()),
@@ -2092,6 +2723,7 @@ pub mod tests {
         let res = client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "pause".into(),
                     ..Default::default()
@@ -2302,6 +2934,7 @@ pub mod tests {
         client
             .dispatch_input_batch(InputBatchParams {
                 target_id: Some("t1".into()),
+                target_epoch: None,
                 events: vec![InputEvent {
                     action: "click".into(),
                     x: Some(40.0),

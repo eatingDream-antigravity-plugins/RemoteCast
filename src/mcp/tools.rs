@@ -23,8 +23,8 @@ pub fn redact_relay_payload(val: &mut Value) {
     }
 }
 
-pub fn tool_definitions() -> Value {
-    json!([
+pub fn tool_definitions(include_app_only: bool) -> Value {
+    let mut tools = json!([
         {
             "name": "chrome_stream_stage",
             "title": "Chrome Stream",
@@ -54,7 +54,8 @@ pub fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "qualityPreset": { "type": "string", "enum": ["auto", "ultra", "low", "medium", "high"] },
-                    "rttMs": { "type": "number", "minimum": 0 }
+                    "rttMs": { "type": "number", "minimum": 0 },
+                    "mode": { "type": "string", "enum": ["auto", "personal", "remote"], "default": "auto" }
                 },
                 "additionalProperties": false
             }
@@ -91,6 +92,7 @@ pub fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "targetId": { "type": "string" },
+                    "targetEpoch": { "type": "integer", "minimum": 0 },
                     "events": {
                         "type": "array",
                         "items": {
@@ -152,14 +154,45 @@ pub fn tool_definitions() -> Value {
         {
             "name": "chrome_stream_disconnect",
             "title": "Disconnect Chrome Stream",
-            "description": "Stop active screencast streaming and close the Chrome DevTools session to save battery.",
+            "description": "Stop screencast streaming and either revoke the Chrome DevTools session or keep it authorized in standby.",
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "mode": { "type": "string", "enum": ["standby", "revoke"], "default": "revoke" }
+                },
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "chrome_stream_launch_remote",
+            "title": "Launch Remote Chrome",
+            "description": "App-only tool: launch or reuse dedicated Remote Chrome on loopback and warm the active tab screencast.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "qualityPreset": { "type": "string", "enum": ["auto", "ultra", "low", "medium", "high"] },
+                    "rttMs": { "type": "number", "minimum": 0 }
+                },
+                "additionalProperties": false
+            },
+            "_meta": {
+                "ui": {
+                    "visibility": ["app"]
+                }
+            }
         }
-    ])
+    ]);
+    if !include_app_only {
+        tools.as_array_mut().unwrap().retain(|tool| {
+            tool.pointer("/_meta/ui/visibility")
+                .and_then(Value::as_array)
+                .is_none_or(|visibility| {
+                    !visibility.iter().any(|scope| scope == "app")
+                        || visibility.iter().any(|scope| scope == "model")
+                })
+        });
+    }
+    tools
 }
 
 pub fn dispatch_tool_with_cache(
@@ -170,10 +203,13 @@ pub fn dispatch_tool_with_cache(
 ) -> Value {
     let mut out = match name {
         "chrome_stream_stage" => handle_stage(relay, swr_cache),
-        "chrome_stream_connect" => handle_connect(relay, args),
+        "chrome_stream_connect" => handle_connect(relay, "connect", args, Duration::from_secs(70)),
         "chrome_stream_frame" => handle_frame(relay, args),
         "chrome_stream_input" => handle_input(relay, args),
-        "chrome_stream_disconnect" => handle_disconnect(relay),
+        "chrome_stream_disconnect" => handle_disconnect(relay, args),
+        "chrome_stream_launch_remote" => {
+            handle_connect(relay, "launch_remote", args, Duration::from_secs(85))
+        }
         _ => json!({
             "isError": true,
             "content": [{ "type": "text", "text": format!("Unknown tool: {name}") }]
@@ -184,7 +220,7 @@ pub fn dispatch_tool_with_cache(
         redact_relay_payload(sc);
         if let Some(cache) = swr_cache {
             if name != "chrome_stream_stage" {
-                cache.update_from_tool_result(name, sc);
+                cache.update_from_tool_result(sc);
             }
         }
     }
@@ -293,9 +329,14 @@ fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCac
     })
 }
 
-fn handle_connect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
+fn handle_connect(
+    relay: &Arc<dyn RelayBackend>,
+    method: &str,
+    args: Value,
+    timeout: Duration,
+) -> Value {
     let lang = current_lang();
-    match relay.call("connect", args, Duration::from_secs(70)) {
+    match relay.call(method, args, timeout) {
         Ok(mut res) => {
             res["locale"] = json!(lang.as_str());
             let count = res
@@ -328,6 +369,7 @@ fn handle_connect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 "structuredContent": {
                     "ok": false,
                     "connected": connected,
+                    "connectionMode": st.get("connectionMode").cloned().unwrap_or(Value::Null),
                     "locale": lang.as_str(),
                     "error": err,
                     "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
@@ -348,14 +390,13 @@ fn normalize_frame(
     let img_url = frame
         .get("imageDataUrl")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("");
     let frame_hash = frame
         .get("frameHash")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from)
-        .unwrap_or_else(|| hash_frame_data(&img_url));
+        .unwrap_or_else(|| hash_frame_data(img_url));
 
     let active_tid = frame
         .get("activeTargetId")
@@ -366,18 +407,20 @@ fn normalize_frame(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    if changed
-        && !img_url.is_empty()
+    let same_frame = !img_url.is_empty()
         && !last_frame_hash.is_empty()
         && frame_hash == last_frame_hash
-        && (req_target_id.is_none() || active_tid.is_empty() || req_target_id == Some(active_tid))
-    {
-        frame["changed"] = json!(false);
-        frame["unchanged"] = json!(true);
-        frame["imageDataUrl"] = json!("");
+        && (req_target_id.is_none() || active_tid.is_empty() || req_target_id == Some(active_tid));
+    let changed = changed && !same_frame;
+    frame["changed"] = json!(changed);
+    frame["unchanged"] = json!(!changed);
+    if !changed {
+        if frame["crisp"] == true {
+            frame["imageDataUrl"] = json!("");
+        } else if let Some(object) = frame.as_object_mut() {
+            object.remove("imageDataUrl");
+        }
         frame["imageBytes"] = json!(0);
-    } else {
-        frame["unchanged"] = json!(!changed);
     }
 
     let tabs_hash = frame
@@ -403,7 +446,11 @@ fn normalize_frame(
     if !tabs_hash.is_empty() {
         frame["tabsHash"] = json!(tabs_hash);
     }
-    if frame.get("qualityApplied").and_then(|v| v.as_str()).is_none() {
+    if frame
+        .get("qualityApplied")
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
         frame["qualityApplied"] = json!(profile_name);
     }
     if frame.get("serverMs").and_then(|v| v.as_u64()).is_none() {
@@ -446,7 +493,7 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
         "sinceSeq": since_seq,
         "lastFrameHash": last_hash,
         "knownTabsHash": known_tabs_hash,
-        "qualityPreset": profile.name,
+        "qualityPreset": q_preset,
         "rttMs": rtt_ms,
         "waitMs": wait_ms,
         "forceRefresh": force_refresh,
@@ -485,7 +532,7 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                     "sinceSeq": 0,
                     "lastFrameHash": "",
                     "knownTabsHash": "",
-                    "qualityPreset": profile.name,
+                    "qualityPreset": q_preset,
                     "rttMs": rtt_ms,
                     "waitMs": 0,
                     "forceRefresh": true,
@@ -509,13 +556,18 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 }
             }
 
-            let post = if still_connected { safe_status(relay) } else { st };
+            let post = if still_connected {
+                safe_status(relay)
+            } else {
+                st
+            };
             let live = post
                 .get("connected")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let mut sc = json!({
                 "connected": live,
+                "connectionMode": post.get("connectionMode").cloned().unwrap_or(Value::Null),
                 "recoverable": live,
                 "error": err,
                 "portFile": post.get("portFile").cloned().unwrap_or(Value::Null),
@@ -545,8 +597,9 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
             if res.get("serverMs").and_then(|v| v.as_u64()).is_none() {
                 res["serverMs"] = json!(t_start.elapsed().as_millis() as u64);
             }
+            let label = res.get("error").and_then(Value::as_str).unwrap_or("ok");
             json!({
-                "content": [{ "type": "text", "text": "ok" }],
+                "content": [{ "type": "text", "text": label }],
                 "structuredContent": res
             })
         }
@@ -566,15 +619,19 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                     .ok();
                 return json!({
                     "isError": false,
-                    "content": [{ "type": "text", "text": "recovered" }],
+                    "content": [{ "type": "text", "text": "The input target closed. Refresh the panel before sending input again." }],
                     "structuredContent": {
-                        "ok": true,
-                        "recovered": true,
+                        "ok": false,
+                        "staleTarget": true,
+                        "needsRefresh": true,
+                        "recoverable": true,
                         "connected": true,
+                        "error": "The input target closed. Refresh the panel before sending input again.",
                         "activeTargetId": rec.as_ref().and_then(|r| r.get("activeTargetId")).cloned().unwrap_or_else(|| st.get("activeTargetId").cloned().unwrap_or(Value::Null)),
                         "dialog": rec.as_ref().and_then(|r| r.get("dialog")).cloned().unwrap_or(Value::Null),
                         "epoch": rec.as_ref().and_then(|r| r.get("epoch")).cloned().unwrap_or(Value::Null),
                         "pauseEpoch": rec.as_ref().and_then(|r| r.get("pauseEpoch")).cloned().unwrap_or_else(|| st.get("pauseEpoch").cloned().unwrap_or(json!(0))),
+                        "paused": rec.as_ref().and_then(|r| r.get("paused")).cloned().unwrap_or_else(|| st.get("paused").cloned().unwrap_or(json!(false))),
                         "tabs": rec.as_ref().and_then(|r| r.get("tabs")).cloned().unwrap_or(Value::Null),
                         "tabsHash": rec.as_ref().and_then(|r| r.get("tabsHash")).cloned().unwrap_or(Value::Null),
                         "seq": rec.as_ref().and_then(|r| r.get("seq")).cloned().unwrap_or(json!(0)),
@@ -599,24 +656,40 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
     }
 }
 
-fn handle_disconnect(relay: &Arc<dyn RelayBackend>) -> Value {
+fn handle_disconnect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
     let lang = current_lang();
-    let ok_text = match lang {
-        Lang::En => "Disconnected from Chrome.",
-        Lang::ZhCn => "已断开本机 Chrome 连接。",
+    let standby = match args.get("mode").map(Value::as_str) {
+        Some(Some("standby")) => true,
+        None | Some(Some("revoke")) => false,
+        _ => {
+            return json!({
+                "isError": true,
+                "content": [{ "type": "text", "text": "Invalid disconnect mode. Expected standby or revoke." }]
+            })
+        }
     };
-    match relay.call("disconnect", json!({}), Duration::from_secs(10)) {
+    match relay.call("disconnect", args, Duration::from_secs(10)) {
         Ok(mut res) => {
+            let text = match (lang, standby) {
+                (Lang::En, true) => "Screencast paused. Chrome authorization stays active.",
+                (Lang::ZhCn, true) => "已暂停画面传输，并保留 Chrome 授权。",
+                (Lang::En, false) => "Disconnected from Chrome.",
+                (Lang::ZhCn, false) => "已断开本机 Chrome 连接。",
+            };
             res["locale"] = json!(lang.as_str());
             json!({
-                "content": [{ "type": "text", "text": ok_text }],
+                "content": [{ "type": "text", "text": text }],
                 "structuredContent": res
             })
         }
-        Err(err) => json!({
+        Err(err) if !standby => json!({
             "isError": false,
             "content": [{ "type": "text", "text": format!("Disconnect note: {err}") }],
             "structuredContent": { "ok": true, "connected": false, "locale": lang.as_str() }
+        }),
+        Err(err) => json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": err }]
         }),
     }
 }

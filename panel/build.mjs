@@ -15,6 +15,7 @@ function minifyCss(css) {
     .replace(/\s*([{}:;,>~+])\s*/g, "$1")
     .replace(/\(\s+/g, "(")
     .replace(/\s+\)/g, ")")
+    .replace(/\s*([*/])\s*/g, "$1")
     .replace(/\s*!important/g, "!important")
     .replace(/;}/g, "}")
     .replace(/\[([^=\]]+)="([a-zA-Z0-9_-]+)"\]/g, "[$1=$2]")
@@ -31,9 +32,13 @@ const KEYWORDS_AND_GLOBALS = new Set(
   ).split(" ")
 );
 
-  // Internal class properties/methods owned exclusively by our bundle (never present on DOM/MCP payloads).
+// Internal class-only properties/methods (ONLY appear after `.` or as class method names, never standalone vars).
+const CLASS_ONLY_PROPS = new Set(
+  "calibrated lastNetRttMs lastKbps fastStreak slowStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request".split(" ")
+);
+// Internal root/payload identifiers owned exclusively by our bundle (never present on DOM/MCP payloads).
 const INTERNAL_PROPS = new Set(
-  "effectiveTier calibrated ewmaRttMs lastNetRttMs lastKbps fastStreak lastUpgradeAt setMode getEffectiveQuality recordSample getNetworkGrade computePollTiming computeOfflinePollDelay getWheelCoalesceMs getTypeBatchMs getHostContext getHostCapabilities callServerTool notification _watchSize ontoolinput ontoolresult ontoolcancelled onhostcontextchanged onteardown App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState resolveStageAspect setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive _i _c _o _n _p _up _t _m _ctx _hc _ro _send _req _note connect request tierVal clamp".split(" ")
+  "effectiveTier ewmaRttMs App AdaptiveBandwidthController parseAlpha lum applyDocumentTheme applyHostStyleVariables applyHostFonts applyHostContext isTargetErrorText rttBand parsePanelLocaleTag resolvePanelLang coalesceInputEvents shouldApplyFrameResponse applyOptimisticTabClose isNoTabsPayload isSafeImageUrl applyFramePayloadState resolveStageAspect setupRevealObservers rootDoc rootWin bridgeApp clock onReveal onHide getLastFetchAt staleMs throttleMs ResizeObs IntersectionObs errCount reqEpoch currentEpoch currentTargetId idleMs inputBusy screencastIdle settled nextDelayMs bootLocale hostLocale navLang saved totalMs netRttMs tierChanged wasActive tierVal clamp".split(" ")
 );
 
 function tokenizeJs(src) {
@@ -330,29 +335,77 @@ function minifyJsTokens(src) {
   const allScopes = [rootScope];
   const tokenScope = new Array(raw.length).fill(null);
   const tokenTargetScope = new Array(raw.length).fill(null);
-  const canDeclLocal = (name) => name.length >= 2 && !KEYWORDS_AND_GLOBALS.has(name) && !braceProtected.has(name) && !INTERNAL_PROPS.has(name);
+  const canDeclLocal = (name) => name.length >= 1 && !KEYWORDS_AND_GLOBALS.has(name) && !braceProtected.has(name) && !INTERNAL_PROPS.has(name);
   const canDeclRoot = (name) => name.length >= 2 && name !== "bH" && !KEYWORDS_AND_GLOBALS.has(name) && !braceProtected.has(name) && !INTERNAL_PROPS.has(name);
 
   let curScope = rootScope;
   let pendingBlockDecls = null; // Array<{ idx, name }> for upcoming `{` block scope
+  let pendingForHdr = null; // [startIdx, endIdx] for upcoming `for (...) {` scope
+  let pendingExprDecls = null; // Array<{ idx, name }> for upcoming expression-arrow `=> expr` scope
+  const exprScopeStack = []; // Array<{ scope, depth }>
+  let nestDepth = 0;
   let inVarDecl = false;
+  let inVarInit = false;
   let varDepth = 0;
   let varTargetScope = rootScope;
   const exprArrowParams = new Set();
 
   for (let idx = 0; idx < raw.length; idx++) {
     const t = raw[idx];
+    if (t.k !== "ws") {
+      // Close any expression-arrow scopes when reaching a delimiter at their starting nesting depth
+      while (
+        exprScopeStack.length > 0 &&
+        nestDepth === exprScopeStack[exprScopeStack.length - 1].depth &&
+        (t.v === ";" || t.v === "," || t.v === ")" || t.v === "]" || t.v === "}")
+      ) {
+        exprScopeStack.pop();
+        curScope = curScope.parent || rootScope;
+      }
+      if (t.v === "(" || t.v === "[" || (t.v === "{" && !t.isBlock)) nestDepth += 1;
+      else if (t.v === ")" || t.v === "]" || (t.v === "}" && !t.isBlock)) nestDepth = Math.max(0, nestDepth - 1);
+    }
     tokenScope[idx] = curScope;
     if (t.k === "ws") continue;
     const p = prevNonWs(idx);
+
+    if (t.v === "=>" && pendingExprDecls) {
+      const child = mkScope(curScope);
+      curScope.children.push(child);
+      allScopes.push(child);
+      for (const item of pendingExprDecls) {
+        if (!KEYWORDS_AND_GLOBALS.has(item.name) && !braceProtected.has(item.name) && !INTERNAL_PROPS.has(item.name)) {
+          child.decls.add(item.name);
+          tokenScope[item.idx] = child;
+        } else {
+          child.extUsed.add(item.name);
+        }
+      }
+      pendingExprDecls = null;
+      exprScopeStack.push({ scope: child, depth: nestDepth });
+      curScope = child;
+      tokenScope[idx] = curScope;
+      continue;
+    }
 
     if (t.v === "{" && t.isBlock) {
       const child = mkScope(curScope);
       curScope.children.push(child);
       allScopes.push(child);
+      if (pendingForHdr) {
+        child.forHdr = pendingForHdr;
+        if (pendingForHdr.sep < 0) {
+          // C-style `for (let i = 0; i < n; i++) { ... }`: whole header is inside `child` scope
+          for (let k = pendingForHdr.start; k <= pendingForHdr.end; k++) tokenScope[k] = child;
+        } else {
+          // `for (let x of expr) { ... }`: LHS before `in`/`of` is in `child`, RHS stays in outer scope
+          for (let k = pendingForHdr.start; k < pendingForHdr.sep; k++) tokenScope[k] = child;
+        }
+        pendingForHdr = null;
+      }
       if (pendingBlockDecls) {
         for (const item of pendingBlockDecls) {
-          if (canDeclLocal(item.name)) {
+          if (!KEYWORDS_AND_GLOBALS.has(item.name) && !braceProtected.has(item.name) && !INTERNAL_PROPS.has(item.name)) {
             child.decls.add(item.name);
             tokenScope[item.idx] = child;
           } else {
@@ -366,6 +419,10 @@ function minifyJsTokens(src) {
       continue;
     }
     if (t.v === "}" && t.isBlock) {
+      while (exprScopeStack.length > 0 && exprScopeStack[exprScopeStack.length - 1].scope === curScope) {
+        exprScopeStack.pop();
+        curScope = curScope.parent || rootScope;
+      }
       curScope = curScope.parent || rootScope;
       pendingBlockDecls = null;
       continue;
@@ -373,17 +430,20 @@ function minifyJsTokens(src) {
 
     if (t.k === "id" && (t.v === "const" || t.v === "let" || t.v === "var")) {
       inVarDecl = true;
+      inVarInit = false;
       varDepth = 0;
       varTargetScope = curScope;
       if (p?.v === "(" && prevNonWs(raw.indexOf(p))?.v === "for") {
-        let fd = 1, fj = idx + 1;
+        let fd = 1, fj = idx + 1, sepIdx = -1;
         while (fj < raw.length && fd > 0) {
           if (raw[fj].v === "(") fd++;
           else if (raw[fj].v === ")") fd--;
+          else if (fd === 1 && sepIdx < 0 && (raw[fj].v === "in" || raw[fj].v === "of")) sepIdx = fj;
           fj++;
         }
         if (nextNonWs(fj - 1)?.v === "{") {
           pendingBlockDecls = pendingBlockDecls || [];
+          pendingForHdr = { start: idx, end: fj - 1, sep: sepIdx };
           varTargetScope = null;
         }
       }
@@ -394,14 +454,23 @@ function minifyJsTokens(src) {
     if (inVarDecl) {
       if (t.v === "(" || t.v === "[" || t.v === "{") varDepth += 1;
       else if (t.v === ")" || t.v === "]" || t.v === "}") {
-        if (varDepth === 0) inVarDecl = false;
+        if (varDepth === 0) { inVarDecl = false; inVarInit = false; }
         else varDepth -= 1;
       } else if (varDepth === 0 && (t.v === ";" || t.v === "in" || t.v === "of")) {
-        inVarDecl = false;
-      } else if (varDepth === 0 && t.k === "id" && (p?.v === "let" || p?.v === "var" || p?.v === ",")) {
-        if (varTargetScope === null && pendingBlockDecls) pendingBlockDecls.push({ idx, name: t.v });
-        else if (varTargetScope === rootScope ? canDeclRoot(t.v) : canDeclLocal(t.v)) varTargetScope.decls.add(t.v);
-        else if (varTargetScope) varTargetScope.extUsed.add(t.v);
+        inVarDecl = false; inVarInit = false;
+      } else if (varDepth === 0 && t.v === "=") {
+        inVarInit = true;
+      } else if (varDepth === 0 && t.v === ",") {
+        inVarInit = false;
+      } else if (!inVarInit && t.k === "id") {
+        const nx = nextNonWs(idx);
+        const isPlainDecl = varDepth === 0 && (p?.v === "let" || p?.v === "var" || p?.v === ",");
+        const isArrayDestr = varDepth > 0 && (p?.v === "[" || p?.v === "," || p?.v === "...") && (nx?.v === "," || nx?.v === "]" || nx?.v === "=");
+        if (isPlainDecl || isArrayDestr) {
+          if (varTargetScope === null && pendingBlockDecls) pendingBlockDecls.push({ idx, name: t.v });
+          else if (varTargetScope === rootScope ? canDeclRoot(t.v) : canDeclLocal(t.v)) varTargetScope.decls.add(t.v);
+          else if (varTargetScope) varTargetScope.extUsed.add(t.v);
+        }
       }
     }
 
@@ -416,7 +485,8 @@ function minifyJsTokens(src) {
         pendingBlockDecls = pendingBlockDecls || [];
         pendingBlockDecls.push({ idx, name: t.v });
       } else {
-        exprArrowParams.add(t.v);
+        pendingExprDecls = pendingExprDecls || [];
+        pendingExprDecls.push({ idx, name: t.v });
       }
     }
     if (t.v === "(") {
@@ -449,6 +519,9 @@ function minifyJsTokens(src) {
                 if (hasBlockBody) {
                   pendingBlockDecls = pendingBlockDecls || [];
                   pendingBlockDecls.push({ idx: j, name: pt.v });
+                } else if (afterClose?.v === "=>") {
+                  pendingExprDecls = pendingExprDecls || [];
+                  pendingExprDecls.push({ idx: j, name: pt.v });
                 } else {
                   exprArrowParams.add(pt.v);
                 }
@@ -462,6 +535,7 @@ function minifyJsTokens(src) {
 
   // Bind every identifier occurrence to its resolving lexical scope
   const rootCounts = new Map();
+  const classPropCounts = new Map();
   for (const ip of INTERNAL_PROPS) rootScope.decls.add(ip);
   const usedShortRoot = new Set([...KEYWORDS_AND_GLOBALS, ...exprArrowParams, ...rootScope.decls, ...rootScope.extUsed]);
 
@@ -471,9 +545,20 @@ function minifyJsTokens(src) {
     const p = prevNonWs(idx), nx = nextNonWs(idx);
     const afterDot = p?.v === "." || p?.v === "?.";
     const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
+    if (CLASS_ONLY_PROPS.has(t.v) && (afterDot || nx?.v === "(")) {
+      classPropCounts.set(t.v, (classPropCounts.get(t.v) || 0) + 1);
+      continue;
+    }
     if (INTERNAL_PROPS.has(t.v)) {
       rootCounts.set(t.v, (rootCounts.get(t.v) || 0) + 1);
       tokenTargetScope[idx] = rootScope;
+      if (!afterDot && !isObjKey) {
+        let s = tokenScope[idx];
+        while (s && s !== rootScope) {
+          s.capFrom.add(`R:${t.v}`);
+          s = s.parent;
+        }
+      }
       continue;
     }
     if (afterDot || isObjKey || braceProtected.has(t.v)) continue;
@@ -521,33 +606,66 @@ function minifyJsTokens(src) {
     if (genNames.length > 600) break;
   }
 
-  // Sort root identifiers + hoisted globals/strings together so highest-gain items get 1-char names first
+  // Assign dedicated 1-char property names to CLASS_ONLY_PROPS (separate namespace from variables)
+  const classPropRename = new Map();
+  const classAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
+  const reservedProps = new Set(["mode", "close", "reset", "on", "toString", "valueOf"]);
+  let cpi = 0;
+  for (const [prop] of [...classPropCounts.entries()].sort((a, b) => b[1] * b[0].length - a[1] * a[0].length)) {
+    while (cpi < classAlphabet.length && reservedProps.has(classAlphabet[cpi])) cpi++;
+    if (cpi < classAlphabet.length && classAlphabet[cpi].length < prop.length) {
+      classPropRename.set(prop, classAlphabet[cpi++]);
+    }
+  }
+
+  // Sort root identifiers + hoisted globals/strings/long-dot-properties together so highest-gain items get 1-char names first
   const hoistGlobals = new Set("document window Math Date Array Number String Object Boolean encodeURIComponent Promise Error Set Map JSON globalThis requestAnimationFrame cancelAnimationFrame ResizeObserver IntersectionObserver getComputedStyle null undefined".split(" "));
   const globalCounts = new Map();
   const strCounts = new Map();
+  const propCounts = new Map();
+  const propPositions = [];
   for (let idx = 0; idx < raw.length; idx++) {
     const t = raw[idx];
     const p = prevNonWs(idx), nx = nextNonWs(idx);
     const afterDot = p?.v === "." || p?.v === "?.";
     const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
+    if (t.k === "id" && afterDot && t.v.length >= 5 && !INTERNAL_PROPS.has(t.v) && !CLASS_ONLY_PROPS.has(t.v)) {
+      const pp = prevNonWs(raw.indexOf(p));
+      if (pp && pp.v !== "new" && pp.v !== "import" && pp.v !== "super") {
+        const quoted = JSON.stringify(t.v);
+        propCounts.set(quoted, (propCounts.get(quoted) || 0) + 1);
+        propPositions.push({ dotIdx: raw.indexOf(p), idIdx: idx, dotOp: p.v, quoted });
+      }
+      continue;
+    }
     if (t.k === "id" && hoistGlobals.has(t.v) && !afterDot && !isObjKey && !tokenTargetScope[idx] && !braceProtected.has(t.v) && p?.v !== "typeof" && (t.v !== "undefined" || !["=", ".", "?.", "[", "("].includes(nx?.v))) {
       globalCounts.set(t.v, (globalCounts.get(t.v) || 0) + 1);
       continue;
     }
-    if (t.k !== "lit" || (t.v[0] !== '"' && t.v[0] !== "'") || t.v.length < 5) continue;
+    if (t.k !== "lit" || (t.v[0] !== '"' && t.v[0] !== "'") || t.v.length < 3) continue;
     if (isObjKey) continue;
     strCounts.set(t.v, (strCounts.get(t.v) || 0) + 1);
   }
+  const allStrCounts = new Map(strCounts);
+  for (const [q, cnt] of propCounts.entries()) {
+    allStrCounts.set(q, (allStrCounts.get(q) || 0) + cnt);
+  }
   const hoistCandidates = [
-    ...[...globalCounts.entries()].map(([s, cnt]) => [s, cnt, ((s === "undefined" ? 6 : s.length) - 1) * cnt - (s === "undefined" ? 2 : s.length + 3)]),
-    ...[...strCounts.entries()].map(([s, cnt]) => [s, cnt, (s.length - 1) * cnt - s.length - 3]),
+    ...[...globalCounts.entries()].map(([s, cnt]) => [s, cnt, ((s === "undefined" ? 6 : s.length) - 1) * cnt - (s === "undefined" ? 2 : s.length + 3), 0]),
+    ...[...allStrCounts.entries()].map(([s, cnt]) => {
+      const pCnt = propCounts.get(s) || 0;
+      const sCnt = strCounts.get(s) || 0;
+      // Dot prop `.foo` (len-1) -> `[a]` (3) saves (len-4) per use; string `"foo"` (len) -> `a` (1) saves (len-1) per use
+      const gain = (s.length - 1) * sCnt + (s.length - 4) * pCnt - s.length - 3;
+      return [s, cnt, gain, pCnt];
+    }),
   ].filter(([, cnt, gain]) => cnt >= 2 && gain >= 2);
 
   const strMap = new Map();
   const strDecls = [];
   const combined = [
     ...[...rootCounts.entries()].map(([k, cnt]) => ({ k, cnt, gain: (k.length - 1) * cnt, kind: "id" })),
-    ...hoistCandidates.map(([s, cnt, gain]) => ({ k: s, cnt, gain, kind: "hoist" })),
+    ...hoistCandidates.map(([s, cnt, gain, pCnt]) => ({ k: s, cnt, gain, pCnt, kind: "hoist" })),
   ].sort((a, b) => b.gain - a.gain);
   let gi = 0;
   for (const item of combined) {
@@ -556,13 +674,26 @@ function minifyJsTokens(src) {
     if (item.kind === "id") {
       if (alias.length < item.k.length) { rootScope.rename.set(item.k, alias); gi++; }
     } else {
+      const pCnt = item.pCnt || 0;
+      const sCnt = item.cnt - pCnt;
       const origLen = item.k === "undefined" ? 6 : item.k.length;
       const declCost = item.k === "undefined" ? alias.length + 1 : alias.length + 2 + item.k.length;
-      if ((origLen - alias.length) * item.cnt - declCost > 0) {
+      const netGain = (origLen - alias.length) * sCnt + (origLen - 3 - alias.length) * pCnt - declCost;
+      if (netGain > 0) {
         strMap.set(item.k, alias);
         strDecls.push(item.k === "undefined" ? alias : `${alias}=${item.k}`);
         gi++;
       }
+    }
+  }
+
+  const propDotMap = new Map();
+  for (const pp of propPositions) {
+    if (strMap.has(pp.quoted)) {
+      const alias = strMap.get(pp.quoted);
+      propDotMap.set(pp.dotIdx, { idIdx: pp.idIdx, dotOp: pp.dotOp, alias });
+      let s = tokenScope[pp.idIdx];
+      while (s) { s.extUsed.add(alias); s = s.parent; }
     }
   }
 
@@ -587,15 +718,30 @@ function minifyJsTokens(src) {
         const nm = raw[rIdx].v;
         localCounts.set(nm, (localCounts.get(nm) || 0) + 1);
       }
+      const outerUsed = new Set([...child.extUsed]);
       const forbidden = new Set([...KEYWORDS_AND_GLOBALS, ...exprArrowParams, ...child.extUsed, ...child.decls]);
+      if (child.forHdr) {
+        const rhsStart = child.forHdr.sep >= 0 ? child.forHdr.sep + 1 : child.forHdr.start;
+        for (let k = rhsStart; k <= child.forHdr.end; k++) {
+          const ts = tokenTargetScope[k];
+          if (ts && ts !== child) {
+            const ren = ts.rename.get(raw[k].v) || raw[k].v;
+            forbidden.add(ren);
+            outerUsed.add(ren);
+          }
+        }
+      }
       const capturedByDesc = new Map();
       const collectCaps = (node) => {
         for (const key of node.capFrom) {
           const sep = key.indexOf(":");
           const sid = key.slice(0, sep), orig = key.slice(sep + 1);
           const src = sid === "R" ? rootScope : allScopes[Number(sid)];
-          if (src !== child) forbidden.add(src.rename.get(orig) || orig);
-          else {
+          if (src !== child) {
+            const ren = src.rename.get(orig) || orig;
+            forbidden.add(ren);
+            outerUsed.add(ren);
+          } else {
             let s = capturedByDesc.get(orig);
             if (!s) { s = new Set(); capturedByDesc.set(orig, s); }
             for (const x of node.extUsed) s.add(x);
@@ -622,7 +768,7 @@ function minifyJsTokens(src) {
             }
           }
         }
-        if (picked && picked.length < orig.length) {
+        if (picked && (outerUsed.has(orig) || picked.length < orig.length)) {
           child.rename.set(orig, picked);
           forbidden.add(picked);
         } else {
@@ -635,13 +781,23 @@ function minifyJsTokens(src) {
   };
   assignChildScopes(rootScope);
 
-  // Apply renames + boolean literals (`true` -> `!0`, `false` -> `!1`) + hoisted globals/strings
+  // Apply renames + boolean literals (`true` -> `!0`, `false` -> `!1`) + hoisted globals/strings/props
   for (let idx = 0; idx < raw.length; idx++) {
+    const pd = propDotMap.get(idx);
+    if (pd) {
+      raw[idx] = { k: "op", v: pd.dotOp === "?." ? "?.[" : "[" };
+      raw[pd.idIdx] = { k: "op", v: `${pd.alias}]` };
+      continue;
+    }
     const t = raw[idx];
     const p = prevNonWs(idx), nx = nextNonWs(idx);
     const afterDot = p?.v === "." || p?.v === "?.";
     const isObjKey = nx?.v === ":" && (p?.v === "{" || p?.v === ",");
     if (t.k === "id") {
+      if ((afterDot || nx?.v === "(") && classPropRename.has(t.v)) {
+        t.v = classPropRename.get(t.v);
+        continue;
+      }
       if (!afterDot && !isObjKey && (t.v === "true" || t.v === "false")) {
         t.k = "op"; t.v = t.v === "true" ? "!0" : "!1"; continue;
       }
@@ -789,7 +945,7 @@ async function bundleAssets() {
 
 const { js, css, engine } = await bundleAssets();
 const jsCode = js.replace(/<\/script/gi, "<\\/script");
-const cssCode = css.replace(/<\/style/gi, "<\\/style");
+const cssCode = css.replace(/--buncss-[^;:]+:[^;]+;?/g, "").replace(/<\/style/gi, "<\\/style");
 
 // Validate generated JS syntax before writing
 new Function(jsCode);
@@ -804,9 +960,15 @@ fs.mkdirSync(distDir, { recursive: true });
 const outHtml = path.join(distDir, "panel.html");
 fs.writeFileSync(outHtml, html, "utf8");
 
-const kb = Buffer.byteLength(html, "utf8") / 1024;
-console.log(`Built ${outHtml} (${kb.toFixed(1)} KiB, engine=${engine})`);
-if (kb >= 45.0) {
-  console.error(`ERROR: panel bundle ${kb.toFixed(1)} KiB exceeds 45 KiB budget`);
+const totalBytes = Buffer.byteLength(html, "utf8");
+const jsBytes = Buffer.byteLength(jsCode, "utf8");
+const cssBytes = Buffer.byteLength(cssCode, "utf8");
+const kb = totalBytes / 1024;
+console.log(`Built ${outHtml} (${totalBytes} B / ${kb.toFixed(1)} KiB; js=${jsBytes} B, css=${cssBytes} B, engine=${engine})`);
+if (totalBytes >= 46_080) {
+  console.error(`ERROR: panel bundle ${totalBytes} B exceeds 46,080 B (45 KiB) hard gate`);
   process.exit(1);
+}
+if (totalBytes > 44_000) {
+  console.warn(`WARN: panel bundle ${totalBytes} B exceeds 44,000 B warning threshold`);
 }

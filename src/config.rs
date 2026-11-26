@@ -228,19 +228,30 @@ mod tests {
         let explicit_pf = Path::new("/tmp/custom/DevToolsActivePort");
         let explicit_udd = Path::new("/tmp/chrome-debug-profile");
 
-        let list = candidate_chrome_port_files(
-            home,
-            Some(xdg),
-            Some(explicit_pf),
-            Some(explicit_udd),
-        );
+        let list =
+            candidate_chrome_port_files(home, Some(xdg), Some(explicit_pf), Some(explicit_udd));
         assert_eq!(list[0], explicit_pf);
-        assert_eq!(list[1], PathBuf::from("/tmp/chrome-debug-profile/DevToolsActivePort"));
-        assert!(list.contains(&PathBuf::from("/tmp/fake-xdg/google-chrome/DevToolsActivePort")));
-        assert!(list.contains(&PathBuf::from("/tmp/fake-home/.config/google-chrome/DevToolsActivePort")));
-        assert!(list.contains(&PathBuf::from("/tmp/fake-home/.config/chromium/DevToolsActivePort")));
-        assert!(list.contains(&PathBuf::from("/tmp/fake-home/snap/chromium/common/chromium/DevToolsActivePort")));
-        assert!(list.contains(&PathBuf::from("/tmp/fake-home/.var/app/com.google.Chrome/config/google-chrome/DevToolsActivePort")));
-        assert!(list.contains(&PathBuf::from("/tmp/fake-home/Library/Application Support/Google/Chrome Canary/DevToolsActivePort")));
+        assert_eq!(
+            list[1],
+            PathBuf::from("/tmp/chrome-debug-profile/DevToolsActivePort")
+        );
+        assert!(list.contains(&PathBuf::from(
+            "/tmp/fake-xdg/google-chrome/DevToolsActivePort"
+        )));
+        assert!(list.contains(&PathBuf::from(
+            "/tmp/fake-home/.config/google-chrome/DevToolsActivePort"
+        )));
+        assert!(list.contains(&PathBuf::from(
+            "/tmp/fake-home/.config/chromium/DevToolsActivePort"
+        )));
+        assert!(list.contains(&PathBuf::from(
+            "/tmp/fake-home/snap/chromium/common/chromium/DevToolsActivePort"
+        )));
+        assert!(list.contains(&PathBuf::from(
+            "/tmp/fake-home/.var/app/com.google.Chrome/config/google-chrome/DevToolsActivePort"
+        )));
+        assert!(list.contains(&PathBuf::from(
+            "/tmp/fake-home/Library/Application Support/Google/Chrome Canary/DevToolsActivePort"
+        )));
     }
 }

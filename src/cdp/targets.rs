@@ -15,9 +15,9 @@ pub const POPUP_TRIGGER_WINDOW: Duration = Duration::from_millis(2500);
 /// Authoritative owner of Chrome target sessions, modal JS dialogs, active tab focus,
 /// monotonic `tab_epoch` and `pause_epoch`, and the dedicated popup auto-follow timer.
 pub struct TabStateStore {
-    pub(crate) sessions: HashMap<String, String>,          // targetId -> sessionId
+    pub(crate) sessions: HashMap<String, String>, // targetId -> sessionId
     pub(crate) session_to_target: HashMap<String, String>, // sessionId -> targetId
-    pub(crate) dialogs: HashMap<String, JsDialogInfo>,     // targetId -> open modal JS dialog
+    pub(crate) dialogs: HashMap<String, JsDialogInfo>, // targetId -> open modal JS dialog
     pub(crate) active_target_id: Option<String>,
     pub(crate) popup_switched_target: Option<String>,
     pub(crate) tab_epoch: u64,
@@ -47,10 +47,10 @@ impl TabStateStore {
         }
     }
 
-    pub fn reset_on_disconnect(&mut self) {
-        if self.paused {
-            self.paused = false;
-            self.pause_epoch += 1;
+    pub fn reset_on_disconnect(&mut self, had_transport: bool) {
+        if had_transport {
+            self.set_paused(false);
+            self.tab_epoch += 1;
         }
         self.sessions.clear();
         self.session_to_target.clear();
@@ -238,6 +238,9 @@ impl TabStateStore {
             self.tab_epoch += 1;
         }
         self.active_target_id = Some(target_id.to_string());
+        if self.popup_switched_target.as_deref() != Some(target_id) {
+            self.popup_switched_target = None;
+        }
     }
 
     pub fn take_popup_switched(&mut self, target_id: &str) -> bool {
@@ -358,15 +361,14 @@ impl TabStateStore {
         update_active: bool,
     ) -> String {
         let popup_switched = self.popup_switched_target.as_deref();
-        let safe_req = if popup_switched.is_some()
-            && popup_switched == self.active_target_id.as_deref()
-        {
-            self.active_target_id.as_deref()
-        } else {
-            requested_id
-                .filter(|id| !id.is_empty() && !self.is_recently_closed(id))
-                .or(self.active_target_id.as_deref())
-        };
+        let safe_req =
+            if popup_switched.is_some() && popup_switched == self.active_target_id.as_deref() {
+                self.active_target_id.as_deref()
+            } else {
+                requested_id
+                    .filter(|id| !id.is_empty() && !self.is_recently_closed(id))
+                    .or(self.active_target_id.as_deref())
+            };
         let chosen = safe_req
             .and_then(|c| tabs.iter().find(|t| t.target_id == c))
             .map(|t| t.target_id.clone())
@@ -376,6 +378,42 @@ impl TabStateStore {
             self.set_active_target(&chosen, true);
         }
         chosen
+    }
+
+    pub fn validate_input_target(
+        &mut self,
+        requested_id: Option<&str>,
+        expected_epoch: u64,
+    ) -> Result<Option<String>, &'static str> {
+        if expected_epoch != self.tab_epoch {
+            return Err("The tab epoch changed");
+        }
+        if requested_id.is_none() && self.cached_tabs.is_empty() {
+            return Ok(None);
+        }
+        let target = requested_id
+            .or(self.active_target_id.as_deref())
+            .or_else(|| self.cached_tabs.first().map(|tab| tab.target_id.as_str()))
+            .map(String::from);
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        if self.is_recently_closed(&target)
+            || !self.cached_tabs.iter().any(|tab| tab.target_id == target)
+        {
+            return Err("The input target is missing or closed");
+        }
+        if self
+            .active_target_id
+            .as_ref()
+            .is_some_and(|active| active != &target)
+        {
+            return Err("The active tab switched away from the input target");
+        }
+        if self.active_target_id.is_none() {
+            self.set_active_target(&target, false);
+        }
+        Ok(Some(target))
     }
 }
 
@@ -419,11 +457,12 @@ pub(crate) fn resolve_target_id(
         return Ok((None, Vec::new()));
     }
 
-    let chosen = client
-        .tabs
-        .lock()
-        .unwrap()
-        .resolve_chosen_target(requested_id, &tabs, update_active);
+    let chosen =
+        client
+            .tabs
+            .lock()
+            .unwrap()
+            .resolve_chosen_target(requested_id, &tabs, update_active);
     Ok((Some(chosen), tabs))
 }
 
@@ -576,7 +615,10 @@ pub(crate) fn close_tab(
     };
     let (sc_tid, sc_q) = {
         let cap = client.capture.lock().unwrap();
-        (cap.screencast_target_id.clone(), cap.screencast_quality.clone())
+        (
+            cap.screencast_target_id.clone(),
+            cap.screencast_quality.clone(),
+        )
     };
     if !paused {
         if let Some(tid) = active_tid.as_deref() {

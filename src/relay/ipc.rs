@@ -43,6 +43,8 @@ struct ActiveConn {
     open: Arc<AtomicBool>,
 }
 
+type PendingReplies = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
+
 /// Persistent multiplexed Unix-socket JSON-RPC client to the detached `chrome-stream-mcp relay` daemon.
 /// Concurrent callers (e.g. long-polling `chrome_stream_frame` + fast `chrome_stream_input`) share one socket
 /// without head-of-line blocking.
@@ -54,7 +56,7 @@ pub struct RelayClient {
     auto_spawn: bool,
     connect_lock: Mutex<()>,
     conn: Mutex<Option<Arc<ActiveConn>>>,
-    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>,
+    pending: PendingReplies,
     next_id: AtomicU64,
 }
 
@@ -104,7 +106,10 @@ impl RelayClient {
             .stderr(Stdio::null())
             .env("CHROME_STREAM_DATA_DIR", &self.data_dir)
             .env("CHROME_STREAM_RELAY_SOCK", &self.sock_path)
-            .env("CHROME_STREAM_CHROME_DEBUG_PORT", self.debug_port.to_string());
+            .env(
+                "CHROME_STREAM_CHROME_DEBUG_PORT",
+                self.debug_port.to_string(),
+            );
         if !self.port_file.as_os_str().is_empty() {
             cmd.env("CHROME_STREAM_CHROME_PORT_FILE", &self.port_file);
         }
@@ -247,7 +252,10 @@ impl RelayBackend for RelayClient {
                 self.pending.lock().unwrap().insert(id, tx);
             }
 
-            let payload = format!("{}\n", json!({ "id": id, "method": method, "params": params }));
+            let payload = format!(
+                "{}\n",
+                json!({ "id": id, "method": method, "params": params })
+            );
             let write_res = {
                 let mut w = active.writer.lock().unwrap();
                 let _ = w.set_write_timeout(Some(Duration::from_secs(5)));
