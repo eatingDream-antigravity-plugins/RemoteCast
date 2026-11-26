@@ -1,0 +1,44 @@
+# Chrome Stream MCP
+
+> Low-bandwidth native Rust Chrome DevTools Protocol (CDP) screencast relay, interactive browser controller, and SEP-1865 MCP App server for viewing and controlling local Google Chrome tabs over slow or remote connections.
+
+## For AI Agents
+
+- [Agent Skill](skills/chrome-stream/SKILL.md): Complete MCP tool reference (`chrome_stream_stage`, `chrome_stream_connect`, `chrome_stream_disconnect`), Chrome debugging setup, and weak-network workflows (`agentskills.io` compatible).
+- [Contributor & Agent Guide](AGENTS.md): Architecture, Cargo/panel test commands, loopback security boundaries, and plugin packaging rules.
+- [README (English)](README.md) | [README (简体中文)](README.zh-CN.md)
+
+## Quick Connect (Any MCP Client)
+
+Install the prebuilt binary (macOS / Linux):
+```sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/chrome-stream-mcp/main/scripts/install.sh | sh
+```
+
+Generic stdio MCP configuration (`mcpServers`):
+```json
+{
+  "mcpServers": {
+    "chrome-stream-mcp": {
+      "command": "~/.gemini/config/plugins/chrome-stream-mcp/bin/chrome-stream-mcp",
+      "args": [
+        "serve",
+        "--data-dir", "~/.gemini/antigravity/plugin_data/chrome-stream-mcp",
+        "--panel-html", "~/.gemini/config/plugins/chrome-stream-mcp/panel/dist/panel.html"
+      ]
+    }
+  }
+}
+```
+
+## Public MCP Tools
+
+- `chrome_stream_stage`: Opens the live viewer (`ui://chrome-stream-mcp/stage`) and reports relay/Chrome readiness without auto-connecting.
+- `chrome_stream_connect`: Connects to the persistent `0600` local relay and streams the active tab (`qualityPreset?: "auto" | "ultra" | "low" | "medium" | "high"`, `rttMs?`).
+- `chrome_stream_disconnect`: Stops screencasting and closes the Chrome CDP WebSocket.
+
+## CLI Subcommands
+
+- `chrome-stream-mcp serve [--data-dir <path>] [--panel-html <path>]`
+- `chrome-stream-mcp relay [--data-dir <path>]`
+- `chrome-stream-mcp doctor [--json]`

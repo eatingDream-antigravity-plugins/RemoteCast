@@ -32,3 +32,7 @@ If `portFile.valid` is `false`, guide the user to:
 
 - Connections are strictly loopback-only (`127.0.0.1` / `::1`) over a `0600` local relay; never suggest binding remote debugging to `0.0.0.0` or non-loopback interfaces.
 - Tool responses automatically redact local filesystem paths, WebSocket tokens, and hostnames.
+
+## Cross-Client Setup
+
+Any stdio MCP client (Antigravity, Claude Code, Codex, Cursor, OpenCode) can connect via `chrome-stream-mcp serve --data-dir <dir> --panel-html <panel.html>`. Use `chrome-stream-mcp doctor --json` for machine-readable local diagnostics.
