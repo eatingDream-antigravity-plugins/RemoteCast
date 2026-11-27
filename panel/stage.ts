@@ -12,7 +12,7 @@ import type { I18nDict } from "./i18n.ts";
 type Tm = ReturnType<typeof setTimeout> | number;
 type HChild = Node | string | false | null | undefined | HSpec;
 type HSpec = readonly [string, (string | 0)?, ...HChild[]];
-type BootPayload = FramePayload & { locale?: string; qualityApplied?: string };
+type BootPayload = FramePayload & { locale?: string; qualityApplied?: string; appVersion?: string; relayVersion?: string };
 type CfgState = { lang: string; defaultQuality: string; defaultConnectMode: string; bgPollIntervalSec: number; idlePauseSec: number; wheelCoalesceMs?: number; newTabUrl?: string };
 
 const doc = document;
@@ -28,7 +28,7 @@ const tg = (n: Element, c: string, v: unknown): boolean => n.classList.toggle(c,
 const pNow = (): number => performance.now(), nowMs = (): number => Date.now(), cl = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 const sTm = (f: () => void, m?: number): Tm => globalThis.setTimeout(f, m), cTm = (i: Tm): void => globalThis.clearTimeout(i as ReturnType<typeof setTimeout>), hid = (): boolean => doc.visibilityState === "hidden";
 const isMac = /mac/i.test(navigator?.platform || navigator?.userAgent || "");
-const root = doc.getElementById("app") as HTMLElement, app = App({ name: "Remote Cast", version: "0.5.5" }, {}), net = new AdaptiveBandwidthController("auto");
+const root = doc.getElementById("app") as HTMLElement, app = App({ name: "Remote Cast", version: b0.appVersion || b0.relayVersion || "0.1.0" }, {}), net = new AdaptiveBandwidthController("auto");
 const KEYS = new Set<string>([...REP, "Enter", "Escape", "Home", "End", "Space"]);
 const QK = "auto ultra low medium high".split(" "), IK = "Enter Escape Tab Backspace Undo Copy Paste SelectAll".split(" ");
 const DLG = "alert confirm prompt beforeunload".split(" "), DLG_K = "da df dp dl".split(" ");
@@ -183,9 +183,10 @@ const syncBnr = (): void => {
   const od = !S.on && det; tx(D.om, txt); tx(D.od2, errRaw || ""); hd(D.ob2, !od); hd(D.od2, !(od && errDet)); hd(D.oe, !txt);
 };
 const syncDots = (): void => {
-  const he = !!(errCode || errRaw);
+  const he = !!(errCode || errRaw), ok = !!portF?.valid;
   D.ld.className = "ed " + (!S.on ? "" : he ? "er" : S.pa || S.id ? "wn" : S.nt ? "" : "ok");
-  D.od.className = D.o0.className = "ed " + (he ? "er" : isCn ? "wn" : portF?.valid ? "ok" : "");
+  D.od.className = D.o0.className = "ed " + (he ? "er" : isCn ? "wn" : ok ? "ok" : "");
+  tg(D.op, "ok", ok && !he); tg(D.op, "er", he);
 };
 const setSw = (v: number): void => { isSw = v ? 1 : 0; tg(D.vc, "sw", isSw); hd(D.lb, !(S.nv || isSw)); };
 const sUrl = (u: string): void => { if (doc.activeElement !== D.ui) D.ui.value = u || ""; };
@@ -230,8 +231,8 @@ const goOff = (code?: string | null, raw?: unknown, pf?: PortFileInfo): void => 
   dropIn(); clrTm(1); sView(); schedOffP();
 };
 const uOff = (): void => {
-  const ok = !!portF?.valid;
-  tg(D.op, "ok", ok); tx(D.op, ok ? (portF?.fallback ? T.rse : T.rmy) : T.nf);
+  const ok = !!portF?.valid, he = !!(errCode || errRaw);
+  tg(D.op, "ok", ok && !he); tg(D.op, "er", he); tx(D.op, ok ? (portF?.fallback ? T.rse : T.rmy) : T.nf);
   syncBnr(); D.ob.disabled = D.ol.disabled = !!isCn || !canCall();
   tx(D.ob, isCn === "personal" ? T.cn : T.cm); tx(D.ol, isCn === "launch" ? T.cn : T.os);
   syncDots(); if (!ok && !D.dt.dataset.u) D.dt.open = true;

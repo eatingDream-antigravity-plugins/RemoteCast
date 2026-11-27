@@ -96,12 +96,27 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
                     cfg.debug_port,
                     debug_port_ws.is_some()
                 );
+                let relay_ver = relay_ping
+                    .as_ref()
+                    .and_then(|p| p["version"].as_str())
+                    .unwrap_or("-");
+                let relay_pid = relay_ping
+                    .as_ref()
+                    .and_then(|p| p["pid"].as_u64())
+                    .map_or_else(|| "-".to_string(), |pid| pid.to_string());
                 println!(
-                    "  Relay Sock : {} ({}, mode={})",
+                    "  Relay Sock : {} ({}, mode={}, version={}, pid={})",
                     if relay_ok { "ALIVE" } else { "STOPPED" },
                     cfg.relay_sock.display(),
-                    report["relay"]["socketMode"].as_str().unwrap_or("-")
+                    report["relay"]["socketMode"].as_str().unwrap_or("-"),
+                    relay_ver,
+                    relay_pid
                 );
+                if relay_ok && relay_ver != APP_VERSION {
+                    println!(
+                        "  WARNING    : Running relay version ({relay_ver}) differs from {APP_VERSION}; idle relay will recycle on next connection"
+                    );
+                }
                 if let Some(st) = &relay_status {
                     println!(
                         "  Session    : connected={}, activeTargetId={}",
@@ -128,12 +143,27 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
                     cfg.debug_port,
                     debug_port_ws.is_some()
                 );
+                let relay_ver = relay_ping
+                    .as_ref()
+                    .and_then(|p| p["version"].as_str())
+                    .unwrap_or("-");
+                let relay_pid = relay_ping
+                    .as_ref()
+                    .and_then(|p| p["pid"].as_u64())
+                    .map_or_else(|| "-".to_string(), |pid| pid.to_string());
                 println!(
-                    "  本地中继   : {} ({}, 权限={})",
+                    "  本地中继   : {} ({}, 权限={}, 版本={}, pid={})",
                     if relay_ok { "运行中" } else { "未运行" },
                     cfg.relay_sock.display(),
-                    report["relay"]["socketMode"].as_str().unwrap_or("-")
+                    report["relay"]["socketMode"].as_str().unwrap_or("-"),
+                    relay_ver,
+                    relay_pid
                 );
+                if relay_ok && relay_ver != APP_VERSION {
+                    println!(
+                        "  警告       : 运行中的中继版本 ({relay_ver}) 与当前版本 ({APP_VERSION}) 不一致；空闲中继将在下次连接时自动更新"
+                    );
+                }
                 if let Some(st) = &relay_status {
                     println!(
                         "  当前会话   : 已连接={}, 当前标签页={}",
@@ -167,8 +197,14 @@ fn doctor_report(
         json!({
             "ok": value["ok"].as_bool(),
             "pid": value["pid"].as_u64(),
+            "version": value["version"].as_str(),
             "connected": value["connected"].as_bool(),
         })
+    });
+    let version_mismatch = relay_ping.is_some_and(|value| {
+        value["version"]
+            .as_str()
+            .is_none_or(|ver| ver != APP_VERSION)
     });
     json!({
         "version": APP_VERSION,
@@ -184,6 +220,7 @@ fn doctor_report(
             "socketExists": socket.is_some(),
             "socketMode": socket.map(|m| format!("{:04o}", m.permissions().mode() & 0o777)),
             "alive": relay_ping.is_some(),
+            "versionMismatch": version_mismatch,
             "ping": ping,
             "status": relay_status.map(mcp::server::stage_status_from_snapshot),
         },
@@ -283,7 +320,9 @@ mod tests {
             &cfg,
             &status,
             true,
-            Some(&json!({ "ok": true, "pid": 123, "socketPath": cfg.relay_sock })),
+            Some(
+                &json!({ "ok": true, "pid": 123, "version": "0.5.1", "socketPath": cfg.relay_sock }),
+            ),
             Some(&json!({
                 "connected": true, "portFile": status,
                 "page": {"url": "file:///diagnostic-fixture/page.html"},
@@ -291,6 +330,9 @@ mod tests {
         );
         assert_eq!(report["chrome"]["portFile"], status.public_summary());
         assert_eq!(report["relay"]["status"]["connected"], true);
+        assert_eq!(report["relay"]["ping"]["pid"], 123);
+        assert_eq!(report["relay"]["ping"]["version"], "0.5.1");
+        assert_eq!(report["relay"]["versionMismatch"], "0.5.1" != APP_VERSION);
         let rendered = report.to_string();
         assert!(!rendered.contains("/diagnostic-fixture"));
         assert!(!rendered.contains("ws://"));

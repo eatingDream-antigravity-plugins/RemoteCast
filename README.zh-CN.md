@@ -17,9 +17,9 @@ Remote Cast 把 Chrome 标签页实时投屏到侧边栏面板，让你边看边
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-181C28)
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/remotecast-connected-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/images/remotecast-connected-light.png">
-  <img src="docs/images/remotecast-connected-dark.png" alt="Remote Cast 实时浏览器面板预览" width="620">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/remotecast-connected-dark-zh.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/remotecast-connected-light-zh.png">
+  <img src="docs/images/remotecast-connected-dark-zh.png" alt="Remote Cast 实时浏览器面板预览" width="620">
 </picture>
 
 </div>
