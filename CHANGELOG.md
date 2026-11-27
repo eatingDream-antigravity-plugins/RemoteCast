@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.6.0](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.5.5...v0.6.0) (2026-11-27)
+
+
+### Features
+
+* Lucid Indigo 64 KiB TS panel, non-focus-stealing tabs, settings hot-reload, and Pause/Disconnect UX ([#33](https://github.com/eatingDream-antigravity-plugins/remote-cast/issues/33)) ([c5a1d52](https://github.com/eatingDream-antigravity-plugins/remote-cast/commit/c5a1d5202b10ab91ecb76252d8d1cba30398b436))
+
 ## [0.5.5](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.5.4...v0.5.5) (2026-11-27)
 
 
