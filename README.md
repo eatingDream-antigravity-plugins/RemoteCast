@@ -4,15 +4,17 @@
 
 # Remote Cast (`chrome-stream-mcp`)
 
-**View and click through your local Chrome tabs inside Antigravity — crisp and responsive even over slow mobile or remote links.**
+**Your Chrome, live inside Antigravity.**
 
-[Homepage](https://remotecast.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/remote-cast/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+Remote Cast streams a Chrome tab into the side panel so you can watch and steer what an agent is doing — click, type, switch tabs. Use your everyday Chrome or a separate clean profile; quality adapts to your network.
+
+[Homepage](https://remotecast.eatingdream.dev) · **English** | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/remote-cast/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/remote-cast/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/remote-cast/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/remote-cast/releases)
-![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-12151E?logo=rust&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2952CC)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-181C28)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/remotecast-connected-dark.png">
@@ -24,16 +26,17 @@
 
 ## Is It For You?
 
-- **Use Remote Cast** if you want to view, scroll, type, and switch tabs in your own local Google Chrome (with your existing logins and extensions) or an isolated loopback Chrome right inside Antigravity, even when working remotely over a slow connection.
-- **Skip it** if you only want an AI agent to browse or scrape the web autonomously — Antigravity's built-in `browser` subagent already handles general browsing without touching your personal Chrome.
+- **Use Remote Cast** if you want to view, scroll, type, and switch tabs in your own Google Chrome (keeping existing logins and extensions) or a separate clean Chrome profile right inside Antigravity, even over a slow link.
+- **Skip it** if you only want an AI agent to browse or scrape autonomously — Antigravity's built-in `browser` subagent already handles general browsing without touching your Chrome.
 
 ## Why Remote Cast
 
-- **Your real Chrome or one-click isolated Chrome**: Attach to your daily Chrome profile with logins intact, or launch an isolated loopback Chrome profile that never asks for a local **Allow** click.
-- **Standby keeps your connection alive remotely**: Hit **Standby** in the header to drop streaming to 0 FPS and save battery without losing Chrome's **Allow** consent across reloads; **Revoke & Disconnect** sits safely in the `⋯` menu.
-- **Stays readable on weak links, snaps sharp when you stop**: Adapts frame rate smoothly without quality flicker while scrolling or typing, then settles into a sharp WebP still frame with zero wasted bytes when the page is idle.
-- **No misdirected clicks or forced blank tabs**: Every click and keystroke stays locked to the tab you were looking at, and closing the last tab shows a clean empty state instead of spawning `about:blank`.
-- **Fast, lightweight native panel**: Single Rust binary with a zero-dependency panel (`< 45 KB`), dark-first zero-flicker loading, and instant EN / 中文 switching.
+- **My Chrome or Separate Chrome**: Attach to your everyday Chrome with logins intact, or open a separate Chrome with a clean profile and no permission prompt.
+- **Pause vs. Disconnect in the header**: Click **Pause** to stop streaming at 0 FPS while keeping Chrome connected (so Chrome doesn't ask you to Allow again); click **Disconnect** when you want to end the session.
+- **Stays in the background on macOS**: Clicking, switching tabs, and opening new tabs (`chrome://newtab`) never steal window focus away from Antigravity.
+- **Adapts to slow networks, sharpens when still**: Pick **Auto**, **Saver**, **Low**, **Balanced**, or **High**. While you scroll or type it stays responsive, then settles into a crisp still frame with zero wasted bytes when idle.
+- **Settings right in the panel**: Click **Settings** (`⚙`) to change language, default quality, default connect mode, background refresh, and idle pause — backed by a hot-reloading `settings.json`.
+- **Fast, lightweight native panel**: Single Rust binary with a zero-dependency panel (`<= 64 KiB`), dark-first zero-flicker loading, and instant EN / 中文 switching.
 
 ## Quick Start
 
@@ -43,18 +46,16 @@
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/remote-cast/main/scripts/install.sh | sh
 ```
 
-<sub>Downloads the prebuilt binary from GitHub Releases, verifies its SHA-256 checksum, and installs into <code>~/.gemini/config/plugins/chrome-stream-mcp</code>. Uninstall anytime with <code>curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/remote-cast/main/scripts/install.sh | sh -s -- --uninstall</code>.</sub>
-
-Reload Antigravity after installation.
+<sub>Verifies SHA-256 checksums, installs into <code>~/.gemini/config/plugins/chrome-stream-mcp</code>, and hot-reloads the MCP server automatically inside Antigravity (use <code>--reload</code> outside Antigravity or <code>--no-reload</code> to skip). Uninstall anytime with <code>--uninstall</code>.</sub>
 
 ### 2. Connect Chrome
 
-- **Personal Chrome**: Enable remote debugging at `chrome://inspect/#remote-debugging`, open **Remote Cast**, click **Connect Personal Chrome**, and confirm **Allow** once in Chrome. Use **Standby** when pausing so you never have to re-approve remotely.
-- **Remote Chrome (No Allow)**: Click **Launch Remote Chrome** for a fresh, isolated loopback profile (`0700` permissions on `127.0.0.1`). It automatically picks a free port (starting at `9223`) so it runs cleanly alongside Personal Chrome on `9222`, or pins a port via `CHROME_STREAM_REMOTE_PORT`.
+- **My Chrome**: Open `chrome://inspect/#remote-debugging` in Chrome and turn on remote debugging, then click **Connect my Chrome** in Remote Cast and click **Allow** once in Chrome. Use **Pause** when stepping away.
+- **Separate Chrome**: Click **Open separate Chrome** for a fresh, isolated local profile (`0700` permissions on `127.0.0.1`) with no permission prompt. It picks a free local port automatically so it runs cleanly alongside your everyday Chrome.
 
 ## For AI Agents
 
-Machine-readable tool schemas, environment variables, CLI diagnostics, and stdio setup for any MCP-capable agent:
+Machine-readable tool schemas, `settings.json` keys, CLI diagnostics, and stdio setup:
 
 ```sh
 npx skills add eatingDream-antigravity-plugins/remote-cast
@@ -64,24 +65,22 @@ npx skills add eatingDream-antigravity-plugins/remote-cast
 - **Full AI & Configuration Guide**: [`docs/ai-guide.md`](docs/ai-guide.md)
 - **LLM Entry Index**: [`llms.txt`](llms.txt)
 
-> Prompt hint: *"Read `llms.txt` and `docs/ai-guide.md` in `chrome-stream-mcp` to run `chrome-stream-mcp doctor --json` or connect Chrome in standby/remote mode."*
-
 ## Safety & Privacy
 
 - **Loopback-only (`127.0.0.1` / `::1`)**: Rejects non-loopback endpoints and never exposes Chrome debugging ports to your LAN or the internet.
-- **Same-user local socket**: Uses a `0600` Unix socket, checks peer user ID, and verifies ownership and permissions before touching sockets or the `0700` isolated profile.
-- **Explicit connect & 12 s idle pause**: Opening the panel never auto-connects to Chrome; screen capture automatically pauses after 12 seconds of inactivity and wakes on your next click or key.
+- **Same-user local socket**: Uses a `0600` Unix socket, checks peer user ID, and verifies ownership and permissions on sockets, `settings.json` (`0600`), and the `0700` separate profile.
+- **Explicit connect & idle pause**: Opening the panel never auto-connects to Chrome; screen capture pauses automatically while idle (default 12 s) and resumes on your next click or key.
 - **Sanitized diagnostics**: `chrome-stream-mcp doctor --json` omits local paths and raw debugging WebSocket URLs by default.
 
 ## Documentation
 
-- [AI Guide & Configuration Reference](docs/ai-guide.md) — MCP tools, environment variables, CLI subcommands, build from source
+- [AI Guide & Configuration Reference](docs/ai-guide.md) — MCP tools, `settings.json`, environment variables, CLI subcommands, build from source
 - [Agent Skill](skills/chrome-stream/SKILL.md) — On-demand agent workflow rules
 - [LLM Index](llms.txt) · [Contributor Guide](AGENTS.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
 
 ## Antigravity Plugin Suite
 
-Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar) (`context-radar-mcp`) · [Clam Guard](https://github.com/eatingDream-antigravity-plugins/clam-guard) (`mac-clamshell-mcp`) · **Remote Cast** (`chrome-stream-mcp`) · [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck) (`colab-mcp`) — powered by [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit) (`agy-mcp-kit`).
+Part of the [Antigravity Plugins](https://github.com/eatingDream-antigravity-plugins) suite: [Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar) · [Clam Guard](https://github.com/eatingDream-antigravity-plugins/clam-guard) · **Remote Cast** · [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck) · [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit)
 
 ## License
 

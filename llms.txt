@@ -1,11 +1,11 @@
 # Remote Cast (chrome-stream-mcp)
 
-> Low-bandwidth native Rust Chrome DevTools Protocol (CDP) screencast relay, interactive browser controller, and SEP-1865 MCP App server for viewing and controlling local Google Chrome tabs over slow or remote connections. Homepage: https://remotecast.eatingdream.dev
+> Your Chrome, live inside Antigravity. Native Rust Chrome screencast relay, interactive browser controller, and SEP-1865 MCP App server for viewing and controlling local Google Chrome tabs over slow or remote links. Homepage: https://remotecast.eatingdream.dev
 
 ## For AI Agents
 
-- [AI & Configuration Guide](docs/ai-guide.md): Complete MCP tool schemas (`chrome_stream_stage`, `chrome_stream_connect`, `chrome_stream_disconnect`, plus app-only tools), Standby vs. Revoke semantics, isolated Remote Chrome mode, weak-net profiles, `CHROME_STREAM_*` env vars, CLI flags, and build steps.
-- [Agent Skill](skills/chrome-stream/SKILL.md): Concise `agentskills.io`-compatible operational workflow for agents.
+- [AI & Configuration Guide](docs/ai-guide.md): Complete MCP tool schemas (`chrome_stream_stage`, `chrome_stream_connect`, `chrome_stream_disconnect`, plus app-only tools including `chrome_stream_config`), Pause vs. Disconnect semantics, Separate Chrome mode, `settings.json` hot-reload, weak-net profiles, `CHROME_STREAM_*` env vars, CLI flags, and build steps.
+- [Agent Skill](skills/chrome-stream/SKILL.md): Concise `agentskills.io`-compatible operational workflow and `settings.json` reference.
 - [Contributor & Agent Guide](AGENTS.md): Architecture, Cargo/panel verification gates, loopback security boundaries, and plugin packaging rules.
 - [README (English)](README.md) | [README (简体中文)](README.zh-CN.md)
 
@@ -19,13 +19,14 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/rem
 
 - `chrome_stream_stage`: Opens the live viewer (`ui://chrome-stream-mcp/stage`) and reports relay/Chrome readiness without auto-connecting.
 - `chrome_stream_connect`: Connects to local Chrome (`mode?: "auto" | "personal" | "remote"`, `qualityPreset?: "auto" | "ultra" | "low" | "medium" | "high"`, `rttMs?`) and streams the active tab.
-- `chrome_stream_disconnect`: Supports `mode?: "standby" | "revoke"` (default `"revoke"`). `"standby"` pauses at 0 FPS while keeping Chrome authorization alive; `"revoke"` closes the CDP WebSocket.
+- `chrome_stream_disconnect`: Supports `mode?: "standby" | "revoke"` (default `"revoke"`). `"standby"` pauses at 0 FPS while keeping Chrome authorization alive; `"revoke"` closes the debugging session.
 
 ## App-Only MCP Tools (SEP-1865 UI Hosts)
 
 - `chrome_stream_frame`: Long-polls adaptive motion JPEG or crisp settled WebP stills with 0-byte unchanged deduplication.
-- `chrome_stream_input`: Dispatches coalesced inputs bound to `(targetId, targetEpoch)` with stale-target rejection.
-- `chrome_stream_launch`: Launches or reuses an isolated loopback Remote Chrome (`127.0.0.1`, `0700` profile) without requiring local Allow confirmation.
+- `chrome_stream_input`: Dispatches coalesced inputs bound to `(targetId, targetEpoch)` with focus-safe background tab handling and `chrome://newtab` defaults.
+- `chrome_stream_launch`: Launches or reuses an isolated loopback Separate Chrome (`127.0.0.1`, `0700` profile) without requiring local Allow confirmation.
+- `chrome_stream_config`: Reads or atomically updates `${PLUGIN_DATA}/settings.json` (`0600`, `flock`-locked, hot-reloads on edit).
 
 ## CLI Subcommands
 

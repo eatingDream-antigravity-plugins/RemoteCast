@@ -1,4 +1,4 @@
-use crate::cdp::capture::{self, FramePipeline};
+use crate::cdp::capture::{self, FramePipeline, SCREENCAST_IDLE_STOP};
 #[cfg(not(test))]
 use crate::cdp::discovery::is_loopback_port_alive;
 use crate::cdp::discovery::{
@@ -10,6 +10,7 @@ use crate::cdp::protocol::{default_ws_factory, CdpTransport, TransportEvent, Tra
 use crate::cdp::targets::{self, TabStateStore};
 use crate::config::Config;
 use crate::i18n::{chrome_not_found_error, current_lang};
+use crate::settings::{SettingsStore, DEFAULT_NEW_TAB_URL};
 use crate::stream::dedup::{hash_tabs, is_target_gone_error};
 use crate::stream::profiles::{QualityProfile, TabInfo};
 use chrono::Utc;
@@ -221,8 +222,10 @@ impl TransportState {
 pub struct CdpClient {
     port_files: Vec<PathBuf>,
     debug_port: u16,
+    debug_port_from_env: bool,
     remote_port: Option<u16>,
     data_dir: Option<PathBuf>,
+    settings: Option<Arc<SettingsStore>>,
     ws_url_override: Option<String>,
     ws_factory: TransportFactory,
     connect_lock: Mutex<()>,
@@ -244,11 +247,14 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub fn from_config(cfg: &Config) -> Arc<Self> {
+        let settings = Some(SettingsStore::new(cfg.data_dir.clone()));
         Self::build(
             cfg.port_files.clone(),
             cfg.debug_port,
+            cfg.debug_port_from_env,
             cfg.remote_port,
             Some(cfg.data_dir.clone()),
+            settings,
             None,
             default_ws_factory(),
             true,
@@ -293,8 +299,10 @@ impl CdpClient {
         Self::build(
             vec![port_file],
             debug_port,
+            false,
             remote_port,
             data_dir,
+            None,
             None,
             ws_factory,
             false,
@@ -311,6 +319,8 @@ impl CdpClient {
         Self::build(
             port_files,
             debug_port,
+            false,
+            None,
             None,
             None,
             ws_url_override,
@@ -319,11 +329,14 @@ impl CdpClient {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         port_files: Vec<PathBuf>,
         debug_port: u16,
+        debug_port_from_env: bool,
         remote_port: Option<u16>,
         data_dir: Option<PathBuf>,
+        settings: Option<Arc<SettingsStore>>,
         ws_url_override: Option<String>,
         ws_factory: TransportFactory,
         spawn_keepalive: bool,
@@ -331,8 +344,10 @@ impl CdpClient {
         let client = Arc::new(Self {
             port_files,
             debug_port,
+            debug_port_from_env,
             remote_port,
             data_dir,
+            settings,
             ws_url_override,
             ws_factory,
             connect_lock: Mutex::new(()),
@@ -397,12 +412,70 @@ impl CdpClient {
         capture::check_idle_screencast_stop(self);
     }
 
+    pub fn default_new_tab_url(&self) -> String {
+        self.settings
+            .as_ref()
+            .map(|s| s.current().effective_new_tab_url().to_string())
+            .unwrap_or_else(|| DEFAULT_NEW_TAB_URL.to_string())
+    }
+
+    pub fn idle_pause_timeout(&self) -> Option<Duration> {
+        self.settings
+            .as_ref()
+            .map(|s| s.current().effective_idle_pause())
+            .unwrap_or(Some(SCREENCAST_IDLE_STOP))
+    }
+
+    pub fn effective_debug_port(&self) -> u16 {
+        if self.debug_port_from_env {
+            return self.debug_port;
+        }
+        self.settings
+            .as_ref()
+            .and_then(|s| s.current().debug_port)
+            .unwrap_or(self.debug_port)
+    }
+
+    pub fn effective_remote_port(&self) -> Option<u16> {
+        self.remote_port
+            .or_else(|| self.settings.as_ref().and_then(|s| s.current().remote_port))
+    }
+
+    /// Keeps background tabs compositing & focus-responsive via `Emulation.setFocusEmulationEnabled`
+    /// without calling `Target.activateTarget` or `Page.bringToFront` (preventing macOS focus steal).
+    pub fn sync_focus_emulation(&self, target_id: Option<&str>) {
+        let (prev_sid, next_sid) = {
+            let mut tabs = self.tabs.lock().unwrap();
+            let desired = target_id.and_then(|tid| tabs.session_for(tid));
+            if tabs.focused_session == desired {
+                return;
+            }
+            let prev = tabs.focused_session.take();
+            tabs.focused_session = desired.clone();
+            (prev, desired)
+        };
+        if let Some(prev) = prev_sid {
+            self.send_no_wait(
+                "Emulation.setFocusEmulationEnabled",
+                json!({ "enabled": false }),
+                Some(&prev),
+            );
+        }
+        if let Some(next) = next_sid {
+            self.send_no_wait(
+                "Emulation.setFocusEmulationEnabled",
+                json!({ "enabled": true }),
+                Some(&next),
+            );
+        }
+    }
+
     pub fn port_file_status(&self) -> PortFileStatus {
         discover_port_file(&self.port_files)
     }
 
     fn probe_remote_endpoint(&self) -> Option<(u16, String)> {
-        if let Some(pinned) = self.remote_port {
+        if let Some(pinned) = self.effective_remote_port() {
             return probe_debug_port_ws_url(pinned).map(|url| (pinned, url));
         }
         if let Some(dir) = self.data_dir.as_deref() {
@@ -411,17 +484,18 @@ impl CdpClient {
                 return Some((port, url));
             }
         }
+        let debug_port = self.effective_debug_port();
         let remembered = self.last_remote_port.load(Ordering::Relaxed);
-        if remembered > 0 && remembered != self.debug_port {
+        if remembered > 0 && remembered != debug_port {
             if let Some(url) = probe_debug_port_ws_url(remembered) {
                 return Some((remembered, url));
             }
         }
         let pf = self.port_file_status();
-        let personal_owns_debug_port = pf.valid && pf.port == Some(self.debug_port);
+        let personal_owns_debug_port = pf.valid && pf.port == Some(debug_port);
         if !personal_owns_debug_port {
-            if let Some(url) = probe_debug_port_ws_url(self.debug_port) {
-                return Some((self.debug_port, url));
+            if let Some(url) = probe_debug_port_ws_url(debug_port) {
+                return Some((debug_port, url));
             }
         }
         None
@@ -844,6 +918,7 @@ impl CdpClient {
     }
 
     pub fn disconnect(&self) {
+        self.sync_focus_emulation(None);
         let old_transport = {
             let mut tr = self.transport_state.lock().unwrap();
             self.revoke_gen.fetch_add(1, Ordering::SeqCst);
@@ -1028,8 +1103,13 @@ impl CdpClient {
         revoked: impl Fn() -> bool,
     ) -> Result<(String, ConnectionMode), CdpError> {
         if let Some(data_dir) = launch_dir {
-            let url = launcher::launch_remote(data_dir, self.debug_port, self.remote_port, revoked)
-                .map_err(CdpError::new)?;
+            let url = launcher::launch_remote(
+                data_dir,
+                self.effective_debug_port(),
+                self.effective_remote_port(),
+                revoked,
+            )
+            .map_err(CdpError::new)?;
             return Ok((url, ConnectionMode::Remote));
         }
         if let Some(url) = &self.ws_url_override {
@@ -1547,6 +1627,7 @@ pub mod tests {
                     }
                     "Browser.getVersion"
                     | "Page.enable"
+                    | "Emulation.setFocusEmulationEnabled"
                     | "Page.handleJavaScriptDialog"
                     | "Page.screencastFrameAck"
                     | "Page.stopScreencast"
@@ -1909,10 +1990,8 @@ pub mod tests {
         for counter in ["pauseEpoch", "seq", "serverMs"] {
             assert!(result[counter].is_u64(), "{counter}");
         }
-        assert!(result["error"]
-            .as_str()
-            .unwrap()
-            .contains("Refresh the panel"));
+        assert_eq!(result["errorCode"], "tab_changed");
+        assert!(result["error"].as_str().is_some_and(|s| !s.is_empty()));
     }
 
     #[test]
@@ -2529,9 +2608,16 @@ pub mod tests {
             .unwrap()
             .sent
             .clone();
-        assert!(sent
-            .iter()
-            .any(|m| m["method"] == "Target.activateTarget" && m["params"]["targetId"] == "t3"));
+        assert!(
+            !sent
+                .iter()
+                .any(|m| m["method"] == "Target.activateTarget"
+                    || m["method"] == "Page.bringToFront"),
+            "closing a tab must never call Target.activateTarget or Page.bringToFront"
+        );
+        assert!(sent.iter().any(|m| {
+            m["method"] == "Emulation.setFocusEmulationEnabled" && m["params"]["enabled"] == true
+        }));
 
         let r_last = client.close_tab(Some("t3"), None, None).unwrap();
         assert_eq!(r_last["connected"], true);
@@ -3456,6 +3542,73 @@ pub mod tests {
         assert_eq!(restricted["page"]["viewportHeight"], 768);
         let sent = mock.state.lock().unwrap().sent.clone();
         assert!(sent.iter().any(|m| m["method"] == "Page.getLayoutMetrics"));
+        client.dispose();
+    }
+
+    #[test]
+    fn new_tab_uses_chrome_newtab_in_background_and_never_steals_focus() {
+        let (client, holder) = make_mock_client(vec![
+            tab("t1", "One", "https://one.test"),
+            tab("t2", "Two", "https://two.test"),
+        ]);
+        client
+            .dispatch_input_batch(InputBatchParams {
+                events: vec![InputEvent {
+                    action: "new_tab".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        client
+            .dispatch_input_batch(InputBatchParams {
+                events: vec![InputEvent {
+                    action: "switch_tab".into(),
+                    target_id: Some("t2".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        client
+            .dispatch_input_batch(InputBatchParams {
+                target_id: Some("t2".into()),
+                target_epoch: Some(client.tab_epoch()),
+                events: vec![InputEvent {
+                    action: "click".into(),
+                    x: Some(40.0),
+                    y: Some(40.0),
+                    ..Default::default()
+                }],
+            })
+            .unwrap();
+
+        let sent = holder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .sent
+            .clone();
+        assert!(
+            !sent
+                .iter()
+                .any(|m| m["method"] == "Target.activateTarget" || m["method"] == "Page.bringToFront"),
+            "normal input, tab switch, and new_tab must never call Target.activateTarget or Page.bringToFront"
+        );
+        let create = sent
+            .iter()
+            .find(|m| m["method"] == "Target.createTarget")
+            .expect("new_tab must call Target.createTarget");
+        assert_eq!(create["params"]["url"], "chrome://newtab");
+        assert_eq!(create["params"]["background"], true);
+        assert!(sent
+            .iter()
+            .any(|m| m["method"] == "Emulation.setFocusEmulationEnabled"
+                && m["params"]["enabled"] == true));
         client.dispose();
     }
 }

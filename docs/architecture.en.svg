@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 620" width="1120" height="620" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','SF Pro Text',Helvetica,Arial,sans-serif">
-  <title id="t">Chrome Stream MCP Architecture</title>
+  <title id="t">Remote Cast Architecture</title>
   <desc id="d">Four-layer local architecture: SEP-1865 zero-flash MCP App panel communicates over stdio JSON-RPC with chrome-stream-mcp serve, which multiplexes over a 0600 Unix domain socket to the persistent chrome-stream-mcp relay daemon, connecting via loopback RFC 6455 WebSocket to Google Chrome CDP.</desc>
   <defs>
     <linearGradient id="bg-grad" x1="0" y1="0" x2="1120" y2="620" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#181614"/>
-      <stop offset="100%" stop-color="#141311"/>
+      <stop offset="100%" stop-color="#0B0D12"/>
     </linearGradient>
     <marker id="arr-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M0,1 L9,5 L0,9 z" fill="#D97757"/>
+      <path d="M0,1 L9,5 L0,9 z" fill="#6895FF"/>
     </marker>
     <marker id="arr-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,1 L9,5 L0,9 z" fill="#4E9F72"/>
+      <path d="M0,1 L9,5 L0,9 z" fill="#34D399"/>
     </marker>
     <filter id="card-shadow" x="-4%" y="-4%" width="108%" height="112%">
       <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.35"/>
@@ -21,48 +21,48 @@
   <rect x="0.5" y="0.5" width="1119" height="619" rx="18" fill="url(#bg-grad)" stroke="#2E2B26"/>
 
   <!-- Header -->
-  <text x="560" y="38" text-anchor="middle" font-size="18" font-weight="700" fill="#F4F1EA" letter-spacing="0.2">Chrome Stream MCP · Local Loopback CDP Relay &amp; Zero-Flash MCP App Architecture</text>
+  <text x="560" y="38" text-anchor="middle" font-size="18" font-weight="700" fill="#F2F4F8" letter-spacing="0.2">Remote Cast · Local Loopback CDP Relay &amp; Zero-Flash MCP App Architecture</text>
   <text x="560" y="57" text-anchor="middle" font-size="12" fill="#9E978B">Single native Rust binary · Persistent 0600 Unix socket · 4-tier adaptive weak-network screencast</text>
 
   <!-- Column 1: MCP App Stage -->
-  <rect x="24" y="78" width="242" height="328" rx="14" fill="#1C1B18" stroke="#D97757" stroke-opacity="0.45"/>
-  <text x="145" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E5896B">1 · MCP App Stage (UI)</text>
+  <rect x="24" y="78" width="242" height="328" rx="14" fill="#12151E" stroke="#6895FF" stroke-opacity="0.45"/>
+  <text x="145" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#82A8FF">1 · MCP App Stage (UI)</text>
   <text x="145" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">SEP-1865 iframe · panel/dist/panel.html</text>
 
   <g filter="url(#card-shadow)">
     <rect x="36" y="134" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="36" y="134" width="4" height="54" rx="2" fill="#D97757"/>
+    <rect x="36" y="134" width="4" height="54" rx="2" fill="#6895FF"/>
   </g>
-  <text x="50" y="156" font-size="13" font-weight="650" fill="#F4F1EA">Zero-Flash Dark-First Shell</text>
+  <text x="50" y="156" font-size="13" font-weight="650" fill="#F2F4F8">Zero-Flash Dark-First Shell</text>
   <text x="50" y="174" font-size="11" fill="#A9A296">&lt; 42 KiB · CSP default-src 'none'</text>
 
   <g filter="url(#card-shadow)">
     <rect x="36" y="198" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="36" y="198" width="4" height="54" rx="2" fill="#D97757"/>
+    <rect x="36" y="198" width="4" height="54" rx="2" fill="#6895FF"/>
   </g>
-  <text x="50" y="220" font-size="13" font-weight="650" fill="#F4F1EA">Transparent-BG &amp; Theme Guard</text>
+  <text x="50" y="220" font-size="13" font-weight="650" fill="#F2F4F8">Transparent-BG &amp; Theme Guard</text>
   <text x="50" y="238" font-size="11" fill="#A9A296">Rejects alpha &lt; 0.9 host CSS vars</text>
 
   <g filter="url(#card-shadow)">
     <rect x="36" y="262" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="36" y="262" width="4" height="54" rx="2" fill="#D97757"/>
+    <rect x="36" y="262" width="4" height="54" rx="2" fill="#6895FF"/>
   </g>
-  <text x="50" y="284" font-size="13" font-weight="650" fill="#F4F1EA">Explicit Session Controls</text>
+  <text x="50" y="284" font-size="13" font-weight="650" fill="#F2F4F8">Explicit Session Controls</text>
   <text x="50" y="302" font-size="11" fill="#A9A296">Connect · Pause/Resume · Disconnect</text>
 
   <g filter="url(#card-shadow)">
     <rect x="36" y="326" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="36" y="326" width="4" height="54" rx="2" fill="#D97757"/>
+    <rect x="36" y="326" width="4" height="54" rx="2" fill="#6895FF"/>
   </g>
-  <text x="50" y="348" font-size="13" font-weight="650" fill="#F4F1EA">Double-Buffered Canvas</text>
+  <text x="50" y="348" font-size="13" font-weight="650" fill="#F2F4F8">Double-Buffered Canvas</text>
   <text x="50" y="366" font-size="11" fill="#A9A296">createImageBitmap · input coalescer</text>
 
   <!-- Arrow 1 -> 2 -->
-  <line x1="270" y1="242" x2="296" y2="242" stroke="#D97757" stroke-width="2.2" marker-end="url(#arr-accent)"/>
+  <line x1="270" y1="242" x2="296" y2="242" stroke="#6895FF" stroke-width="2.2" marker-end="url(#arr-accent)"/>
   <text x="283" y="230" text-anchor="middle" font-size="9.5" fill="#B8B2A6">stdio</text>
 
   <!-- Column 2: MCP Stdio Server -->
-  <rect x="300" y="78" width="242" height="328" rx="14" fill="#1C1B18" stroke="#E0A458" stroke-opacity="0.45"/>
+  <rect x="300" y="78" width="242" height="328" rx="14" fill="#12151E" stroke="#E0A458" stroke-opacity="0.45"/>
   <text x="421" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E6B472">2 · MCP Stdio Server</text>
   <text x="421" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">chrome-stream-mcp serve</text>
 
@@ -70,73 +70,73 @@
     <rect x="312" y="134" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="312" y="134" width="4" height="54" rx="2" fill="#E0A458"/>
   </g>
-  <text x="326" y="156" font-size="13" font-weight="650" fill="#F4F1EA">Startup Pre-Warm &amp; SWR</text>
+  <text x="326" y="156" font-size="13" font-weight="650" fill="#F2F4F8">Startup Pre-Warm &amp; SWR</text>
   <text x="326" y="174" font-size="11" fill="#A9A296">&lt; 0.5 ms SSR boot snapshot</text>
 
   <g filter="url(#card-shadow)">
     <rect x="312" y="198" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="312" y="198" width="4" height="54" rx="2" fill="#E0A458"/>
   </g>
-  <text x="326" y="220" font-size="13" font-weight="650" fill="#F4F1EA">Public &amp; App-Only Tools</text>
+  <text x="326" y="220" font-size="13" font-weight="650" fill="#F2F4F8">Public &amp; App-Only Tools</text>
   <text x="326" y="238" font-size="11" fill="#A9A296">3 public · 4 visibility:["app"]</text>
 
   <g filter="url(#card-shadow)">
     <rect x="312" y="262" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="312" y="262" width="4" height="54" rx="2" fill="#E0A458"/>
   </g>
-  <text x="326" y="284" font-size="13" font-weight="650" fill="#F4F1EA">Concurrent JSON-RPC</text>
+  <text x="326" y="284" font-size="13" font-weight="650" fill="#F2F4F8">Concurrent JSON-RPC</text>
   <text x="326" y="302" font-size="11" fill="#A9A296">Input never blocks on frame poll</text>
 
   <g filter="url(#card-shadow)">
     <rect x="312" y="326" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="312" y="326" width="4" height="54" rx="2" fill="#E0A458"/>
   </g>
-  <text x="326" y="348" font-size="13" font-weight="650" fill="#F4F1EA">Payload Redaction Layer</text>
+  <text x="326" y="348" font-size="13" font-weight="650" fill="#F2F4F8">Payload Redaction Layer</text>
   <text x="326" y="366" font-size="11" fill="#A9A296">Strips paths, WS tokens, hostnames</text>
 
   <!-- Arrow 2 -> 3 -->
-  <line x1="546" y1="242" x2="572" y2="242" stroke="#D97757" stroke-width="2.2" marker-end="url(#arr-accent)"/>
+  <line x1="546" y1="242" x2="572" y2="242" stroke="#6895FF" stroke-width="2.2" marker-end="url(#arr-accent)"/>
   <text x="559" y="230" text-anchor="middle" font-size="9.5" fill="#B8B2A6">0600</text>
 
   <!-- Column 3: Persistent Relay Daemon -->
-  <rect x="576" y="78" width="242" height="328" rx="14" fill="#1C1B18" stroke="#4E9F72" stroke-opacity="0.5"/>
+  <rect x="576" y="78" width="242" height="328" rx="14" fill="#12151E" stroke="#34D399" stroke-opacity="0.5"/>
   <text x="697" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#63B888">3 · Persistent CDP Relay</text>
   <text x="697" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">chrome-stream-mcp relay (detached)</text>
 
   <g filter="url(#card-shadow)">
     <rect x="588" y="134" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="588" y="134" width="4" height="54" rx="2" fill="#4E9F72"/>
+    <rect x="588" y="134" width="4" height="54" rx="2" fill="#34D399"/>
   </g>
-  <text x="602" y="156" font-size="13" font-weight="650" fill="#F4F1EA">Single-Approval Reuse</text>
+  <text x="602" y="156" font-size="13" font-weight="650" fill="#F2F4F8">Single-Approval Reuse</text>
   <text x="602" y="174" font-size="11" fill="#A9A296">Survives MCP restarts · relay.sock</text>
 
   <g filter="url(#card-shadow)">
     <rect x="588" y="198" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="588" y="198" width="4" height="54" rx="2" fill="#4E9F72"/>
+    <rect x="588" y="198" width="4" height="54" rx="2" fill="#34D399"/>
   </g>
-  <text x="602" y="220" font-size="13" font-weight="650" fill="#F4F1EA">4-Tier Adaptive Quality</text>
+  <text x="602" y="220" font-size="13" font-weight="650" fill="#F2F4F8">4-Tier Adaptive Quality</text>
   <text x="602" y="238" font-size="11" fill="#A9A296">ultra · low · medium · high + auto</text>
 
   <g filter="url(#card-shadow)">
     <rect x="588" y="262" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="588" y="262" width="4" height="54" rx="2" fill="#4E9F72"/>
+    <rect x="588" y="262" width="4" height="54" rx="2" fill="#34D399"/>
   </g>
-  <text x="602" y="284" font-size="13" font-weight="650" fill="#F4F1EA">SHA-1 Frame Dedup</text>
+  <text x="602" y="284" font-size="13" font-weight="650" fill="#F2F4F8">SHA-1 Frame Dedup</text>
   <text x="602" y="302" font-size="11" fill="#A9A296">unchanged:true · tabsHash elision</text>
 
   <g filter="url(#card-shadow)">
     <rect x="588" y="326" width="218" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
-    <rect x="588" y="326" width="4" height="54" rx="2" fill="#4E9F72"/>
+    <rect x="588" y="326" width="4" height="54" rx="2" fill="#34D399"/>
   </g>
-  <text x="602" y="348" font-size="13" font-weight="650" fill="#F4F1EA">12s Idle Auto-Sleep</text>
+  <text x="602" y="348" font-size="13" font-weight="650" fill="#F2F4F8">12s Idle Auto-Sleep</text>
   <text x="602" y="366" font-size="11" fill="#A9A296">Stops GPU capture when idle/paused</text>
 
   <!-- Arrow 3 -> 4 -->
-  <line x1="822" y1="242" x2="848" y2="242" stroke="#D97757" stroke-width="2.2" marker-end="url(#arr-accent)"/>
+  <line x1="822" y1="242" x2="848" y2="242" stroke="#6895FF" stroke-width="2.2" marker-end="url(#arr-accent)"/>
   <text x="835" y="230" text-anchor="middle" font-size="9.5" fill="#B8B2A6">WS</text>
 
   <!-- Column 4: Local Google Chrome -->
-  <rect x="852" y="78" width="244" height="328" rx="14" fill="#1C1B18" stroke="#8C9EFF" stroke-opacity="0.4"/>
+  <rect x="852" y="78" width="244" height="328" rx="14" fill="#12151E" stroke="#8C9EFF" stroke-opacity="0.4"/>
   <text x="974" y="104" text-anchor="middle" font-size="13.5" font-weight="700" fill="#AAB7FF">4 · Local Google Chrome</text>
   <text x="974" y="120" text-anchor="middle" font-size="10.5" fill="#9E978B">127.0.0.1 / ::1 · Loopback CDP</text>
 
@@ -144,60 +144,60 @@
     <rect x="864" y="134" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="864" y="134" width="4" height="54" rx="2" fill="#8C9EFF"/>
   </g>
-  <text x="878" y="156" font-size="13" font-weight="650" fill="#F4F1EA">Pure-Rust RFC 6455 WS</text>
+  <text x="878" y="156" font-size="13" font-weight="650" fill="#F2F4F8">Pure-Rust RFC 6455 WS</text>
   <text x="878" y="174" font-size="11" fill="#A9A296">Strict loopback SSRF guard</text>
 
   <g filter="url(#card-shadow)">
     <rect x="864" y="198" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="864" y="198" width="4" height="54" rx="2" fill="#8C9EFF"/>
   </g>
-  <text x="878" y="220" font-size="13" font-weight="650" fill="#F4F1EA">DevTools Discovery</text>
+  <text x="878" y="220" font-size="13" font-weight="650" fill="#F2F4F8">DevTools Discovery</text>
   <text x="878" y="238" font-size="11" fill="#A9A296">DevToolsActivePort or :9222</text>
 
   <g filter="url(#card-shadow)">
     <rect x="864" y="262" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="864" y="262" width="4" height="54" rx="2" fill="#8C9EFF"/>
   </g>
-  <text x="878" y="284" font-size="13" font-weight="650" fill="#F4F1EA">Zero-Tab Respect</text>
+  <text x="878" y="284" font-size="13" font-weight="650" fill="#F2F4F8">Zero-Tab Respect</text>
   <text x="878" y="302" font-size="11" fill="#A9A296">Never forces about:blank on empty</text>
 
   <g filter="url(#card-shadow)">
     <rect x="864" y="326" width="220" height="54" rx="9" fill="#23211D" stroke="#34312B"/>
     <rect x="864" y="326" width="4" height="54" rx="2" fill="#8C9EFF"/>
   </g>
-  <text x="878" y="348" font-size="13" font-weight="650" fill="#F4F1EA">Atomic Tab Lifecycle</text>
+  <text x="878" y="348" font-size="13" font-weight="650" fill="#F2F4F8">Atomic Tab Lifecycle</text>
   <text x="878" y="366" font-size="11" fill="#A9A296">Clean close · -32000 recovery</text>
 
   <!-- Bottom Strip 1: Agent Skill & Security Boundary -->
-  <rect x="24" y="424" width="1072" height="80" rx="12" fill="#1C1B18" stroke="#4E9F72" stroke-opacity="0.35" stroke-dasharray="5 4"/>
+  <rect x="24" y="424" width="1072" height="80" rx="12" fill="#12151E" stroke="#34D399" stroke-opacity="0.35" stroke-dasharray="5 4"/>
   <text x="40" y="446" font-size="12.5" font-weight="700" fill="#63B888">Security Boundary &amp; Zero-Intrusion Plugin Packaging</text>
 
   <rect x="40" y="456" width="248" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
-  <text x="52" y="479" font-size="11.5" fill="#F4F1EA">On-demand <tspan fill="#E5896B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">SKILL.md</tspan> · zero AGENTS.md</text>
+  <text x="52" y="479" font-size="11.5" fill="#F2F4F8">On-demand <tspan fill="#82A8FF" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">SKILL.md</tspan> · zero AGENTS.md</text>
 
   <rect x="302" y="456" width="256" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
-  <text x="314" y="479" font-size="11.5" fill="#F4F1EA">Isolated <tspan fill="#63B888" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">${PLUGIN_DATA}</tspan> · 0600 IPC</text>
+  <text x="314" y="479" font-size="11.5" fill="#F2F4F8">Isolated <tspan fill="#63B888" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">${PLUGIN_DATA}</tspan> · 0600 IPC</text>
 
   <rect x="572" y="456" width="252" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
-  <text x="584" y="479" font-size="11.5" fill="#F4F1EA">Loopback-only CDP · zero external URLs</text>
+  <text x="584" y="479" font-size="11.5" fill="#F2F4F8">Loopback-only CDP · zero external URLs</text>
 
   <rect x="838" y="456" width="242" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
-  <text x="850" y="479" font-size="11.5" fill="#F4F1EA">CLI diagnostics: <tspan fill="#E6B472" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">doctor --json</tspan></text>
+  <text x="850" y="479" font-size="11.5" fill="#F2F4F8">CLI diagnostics: <tspan fill="#E6B472" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">doctor --json</tspan></text>
 
   <!-- Connector up to relay/server -->
-  <line x1="421" y1="423" x2="421" y2="410" stroke="#4E9F72" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arr-emerald)"/>
-  <line x1="697" y1="423" x2="697" y2="410" stroke="#4E9F72" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arr-emerald)"/>
+  <line x1="421" y1="423" x2="421" y2="410" stroke="#34D399" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arr-emerald)"/>
+  <line x1="697" y1="423" x2="697" y2="410" stroke="#34D399" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arr-emerald)"/>
 
   <!-- Bottom Strip 2: CI / Release Pipeline -->
-  <rect x="24" y="518" width="1072" height="80" rx="12" fill="#1C1B18" stroke="#3A3630"/>
+  <rect x="24" y="518" width="1072" height="80" rx="12" fill="#12151E" stroke="#3A3630"/>
   <text x="40" y="540" font-size="12.5" font-weight="700" fill="#B8B2A6">Automated Release &amp; Supply-Chain Hygiene (GitHub Actions · SHA-Pinned)</text>
 
   <rect x="40" y="550" width="332" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
-  <text x="52" y="573" font-size="11.5" fill="#F4F1EA"><tspan fill="#E5896B" font-weight="650">ci.yml</tspan> · cargo test · panel tests · gitleaks · sanitize guard</text>
+  <text x="52" y="573" font-size="11.5" fill="#F2F4F8"><tspan fill="#82A8FF" font-weight="650">ci.yml</tspan> · cargo test · panel tests · gitleaks · sanitize guard</text>
 
   <rect x="386" y="550" width="340" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
-  <text x="398" y="573" font-size="11.5" fill="#F4F1EA"><tspan fill="#E6B472" font-weight="650">release-please.yml</tspan> · Rust + plugin.json sync · v* tags</text>
+  <text x="398" y="573" font-size="11.5" fill="#F2F4F8"><tspan fill="#E6B472" font-weight="650">release-please.yml</tspan> · Rust + plugin.json sync · v* tags</text>
 
   <rect x="740" y="550" width="340" height="36" rx="7" fill="#23211D" stroke="#34312B"/>
-  <text x="752" y="573" font-size="11.5" fill="#F4F1EA"><tspan fill="#63B888" font-weight="650">release.yml</tspan> · macOS arm64/x64 + Linux x64 · SHA256</text>
+  <text x="752" y="573" font-size="11.5" fill="#F2F4F8"><tspan fill="#63B888" font-weight="650">release.yml</tspan> · macOS arm64/x64 + Linux x64 · SHA256</text>
 </svg>

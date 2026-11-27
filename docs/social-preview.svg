@@ -1,214 +1,214 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','SF Pro Display',Helvetica,Arial,sans-serif">
-  <title id="t">Chrome Stream MCP — Native Rust Chrome DevTools Screencast Relay &amp; MCP App</title>
-  <desc id="d">Social preview card for eatingDream-antigravity-plugins/remote-cast featuring the Remote Cast dark stage UI mockup and key architecture highlights.</desc>
+  <title id="t">Remote Cast — Native Rust Chrome DevTools Screencast Relay &amp; MCP App</title>
+  <desc id="d">Social preview card for eatingDream-antigravity-plugins/remote-cast featuring the Remote Cast Lucid Indigo UI mockup and key architecture highlights.</desc>
   <defs>
-    <radialGradient id="glow-terracotta" cx="82%" cy="18%" r="55%">
-      <stop offset="0%" stop-color="#D97757" stop-opacity="0.22"/>
-      <stop offset="100%" stop-color="#141311" stop-opacity="0"/>
+    <radialGradient id="glow-indigo" cx="82%" cy="18%" r="55%">
+      <stop offset="0%" stop-color="#6895FF" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="#0B0D12" stop-opacity="0"/>
     </radialGradient>
     <radialGradient id="glow-emerald" cx="15%" cy="88%" r="48%">
-      <stop offset="0%" stop-color="#4E9F72" stop-opacity="0.14"/>
-      <stop offset="100%" stop-color="#141311" stop-opacity="0"/>
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#0B0D12" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="logo-bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#25221E"/>
-      <stop offset="100%" stop-color="#141311"/>
+    <linearGradient id="logo-bg" x1="14" y1="12" x2="114" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#181C28"/>
+      <stop offset="100%" stop-color="#0B0D12"/>
     </linearGradient>
-    <linearGradient id="logo-rim" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#E5896B" stop-opacity="0.8"/>
-      <stop offset="50%" stop-color="#F4F1EA" stop-opacity="0.2"/>
-      <stop offset="100%" stop-color="#D97757" stop-opacity="0.5"/>
+    <linearGradient id="logo-rim" x1="14" y1="12" x2="114" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6895FF" stop-opacity="0.78"/>
+      <stop offset="50%" stop-color="#F2F4F8" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#2952CC" stop-opacity="0.55"/>
     </linearGradient>
-    <linearGradient id="terracotta" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#E5896B"/>
-      <stop offset="100%" stop-color="#D97757"/>
+    <linearGradient id="indigo-accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#82A8FF"/>
+      <stop offset="100%" stop-color="#6895FF"/>
     </linearGradient>
     <filter id="stage-shadow" x="-8%" y="-8%" width="116%" height="120%">
       <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000000" flood-opacity="0.55"/>
     </filter>
     <pattern id="dot-grid" width="28" height="28" patternUnits="userSpaceOnUse">
-      <circle cx="2" cy="2" r="1" fill="#F4F1EA" fill-opacity="0.045"/>
+      <circle cx="2" cy="2" r="1" fill="#F2F4F8" fill-opacity="0.045"/>
     </pattern>
   </defs>
 
-  <!-- Base Dark Editorial-Warm Surface -->
-  <rect width="1280" height="640" fill="#141311"/>
+  <!-- Base Dark Lucid Indigo Surface -->
+  <rect width="1280" height="640" fill="#0B0D12"/>
   <rect width="1280" height="640" fill="url(#dot-grid)"/>
-  <rect width="1280" height="640" fill="url(#glow-terracotta)"/>
+  <rect width="1280" height="640" fill="url(#glow-indigo)"/>
   <rect width="1280" height="640" fill="url(#glow-emerald)"/>
-  <rect x="16" y="16" width="1248" height="608" rx="22" fill="none" stroke="#2D2A25" stroke-width="1.5"/>
+  <rect x="16" y="16" width="1248" height="608" rx="22" fill="none" stroke="#23293A" stroke-width="1.5"/>
 
   <!-- LEFT COLUMN: Brand, Headline, Features -->
   <g transform="translate(64, 72)">
     <!-- Embedded Logo Mark (72x72) -->
     <g transform="scale(0.5625)">
       <rect x="12" y="12" width="104" height="104" rx="28" fill="url(#logo-bg)" stroke="url(#logo-rim)" stroke-width="2.8"/>
-      <path d="M28 43 C28 36.4 33.4 31 40 31 H57 C61.5 31 63.6 34.4 66.2 38 H88 C94.6 38 100 43.4 100 50 V84 C100 90.6 94.6 96 88 96 H40 C33.4 96 28 90.6 28 84 Z" fill="#181614" stroke="#F4F1EA" stroke-opacity="0.88" stroke-width="2.6"/>
-      <rect x="35" y="36.5" width="23" height="6" rx="3" fill="url(#terracotta)"/>
-      <path d="M29.5 48.5 H98.5" stroke="#F4F1EA" stroke-opacity="0.18" stroke-width="2"/>
-      <circle cx="44" cy="82" r="4" fill="#4E9F72"/>
-      <path d="M44 69.5 A12.5 12.5 0 0 1 56.5 82" stroke="#E5896B" stroke-width="3.1" stroke-linecap="round" fill="none"/>
-      <path d="M44 59 A23 23 0 0 1 67 82" stroke="#D97757" stroke-width="3.1" stroke-linecap="round" fill="none"/>
-      <path d="M72 58.5 L90 67.5 L80.5 70.8 L77.2 80.2 Z" fill="#F4F1EA" stroke="#D97757" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M28 43 C28 36.4 33.4 31 40 31 H57 C61.5 31 63.6 34.4 66.2 38 H88 C94.6 38 100 43.4 100 50 V84 C100 90.6 94.6 96 88 96 H40 C33.4 96 28 90.6 28 84 Z" fill="#12151E" stroke="#F2F4F8" stroke-opacity="0.88" stroke-width="2.6"/>
+      <rect x="35" y="36.5" width="23" height="6" rx="3" fill="url(#indigo-accent)"/>
+      <path d="M29.5 48.5 H98.5" stroke="#F2F4F8" stroke-opacity="0.18" stroke-width="2"/>
+      <circle cx="44" cy="82" r="4" fill="#34D399"/>
+      <path d="M44 69.5 A12.5 12.5 0 0 1 56.5 82" stroke="#82A8FF" stroke-width="3.1" stroke-linecap="round" fill="none"/>
+      <path d="M44 59 A23 23 0 0 1 67 82" stroke="#6895FF" stroke-width="3.1" stroke-linecap="round" fill="none"/>
+      <path d="M72 58.5 L90 67.5 L80.5 70.8 L77.2 80.2 Z" fill="#F2F4F8" stroke="#6895FF" stroke-width="2" stroke-linejoin="round"/>
     </g>
 
     <!-- Org Pill -->
-    <rect x="86" y="20" width="290" height="30" rx="15" fill="#1C1B18" stroke="#35312B"/>
-    <circle cx="104" cy="35" r="4.5" fill="#4E9F72"/>
-    <text x="118" y="39.5" font-size="12.5" font-weight="600" fill="#C9C2B6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">eatingDream-antigravity-plugins</text>
+    <rect x="86" y="20" width="290" height="30" rx="15" fill="#181C28" stroke="#6895FF" stroke-opacity="0.38"/>
+    <circle cx="104" cy="35" r="4.5" fill="#34D399"/>
+    <text x="118" y="39.5" font-size="12.5" font-weight="600" fill="#F2F4F8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">eatingDream-antigravity-plugins</text>
 
     <!-- Title -->
-    <text x="2" y="138" font-size="52" font-weight="800" fill="#F4F1EA" letter-spacing="-1.1">Chrome Stream</text>
-    <text x="2" y="192" font-size="52" font-weight="800" fill="#D97757" letter-spacing="-1.1">MCP</text>
-    <rect x="140" y="156" width="84" height="30" rx="15" fill="#23201C" stroke="#D97757" stroke-opacity="0.55"/>
-    <text x="182" y="176" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E5896B" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">v0.1.0</text>
+    <text x="2" y="138" font-size="52" font-weight="800" fill="#F2F4F8" letter-spacing="-1.1">Remote Cast</text>
+    <text x="2" y="192" font-size="52" font-weight="800" fill="#6895FF" letter-spacing="-1.1">MCP</text>
+    <rect x="140" y="156" width="84" height="30" rx="15" fill="#181C28" stroke="#6895FF" stroke-opacity="0.55"/>
+    <text x="182" y="176" text-anchor="middle" font-size="13.5" font-weight="700" fill="#82A8FF" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">v0.1.0</text>
 
     <!-- Tagline -->
-    <text x="2" y="242" font-size="19" fill="#D6D0C4" font-weight="500">Native Rust Chrome DevTools screencast relay</text>
-    <text x="2" y="270" font-size="19" fill="#A9A296" font-weight="400">&amp; zero-flash MCP App viewer for weak networks.</text>
+    <text x="2" y="242" font-size="19" fill="#F2F4F8" font-weight="500">Native Rust Chrome DevTools screencast relay</text>
+    <text x="2" y="270" font-size="19" fill="#A6B0C3" font-weight="400">&amp; zero-flash MCP App viewer for weak networks.</text>
 
     <!-- 2x2 Feature Cards -->
     <g transform="translate(0, 304)">
-      <rect x="0" y="0" width="268" height="64" rx="12" fill="#1C1B18" stroke="#312E28"/>
-      <circle cx="20" cy="23" r="4.5" fill="#D97757"/>
-      <text x="34" y="27" font-size="14" font-weight="700" fill="#F4F1EA">Single Native Rust Binary</text>
-      <text x="20" y="48" font-size="12" fill="#9E978B">Zero runtime · loopback RFC 6455 WS</text>
+      <rect x="0" y="0" width="268" height="64" rx="12" fill="#12151E" stroke="#23293A"/>
+      <circle cx="20" cy="23" r="4.5" fill="#6895FF"/>
+      <text x="34" y="27" font-size="14" font-weight="700" fill="#F2F4F8">Single Native Rust Binary</text>
+      <text x="20" y="48" font-size="12" fill="#A6B0C3">Zero runtime · loopback RFC 6455 WS</text>
 
-      <rect x="284" y="0" width="268" height="64" rx="12" fill="#1C1B18" stroke="#312E28"/>
-      <circle cx="304" cy="23" r="4.5" fill="#4E9F72"/>
-      <text x="318" y="27" font-size="14" font-weight="700" fill="#F4F1EA">0600 Persistent CDP Relay</text>
-      <text x="304" y="48" font-size="12" fill="#9E978B">Single Allow · 12s idle GPU sleep</text>
+      <rect x="284" y="0" width="268" height="64" rx="12" fill="#12151E" stroke="#23293A"/>
+      <circle cx="304" cy="23" r="4.5" fill="#34D399"/>
+      <text x="318" y="27" font-size="14" font-weight="700" fill="#F2F4F8">0600 Persistent CDP Relay</text>
+      <text x="304" y="48" font-size="12" fill="#A6B0C3">Single Allow · 12s idle GPU sleep</text>
 
-      <rect x="0" y="78" width="268" height="64" rx="12" fill="#1C1B18" stroke="#312E28"/>
-      <circle cx="20" cy="101" r="4.5" fill="#E6B472"/>
-      <text x="34" y="105" font-size="14" font-weight="700" fill="#F4F1EA">4-Tier RTT + SHA-1 Dedup</text>
-      <text x="20" y="126" font-size="12" fill="#9E978B">unchanged:true · coalesced inputs</text>
+      <rect x="0" y="78" width="268" height="64" rx="12" fill="#12151E" stroke="#23293A"/>
+      <circle cx="20" cy="101" r="4.5" fill="#FBBF24"/>
+      <text x="34" y="105" font-size="14" font-weight="700" fill="#F2F4F8">4-Tier RTT + SHA-1 Dedup</text>
+      <text x="20" y="126" font-size="12" fill="#A6B0C3">unchanged:true · coalesced inputs</text>
 
-      <rect x="284" y="78" width="268" height="64" rx="12" fill="#1C1B18" stroke="#312E28"/>
-      <circle cx="304" cy="101" r="4.5" fill="#8C9EFF"/>
-      <text x="318" y="105" font-size="14" font-weight="700" fill="#F4F1EA">Zero-Flash &lt; 42 KiB UI</text>
-      <text x="304" y="126" font-size="12" fill="#9E978B">Zero-tab safe · explicit Pause/Disconnect</text>
+      <rect x="284" y="78" width="268" height="64" rx="12" fill="#12151E" stroke="#23293A"/>
+      <circle cx="304" cy="101" r="4.5" fill="#82A8FF"/>
+      <text x="318" y="105" font-size="14" font-weight="700" fill="#F2F4F8">Zero-Flash &lt;= 64 KiB UI</text>
+      <text x="304" y="126" font-size="12" fill="#A6B0C3">Zero-tab safe · explicit Pause/Disconnect</text>
     </g>
 
     <!-- Bottom Repo Line -->
-    <text x="2" y="502" font-size="13" fill="#8B8478" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">MIT License · github.com/eatingDream-antigravity-plugins/remote-cast</text>
+    <text x="2" y="502" font-size="13" fill="#6E788E" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">MIT License · github.com/eatingDream-antigravity-plugins/remote-cast</text>
   </g>
 
-  <!-- RIGHT COLUMN: Editorial-Warm Interactive Stage Mockup -->
+  <!-- RIGHT COLUMN: Lucid Indigo Interactive Stage Mockup -->
   <g transform="translate(652, 68)" filter="url(#stage-shadow)">
     <!-- Outer Window Frame -->
-    <rect x="0" y="0" width="564" height="416" rx="16" fill="#1C1B18" stroke="#3A352E" stroke-width="1.5"/>
+    <rect x="0" y="0" width="564" height="416" rx="16" fill="#12151E" stroke="#2B3246" stroke-width="1.5"/>
 
     <!-- Tab Bar -->
-    <path d="M16 0 H548 A16 16 0 0 1 564 16 V44 H0 V16 A16 16 0 0 1 16 0 Z" fill="#171613"/>
-    <line x1="0" y1="44" x2="564" y2="44" stroke="#2D2A24"/>
+    <path d="M16 0 H548 A16 16 0 0 1 564 16 V44 H0 V16 A16 16 0 0 1 16 0 Z" fill="#12151E"/>
+    <line x1="0" y1="44" x2="564" y2="44" stroke="#23293A"/>
 
     <!-- Active Tab -->
-    <rect x="14" y="9" width="176" height="28" rx="8" fill="#25231E" stroke="#D97757" stroke-opacity="0.5"/>
-    <circle cx="28" cy="23" r="4" fill="#D97757"/>
-    <text x="40" y="27" font-size="12" font-weight="600" fill="#F4F1EA">Docs · Chrome Stream</text>
-    <text x="176" y="27" font-size="12" fill="#8B8478">×</text>
+    <rect x="14" y="9" width="176" height="28" rx="8" fill="#1D2231" stroke="#6895FF" stroke-opacity="0.55"/>
+    <circle cx="28" cy="23" r="4" fill="#6895FF"/>
+    <text x="40" y="27" font-size="12" font-weight="600" fill="#F2F4F8">Docs · Remote Cast</text>
+    <text x="176" y="27" font-size="12" fill="#6E788E">×</text>
 
     <!-- Inactive Tab -->
-    <rect x="198" y="9" width="136" height="28" rx="8" fill="#1C1B18" stroke="#2D2A24"/>
-    <circle cx="212" cy="23" r="3.5" fill="#7D776C"/>
-    <text x="224" y="27" font-size="12" fill="#A9A296">Localhost :3000</text>
+    <rect x="198" y="9" width="136" height="28" rx="8" fill="#181C28" stroke="#23293A"/>
+    <circle cx="212" cy="23" r="3.5" fill="#6E788E"/>
+    <text x="224" y="27" font-size="12" fill="#A6B0C3">Localhost :3000</text>
 
     <!-- New Tab Button -->
-    <rect x="342" y="11" width="24" height="24" rx="6" fill="#23211D" stroke="#34312B"/>
-    <text x="354" y="27" text-anchor="middle" font-size="15" font-weight="600" fill="#C9C2B6">+</text>
+    <rect x="342" y="11" width="24" height="24" rx="6" fill="#181C28" stroke="#2B3246"/>
+    <text x="354" y="27" text-anchor="middle" font-size="15" font-weight="600" fill="#A6B0C3">+</text>
 
     <!-- Live Status Pill -->
-    <rect x="424" y="10" width="126" height="26" rx="13" fill="#1B2920" stroke="#4E9F72" stroke-opacity="0.55"/>
-    <circle cx="439" cy="23" r="4" fill="#4E9F72"/>
-    <text x="450" y="27" font-size="11.5" font-weight="650" fill="#7FD1A2">Live · 38 ms</text>
+    <rect x="424" y="10" width="126" height="26" rx="13" fill="#181C28" stroke="#34D399" stroke-opacity="0.5"/>
+    <circle cx="439" cy="23" r="4" fill="#34D399"/>
+    <text x="450" y="27" font-size="11.5" font-weight="650" fill="#34D399">Live · 38 ms</text>
 
     <!-- Toolbar Row -->
-    <rect x="0" y="44" width="564" height="44" fill="#1C1B18"/>
-    <line x1="0" y1="88" x2="564" y2="88" stroke="#2D2A24"/>
+    <rect x="0" y="44" width="564" height="44" fill="#12151E"/>
+    <line x1="0" y1="88" x2="564" y2="88" stroke="#23293A"/>
 
     <!-- Nav buttons -->
-    <rect x="14" y="54" width="24" height="24" rx="6" fill="#24221E" stroke="#34312B"/>
-    <text x="26" y="70" text-anchor="middle" font-size="12" fill="#B8B2A6">←</text>
-    <rect x="44" y="54" width="24" height="24" rx="6" fill="#24221E" stroke="#34312B"/>
-    <text x="56" y="70" text-anchor="middle" font-size="12" fill="#7D776C">→</text>
-    <rect x="74" y="54" width="24" height="24" rx="6" fill="#24221E" stroke="#34312B"/>
-    <text x="86" y="70" text-anchor="middle" font-size="12" fill="#B8B2A6">↻</text>
+    <rect x="14" y="54" width="24" height="24" rx="6" fill="#181C28" stroke="#2B3246"/>
+    <text x="26" y="70" text-anchor="middle" font-size="12" fill="#A6B0C3">←</text>
+    <rect x="44" y="54" width="24" height="24" rx="6" fill="#181C28" stroke="#2B3246"/>
+    <text x="56" y="70" text-anchor="middle" font-size="12" fill="#6E788E">→</text>
+    <rect x="74" y="54" width="24" height="24" rx="6" fill="#181C28" stroke="#2B3246"/>
+    <text x="86" y="70" text-anchor="middle" font-size="12" fill="#A6B0C3">↻</text>
 
     <!-- URL Bar -->
-    <rect x="108" y="53" width="244" height="26" rx="8" fill="#141311" stroke="#34312B"/>
-    <text x="122" y="70" font-size="11.5" fill="#C9C2B6" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">https://example.org/dashboard</text>
+    <rect x="108" y="53" width="244" height="26" rx="8" fill="#0B0D12" stroke="#2B3246"/>
+    <text x="122" y="70" font-size="11.5" fill="#A6B0C3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">https://example.org/dashboard</text>
 
     <!-- Quality + Pause + Disconnect Controls -->
-    <rect x="362" y="54" width="58" height="24" rx="6" fill="#24221E" stroke="#3A3630"/>
-    <text x="391" y="70" text-anchor="middle" font-size="11" font-weight="600" fill="#E6B472">Auto</text>
+    <rect x="362" y="54" width="58" height="24" rx="6" fill="#181C28" stroke="#2B3246"/>
+    <text x="391" y="70" text-anchor="middle" font-size="11" font-weight="600" fill="#FBBF24">Auto</text>
 
-    <rect x="426" y="54" width="54" height="24" rx="6" fill="#24221E" stroke="#3A3630"/>
-    <text x="453" y="70" text-anchor="middle" font-size="11" font-weight="600" fill="#F4F1EA">Pause</text>
+    <rect x="426" y="54" width="54" height="24" rx="6" fill="#181C28" stroke="#2B3246"/>
+    <text x="453" y="70" text-anchor="middle" font-size="11" font-weight="600" fill="#F2F4F8">Pause</text>
 
-    <rect x="486" y="54" width="64" height="24" rx="6" fill="#2C1D19" stroke="#D97757" stroke-opacity="0.6"/>
-    <text x="518" y="70" text-anchor="middle" font-size="11" font-weight="600" fill="#E5896B">Disconnect</text>
+    <rect x="486" y="54" width="64" height="24" rx="6" fill="#1D2231" stroke="#6895FF" stroke-opacity="0.6"/>
+    <text x="518" y="70" text-anchor="middle" font-size="11" font-weight="600" fill="#82A8FF">Disconnect</text>
 
     <!-- Viewport Canvas Area -->
-    <rect x="14" y="102" width="536" height="270" rx="10" fill="#141311" stroke="#2D2A24"/>
+    <rect x="14" y="102" width="536" height="270" rx="10" fill="#07090D" stroke="#23293A"/>
 
     <!-- Simulated Crisp Web Page Inside Screencast -->
-    <rect x="32" y="120" width="144" height="234" rx="8" fill="#1B1916" stroke="#2A2722"/>
-    <rect x="46" y="136" width="84" height="10" rx="5" fill="#D97757" fill-opacity="0.85"/>
-    <rect x="46" y="160" width="114" height="8" rx="4" fill="#35312B"/>
-    <rect x="46" y="178" width="96" height="8" rx="4" fill="#2C2924"/>
-    <rect x="46" y="196" width="108" height="8" rx="4" fill="#2C2924"/>
-    <rect x="46" y="226" width="116" height="44" rx="8" fill="#23211D" stroke="#34312B"/>
-    <text x="58" y="245" font-size="10.5" font-weight="650" fill="#63B888">SHA-1 Dedup</text>
-    <text x="58" y="261" font-size="10" fill="#A9A296">0 B unchanged</text>
-    <rect x="46" y="282" width="116" height="56" rx="8" fill="#23211D" stroke="#34312B"/>
-    <text x="58" y="302" font-size="10.5" font-weight="650" fill="#E5896B">Profile: High</text>
-    <text x="58" y="318" font-size="10" fill="#A9A296">1440×920 · q74</text>
-    <text x="58" y="331" font-size="9.5" fill="#7D776C">RTT 38 ms · 1x</text>
+    <rect x="32" y="120" width="144" height="234" rx="8" fill="#12151E" stroke="#23293A"/>
+    <rect x="46" y="136" width="84" height="10" rx="5" fill="#6895FF" fill-opacity="0.85"/>
+    <rect x="46" y="160" width="114" height="8" rx="4" fill="#1D2231"/>
+    <rect x="46" y="178" width="96" height="8" rx="4" fill="#181C28"/>
+    <rect x="46" y="196" width="108" height="8" rx="4" fill="#181C28"/>
+    <rect x="46" y="226" width="116" height="44" rx="8" fill="#181C28" stroke="#2B3246"/>
+    <text x="58" y="245" font-size="10.5" font-weight="650" fill="#34D399">SHA-1 Dedup</text>
+    <text x="58" y="261" font-size="10" fill="#A6B0C3">0 B unchanged</text>
+    <rect x="46" y="282" width="116" height="56" rx="8" fill="#181C28" stroke="#2B3246"/>
+    <text x="58" y="302" font-size="10.5" font-weight="650" fill="#82A8FF">Profile: High</text>
+    <text x="58" y="318" font-size="10" fill="#A6B0C3">1440×920 · q84</text>
+    <text x="58" y="331" font-size="9.5" fill="#6E788E">RTT 38 ms · 1x</text>
 
     <!-- Main Pane Inside Screencast -->
-    <rect x="190" y="120" width="342" height="118" rx="8" fill="#1B1916" stroke="#2A2722"/>
-    <text x="208" y="148" font-size="14" font-weight="700" fill="#F4F1EA">Interactive CDP Screencast Stream</text>
-    <text x="208" y="168" font-size="11.5" fill="#A9A296">Click, scroll, type, navigate &amp; switch tabs over</text>
-    <text x="208" y="185" font-size="11.5" fill="#A9A296">a single persistent loopback relay connection.</text>
-    <rect x="208" y="200" width="98" height="24" rx="6" fill="url(#terracotta)"/>
-    <text x="257" y="216" text-anchor="middle" font-size="11" font-weight="700" fill="#141311">Inspect Tab</text>
-    <rect x="316" y="200" width="118" height="24" rx="6" fill="#24221E" stroke="#3A3630"/>
-    <text x="375" y="216" text-anchor="middle" font-size="11" font-weight="600" fill="#D6D0C4">Zero-Tab Safe</text>
+    <rect x="190" y="120" width="342" height="118" rx="8" fill="#12151E" stroke="#23293A"/>
+    <text x="208" y="148" font-size="14" font-weight="700" fill="#F2F4F8">Interactive CDP Screencast Stream</text>
+    <text x="208" y="168" font-size="11.5" fill="#A6B0C3">Click, scroll, type, navigate &amp; switch tabs over</text>
+    <text x="208" y="185" font-size="11.5" fill="#A6B0C3">a single persistent loopback relay connection.</text>
+    <rect x="208" y="200" width="98" height="24" rx="6" fill="url(#indigo-accent)"/>
+    <text x="257" y="216" text-anchor="middle" font-size="11" font-weight="700" fill="#0B0D12">Inspect Tab</text>
+    <rect x="316" y="200" width="118" height="24" rx="6" fill="#181C28" stroke="#2B3246"/>
+    <text x="375" y="216" text-anchor="middle" font-size="11" font-weight="600" fill="#F2F4F8">Zero-Tab Safe</text>
 
     <!-- Sparkline / Latency Telemetry Card -->
-    <rect x="190" y="250" width="342" height="104" rx="8" fill="#1B1916" stroke="#2A2722"/>
-    <text x="208" y="272" font-size="11.5" font-weight="650" fill="#C9C2B6">Adaptive Bandwidth Telemetry (4-Tier RTT)</text>
-    <path d="M208 326 L246 318 L284 322 L322 302 L360 308 L398 294 L436 298 L474 288 L512 292" fill="none" stroke="#4E9F72" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="512" cy="292" r="4" fill="#4E9F72"/>
-    <text x="208" y="344" font-size="8.9" fill="#8B8478" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">ultra 800×520 · low 960×600 · med 1152×740 · high 1440×920</text>
+    <rect x="190" y="250" width="342" height="104" rx="8" fill="#12151E" stroke="#23293A"/>
+    <text x="208" y="272" font-size="11.5" font-weight="650" fill="#F2F4F8">Adaptive Bandwidth Telemetry (4-Tier RTT)</text>
+    <path d="M208 326 L246 318 L284 322 L322 302 L360 308 L398 294 L436 298 L474 288 L512 292" fill="none" stroke="#34D399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="512" cy="292" r="4" fill="#34D399"/>
+    <text x="208" y="344" font-size="8.9" fill="#6E788E" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">ultra 1024×640 · low 1152×720 · med 1280×800 · high 1440×920</text>
 
     <!-- Pointer Cursor Accent -->
-    <path d="M312 196 L328 206 L319 209 L316 218 Z" fill="#F4F1EA" stroke="#D97757" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M312 196 L328 206 L319 209 L316 218 Z" fill="#F2F4F8" stroke="#6895FF" stroke-width="1.6" stroke-linejoin="round"/>
 
     <!-- Footer Status Bar of Stage -->
-    <text x="20" y="399" font-size="11" fill="#8B8478" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">SEP-1865 · relay.sock (0600) · 127.0.0.1 loopback only</text>
-    <text x="544" y="399" text-anchor="end" font-size="11" fill="#63B888" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">0 external URLs</text>
+    <text x="20" y="399" font-size="11" fill="#6E788E" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">SEP-1865 · relay.sock (0600) · 127.0.0.1 loopback only</text>
+    <text x="544" y="399" text-anchor="end" font-size="11" fill="#34D399" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">0 external URLs</text>
   </g>
 
   <!-- Compact Pipeline Strip Beneath Stage -->
   <g transform="translate(652, 504)">
-    <rect x="0" y="0" width="166" height="58" rx="12" fill="#1C1B18" stroke="#D97757" stroke-opacity="0.45"/>
-    <text x="83" y="25" text-anchor="middle" font-size="12.5" font-weight="700" fill="#F4F1EA">SEP-1865 Panel</text>
-    <text x="83" y="43" text-anchor="middle" font-size="11" fill="#9E978B">&lt; 42 KiB · Zero Flash</text>
+    <rect x="0" y="0" width="166" height="58" rx="12" fill="#12151E" stroke="#6895FF" stroke-opacity="0.45"/>
+    <text x="83" y="25" text-anchor="middle" font-size="12.5" font-weight="700" fill="#F2F4F8">SEP-1865 Panel</text>
+    <text x="83" y="43" text-anchor="middle" font-size="11" fill="#A6B0C3">&lt;= 64 KiB · Zero Flash</text>
 
-    <path d="M174 29 H192" stroke="#D97757" stroke-width="2.2" stroke-linecap="round"/>
-    <path d="M188 24 L195 29 L188 34" fill="none" stroke="#D97757" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M174 29 H192" stroke="#6895FF" stroke-width="2.2" stroke-linecap="round"/>
+    <path d="M188 24 L195 29 L188 34" fill="none" stroke="#6895FF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
 
-    <rect x="199" y="0" width="166" height="58" rx="12" fill="#1C1B18" stroke="#4E9F72" stroke-opacity="0.5"/>
-    <text x="282" y="25" text-anchor="middle" font-size="12.5" font-weight="700" fill="#F4F1EA">Rust serve + relay</text>
-    <text x="282" y="43" text-anchor="middle" font-size="11" fill="#9E978B">0600 Unix Socket</text>
+    <rect x="199" y="0" width="166" height="58" rx="12" fill="#12151E" stroke="#34D399" stroke-opacity="0.5"/>
+    <text x="282" y="25" text-anchor="middle" font-size="12.5" font-weight="700" fill="#F2F4F8">Rust serve + relay</text>
+    <text x="282" y="43" text-anchor="middle" font-size="11" fill="#A6B0C3">0600 Unix Socket</text>
 
-    <path d="M373 29 H391" stroke="#D97757" stroke-width="2.2" stroke-linecap="round"/>
-    <path d="M387 24 L394 29 L387 34" fill="none" stroke="#D97757" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M373 29 H391" stroke="#6895FF" stroke-width="2.2" stroke-linecap="round"/>
+    <path d="M387 24 L394 29 L387 34" fill="none" stroke="#6895FF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
 
-    <rect x="398" y="0" width="166" height="58" rx="12" fill="#1C1B18" stroke="#8C9EFF" stroke-opacity="0.45"/>
-    <text x="481" y="25" text-anchor="middle" font-size="12.5" font-weight="700" fill="#F4F1EA">Google Chrome</text>
-    <text x="481" y="43" text-anchor="middle" font-size="11" fill="#9E978B">Loopback CDP WS</text>
+    <rect x="398" y="0" width="166" height="58" rx="12" fill="#12151E" stroke="#82A8FF" stroke-opacity="0.45"/>
+    <text x="481" y="25" text-anchor="middle" font-size="12.5" font-weight="700" fill="#F2F4F8">Google Chrome</text>
+    <text x="481" y="43" text-anchor="middle" font-size="11" fill="#A6B0C3">Loopback CDP WS</text>
   </g>
 </svg>

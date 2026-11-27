@@ -591,7 +591,7 @@ fn dispatch_rpc(
                         target_epoch: None,
                         events: vec![InputEvent {
                             action: "new_tab".into(),
-                            url: url.or_else(|| Some("about:blank".into())),
+                            url,
                             ..Default::default()
                         }],
                     })

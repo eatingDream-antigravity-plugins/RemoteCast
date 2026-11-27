@@ -1,10 +1,14 @@
 use crate::cdp::client::BOOT_SNAPSHOT_MAX_DATA_URL_CHARS;
 use crate::config::{Config, APP_VERSION};
 use crate::local_io::read_bounded_line;
+#[cfg(test)]
+use crate::mcp::tools::dispatch_tool_with_cache;
 use crate::mcp::tools::{
-    dispatch_tool_with_cache, redact_relay_payload, tool_definitions, APP_MIME, STAGE_URI,
+    attach_settings_snapshot, dispatch_tool_with_context, redact_relay_payload, tool_definitions,
+    APP_MIME, STAGE_URI,
 };
 use crate::relay::ipc::{RelayBackend, RelayClient};
+use crate::settings::SettingsStore;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -603,6 +607,7 @@ pub struct McpServer {
     panel_html_path: PathBuf,
     html_cache: Arc<Mutex<HtmlCache>>,
     swr_cache: Arc<SwrBootCache>,
+    settings: Option<Arc<SettingsStore>>,
     client_supports_apps: OnceLock<bool>,
 }
 
@@ -632,17 +637,28 @@ fn is_app_only_tool(name: &str) -> bool {
             | "chrome_stream_input"
             | "chrome_stream_launch"
             | "chrome_stream_launch_remote"
+            | "chrome_stream_config"
     )
 }
 
 impl McpServer {
+    #[cfg(test)]
     pub fn new(relay: Arc<dyn RelayBackend>, panel_html_path: PathBuf) -> Arc<Self> {
+        Self::with_settings(relay, panel_html_path, None)
+    }
+
+    pub fn with_settings(
+        relay: Arc<dyn RelayBackend>,
+        panel_html_path: PathBuf,
+        settings: Option<Arc<SettingsStore>>,
+    ) -> Arc<Self> {
         let swr_cache = SwrBootCache::new(Arc::clone(&relay));
         Arc::new(Self {
             relay,
             panel_html_path,
             html_cache: Arc::new(Mutex::new(HtmlCache::default())),
             swr_cache,
+            settings,
             client_supports_apps: OnceLock::new(),
         })
     }
@@ -731,9 +747,10 @@ impl McpServer {
                         .get("arguments")
                         .cloned()
                         .unwrap_or_else(|| json!({}));
-                    Ok(dispatch_tool_with_cache(
+                    Ok(dispatch_tool_with_context(
                         &self.relay,
                         Some(&self.swr_cache),
+                        self.settings.as_ref(),
                         name,
                         args,
                     ))
@@ -762,10 +779,19 @@ impl McpServer {
             return Err((-32602, format!("Unknown resource URI: {uri}")));
         }
 
-        let boot_data = self
+        let mut boot_data = self
             .apps_capable()
             .then(|| self.swr_cache.get_swr(Duration::from_millis(1200)))
             .flatten();
+        if let (Some(bd), Some(store)) = (boot_data.as_mut(), self.settings.as_ref()) {
+            attach_settings_snapshot(&mut bd.metadata, Some(store));
+        } else if boot_data.is_none() && self.apps_capable() {
+            if let Some(store) = self.settings.as_ref() {
+                let mut meta = json!({ "connected": false });
+                attach_settings_snapshot(&mut meta, Some(store));
+                boot_data = BootSnapshot::from_relay(meta);
+            }
+        }
         let html = self
             .html_cache
             .lock()
@@ -790,9 +816,11 @@ impl McpServer {
 
 pub fn run_stdio_server(cfg: &Config) -> Result<(), String> {
     let relay_client = RelayClient::from_config(cfg);
-    let server = McpServer::new(
+    let settings = Some(SettingsStore::new(cfg.data_dir.clone()));
+    let server = McpServer::with_settings(
         relay_client as Arc<dyn RelayBackend>,
         cfg.panel_html.clone(),
+        settings,
     );
 
     // Immediately pre-warm panel HTML, detached relay connection, Chrome readiness,
@@ -1124,6 +1152,7 @@ mod tests {
                         "chrome_stream_input",
                         "chrome_stream_disconnect",
                         "chrome_stream_launch",
+                        "chrome_stream_config",
                     ]
                 );
                 assert_eq!(
@@ -1207,7 +1236,7 @@ mod tests {
         let html_path = dir.join("panel.html");
         fs::write(
             &html_path,
-            "<!doctype html><script>/*__CHROME_STREAM_BOOT__*/</script><div>Chrome Stream</div>",
+            "<!doctype html><script>/*__CHROME_STREAM_BOOT__*/</script><div>Remote Cast</div>",
         )
         .unwrap();
 
@@ -1263,6 +1292,7 @@ mod tests {
                 "chrome_stream_input",
                 "chrome_stream_disconnect",
                 "chrome_stream_launch",
+                "chrome_stream_config",
             ]
         );
         for tool in tools {
@@ -1429,7 +1459,7 @@ mod tests {
         let html_path = dir.join("panel.html");
         fs::write(
             &html_path,
-            "<!doctype html><script>/*__CHROME_STREAM_BOOT__*/</script><div>Chrome Stream</div>",
+            "<!doctype html><script>/*__CHROME_STREAM_BOOT__*/</script><div>Remote Cast</div>",
         )
         .unwrap();
 

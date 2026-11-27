@@ -1,0 +1,19 @@
+{
+  "name": "chrome-stream-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node build.ts",
+    "test": "node --test net-policy.test.ts test/panel.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.11",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

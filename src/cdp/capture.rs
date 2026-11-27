@@ -186,10 +186,18 @@ impl FramePipeline {
             .unwrap_or(true)
     }
 
-    pub fn check_idle_timeout(&mut self, connected: bool, paused: bool) -> bool {
+    pub fn check_idle_timeout(
+        &mut self,
+        connected: bool,
+        paused: bool,
+        idle_stop: Option<Duration>,
+    ) -> bool {
+        let Some(limit) = idle_stop else {
+            return false;
+        };
         if !connected || paused {
             false
-        } else if self.capture_idle_at.elapsed() >= SCREENCAST_IDLE_STOP {
+        } else if self.capture_idle_at.elapsed() >= limit {
             let had_sc = self.screencast_target_id.is_some();
             self.screencast_idle_paused = true;
             had_sc
@@ -263,11 +271,12 @@ impl FramePipeline {
 pub(crate) fn check_idle_screencast_stop(client: &Arc<CdpClient>) -> bool {
     let connected = client.is_connected();
     let paused = client.is_paused();
+    let idle_stop = client.idle_pause_timeout();
     let should_stop = client
         .capture
         .lock()
         .unwrap()
-        .check_idle_timeout(connected, paused);
+        .check_idle_timeout(connected, paused, idle_stop);
     if should_stop {
         stop_screencast(client);
         client.notify_frame_waiters();
@@ -368,6 +377,7 @@ pub(crate) fn ensure_screencast(
         }
     }
 
+    client.sync_focus_emulation(Some(target_id));
     let start_res = client.send_cdp(
         "Page.startScreencast",
         json!({

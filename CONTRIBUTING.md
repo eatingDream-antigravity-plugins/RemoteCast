@@ -11,8 +11,10 @@ Thank you for your interest in contributing to [Remote Cast (chrome-stream-mcp)]
 ## Local checks before pushing
 
 ```bash
-node panel/build.mjs
-node --test panel/net-policy.test.mjs
+npm --prefix panel ci --ignore-scripts
+npm --prefix panel run typecheck
+npm --prefix panel run build
+npm --prefix panel test
 cargo test --locked
 bash scripts/check_sanitized.sh
 ```
