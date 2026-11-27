@@ -137,10 +137,44 @@ pub(crate) fn should_recycle_relay(ping: &Value, expected_version: &str) -> bool
     version != expected_version
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum ShutdownOutcome {
     Stopping,
     ActiveSession,
-    UnsupportedOrError,
+    Unsupported,
+    Error,
+}
+
+fn is_unknown_method_error(err: &Value) -> bool {
+    let msg = err
+        .as_str()
+        .or_else(|| err.get("message").and_then(Value::as_str))
+        .unwrap_or("");
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("unknown relay method")
+        || lower.contains("unknown method")
+        || lower.contains("method not found")
+}
+
+fn parse_shutdown_response(parsed: &Value) -> ShutdownOutcome {
+    if parsed["id"] != 0 {
+        return ShutdownOutcome::Error;
+    }
+    if let Some(err) = parsed.get("error").filter(|e| !e.is_null()) {
+        return if is_unknown_method_error(err) {
+            ShutdownOutcome::Unsupported
+        } else {
+            ShutdownOutcome::Error
+        };
+    }
+    let result = &parsed["result"];
+    if result["ok"] == true && result["stopping"] == true {
+        return ShutdownOutcome::Stopping;
+    }
+    if result["reason"] == "active_session" || result["connected"] == true {
+        return ShutdownOutcome::ActiveSession;
+    }
+    ShutdownOutcome::Error
 }
 
 fn send_shutdown_rpc(sock_path: &Path) -> io::Result<ShutdownOutcome> {
@@ -159,31 +193,26 @@ fn send_shutdown_rpc(sock_path: &Path) -> io::Result<ShutdownOutcome> {
         MAX_PROBE_RESPONSE_BYTES,
     )?;
     let parsed: Value = serde_json::from_slice(&line)?;
-    if parsed["id"] != 0 || parsed.get("error").is_some_and(|e| !e.is_null()) {
-        return Ok(ShutdownOutcome::UnsupportedOrError);
-    }
-    let result = &parsed["result"];
-    if result["ok"] == true && result["stopping"] == true {
-        return Ok(ShutdownOutcome::Stopping);
-    }
-    if result["reason"] == "active_session" || result["connected"] == true {
-        return Ok(ShutdownOutcome::ActiveSession);
-    }
-    Ok(ShutdownOutcome::UnsupportedOrError)
+    Ok(parse_shutdown_response(&parsed))
 }
 
-fn wait_for_relay_exit(sock_path: &Path, timeout: Duration) -> bool {
+fn wait_for_relay_exit(sock_path: &Path, old_pid: Option<u64>, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let is_gone = || {
-        !sock_path.exists()
-            || matches!(
-                probe_relay_ping(sock_path),
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                    )
-            )
+        if !sock_path.exists() {
+            return true;
+        }
+        match probe_relay_ping(sock_path) {
+            Ok(ping) => old_pid.is_some_and(|old| {
+                ping.get("pid")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|new_pid| new_pid != old)
+            }),
+            Err(err) => matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ),
+        }
     };
     while Instant::now() < deadline {
         if is_gone() {
@@ -192,6 +221,38 @@ fn wait_for_relay_exit(sock_path: &Path, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(25));
     }
     is_gone()
+}
+
+fn is_relay_command_line(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    for (idx, _) in trimmed.match_indices("relay") {
+        let before = &trimmed[..idx];
+        if !before.ends_with(char::is_whitespace) {
+            continue;
+        }
+        let after = &trimmed[idx + "relay".len()..];
+        if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let exe = before.trim_end();
+        let exe = exe
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| exe.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(exe);
+        if exe == "chrome-stream-mcp" {
+            return true;
+        }
+        if exe.ends_with("/chrome-stream-mcp")
+            && (!exe.contains(char::is_whitespace) || (exe.starts_with('/') && !exe.contains(" /")))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(not(test))]
@@ -222,7 +283,7 @@ fn verify_relay_process(pid: libc::pid_t) -> bool {
     if uid != effective_uid() as u32 {
         return false;
     }
-    cmd.contains("chrome-stream-mcp") && cmd.split_whitespace().any(|arg| arg == "relay")
+    is_relay_command_line(cmd)
 }
 
 #[cfg(not(test))]
@@ -397,13 +458,15 @@ impl RelayClient {
     }
 
     fn recycle_stale_relay(&self, ping: &Value) -> bool {
+        let old_pid = ping.get("pid").and_then(Value::as_u64);
         match send_shutdown_rpc(&self.sock_path) {
             Ok(ShutdownOutcome::ActiveSession) => return true,
             Ok(ShutdownOutcome::Stopping) => {
-                wait_for_relay_exit(&self.sock_path, Duration::from_millis(1500));
+                wait_for_relay_exit(&self.sock_path, old_pid, Duration::from_millis(1500));
                 return false;
             }
-            Ok(ShutdownOutcome::UnsupportedOrError) => {}
+            Ok(ShutdownOutcome::Unsupported) => {}
+            Ok(ShutdownOutcome::Error) => return true,
             Err(err)
                 if matches!(
                     err.kind(),
@@ -412,12 +475,12 @@ impl RelayClient {
             {
                 return false;
             }
-            Err(_) => {}
+            Err(_) => return true,
         }
 
         #[cfg(not(test))]
         if terminate_legacy_relay(ping) {
-            wait_for_relay_exit(&self.sock_path, Duration::from_millis(1500));
+            wait_for_relay_exit(&self.sock_path, old_pid, Duration::from_millis(1500));
         }
         #[cfg(test)]
         let _ = ping;
@@ -691,5 +754,154 @@ mod tests {
             &json!({ "ok": true, "version": "0.6.0", "connected": true }),
             "0.6.0"
         ));
+    }
+
+    #[test]
+    fn parse_shutdown_response_only_marks_unknown_method_as_unsupported() {
+        assert_eq!(
+            parse_shutdown_response(&json!({ "id": 0, "error": "Unknown relay method: shutdown" })),
+            ShutdownOutcome::Unsupported
+        );
+        assert_eq!(
+            parse_shutdown_response(
+                &json!({ "id": 0, "error": "Relay busy: too many concurrent requests" })
+            ),
+            ShutdownOutcome::Error
+        );
+        assert_eq!(
+            parse_shutdown_response(&json!({ "id": 0, "error": "Unexpected internal error" })),
+            ShutdownOutcome::Error
+        );
+        assert_eq!(
+            parse_shutdown_response(
+                &json!({ "id": 0, "result": { "ok": true, "stopping": true } })
+            ),
+            ShutdownOutcome::Stopping
+        );
+        assert_eq!(
+            parse_shutdown_response(
+                &json!({ "id": 0, "result": { "ok": false, "reason": "active_session" } })
+            ),
+            ShutdownOutcome::ActiveSession
+        );
+    }
+
+    #[test]
+    fn recycle_stale_relay_keeps_existing_relay_on_busy_or_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("csm-ipc-recycle-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let sock = dir.join("relay.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        fs::set_permissions(&sock, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let server = thread::spawn(move || {
+            // Connection 1: busy error
+            let (mut s1, _) = listener.accept().unwrap();
+            let mut req = String::new();
+            BufReader::new(&s1).read_line(&mut req).unwrap();
+            writeln!(
+                s1,
+                "{}",
+                json!({ "id": 0, "error": "Relay busy: too many concurrent requests" })
+            )
+            .unwrap();
+
+            // Connection 2: silent timeout
+            let (s2, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(800));
+            drop(s2);
+        });
+
+        let client = RelayClient::connect_only(sock.clone());
+        let ping = json!({ "ok": true, "pid": 4242, "version": "0.5.0", "connected": false });
+        assert!(
+            client.recycle_stale_relay(&ping),
+            "busy error must keep existing relay instead of falling back to SIGTERM"
+        );
+        assert!(
+            client.recycle_stale_relay(&ping),
+            "read timeout must keep existing relay instead of falling back to SIGTERM"
+        );
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_relay_command_line_matches_exe_before_relay_and_rejects_false_positives() {
+        assert!(is_relay_command_line(
+            "/usr/local/bin/chrome-stream-mcp relay"
+        ));
+        assert!(is_relay_command_line("chrome-stream-mcp relay"));
+        assert!(is_relay_command_line(
+            "/Applications/My Tools/chrome-stream-mcp relay"
+        ));
+        assert!(is_relay_command_line(
+            "/Users/demo/relay tools/chrome-stream-mcp relay"
+        ));
+        assert!(!is_relay_command_line(
+            "rg relay /path/to/chrome-stream-mcp"
+        ));
+        assert!(!is_relay_command_line(
+            "rg /path/to/chrome-stream-mcp relay"
+        ));
+        assert!(!is_relay_command_line(
+            "/usr/local/bin/chrome-stream-mcp-dev relay"
+        ));
+        assert!(!is_relay_command_line(
+            "/usr/local/bin/chrome-stream-mcp relay_helper"
+        ));
+        assert!(!is_relay_command_line(
+            "/usr/local/bin/chrome-stream-mcp serve"
+        ));
+    }
+
+    #[test]
+    fn wait_for_relay_exit_returns_early_when_pid_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("csm-ipc-pid-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let sock = dir.join("relay.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        fs::set_permissions(&sock, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let server = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut req = String::new();
+            BufReader::new(&s).read_line(&mut req).unwrap();
+            writeln!(
+                s,
+                "{}",
+                json!({ "id": 0, "result": { "ok": true, "pid": 9999, "version": "0.6.1", "connected": false } })
+            )
+            .unwrap();
+        });
+
+        let started = Instant::now();
+        assert!(wait_for_relay_exit(
+            &sock,
+            Some(1234),
+            Duration::from_millis(1500)
+        ));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "should exit early when ping reports a different PID"
+        );
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
     }
 }

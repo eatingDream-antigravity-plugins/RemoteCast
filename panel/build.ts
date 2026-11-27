@@ -18,17 +18,6 @@ const ENTRY_TS = path.join(__dirname, "stage.ts");
 const MODULES: readonly string[] = ["kit/bridge.ts", "net-policy.ts", "i18n.ts"];
 const BOOT_TOKEN = "/*__CHROME_STREAM_BOOT__*/";
 
-function readPanelVersion(): string {
-  for (const rel of ["../plugin.json", "package.json"]) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(__dirname, rel), "utf8")) as { version?: unknown };
-      if (typeof parsed.version === "string" && parsed.version.trim()) return parsed.version.trim();
-    } catch {}
-  }
-  return "0.0.0";
-}
-const PANEL_VERSION = readPanelVersion();
-
 function tryLoadEsbuild(): typeof esbuildNs | null {
   if (process.env.PANEL_BUNDLER === "bun") return null;
   for (const mod of [process.env.ESBUILD_PATH, "esbuild"].filter((m): m is string => Boolean(m))) {
@@ -63,7 +52,6 @@ function tryCliBundle(): { code: string; engine: string } | null {
             "--format=iife",
             "--platform=browser",
             "--target=es2022",
-            `--define:__PANEL_VERSION__=${JSON.stringify(PANEL_VERSION)}`,
           ],
           { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }
         );
@@ -75,7 +63,7 @@ function tryCliBundle(): { code: string; engine: string } | null {
       try {
         const out = execFileSync(
           bunBin,
-          ["build", tmpEntry, "--bundle", "--minify", "--format=iife", "--target=browser", `--define:__PANEL_VERSION__=${JSON.stringify(PANEL_VERSION)}`],
+          ["build", tmpEntry, "--bundle", "--minify", "--format=iife", "--target=browser"],
           { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }
         );
         if (out.trim()) return { code: out.trim(), engine: "bun" };
@@ -153,7 +141,7 @@ function fallbackBundleJs(): string {
       .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|class|const|let|var)\b)/gm, "");
   };
   const parts = [...MODULES, "stage.ts"].map((file) => strip(fs.readFileSync(path.join(__dirname, file), "utf8")));
-  return `(()=>{"use strict";const __PANEL_VERSION__=${JSON.stringify(PANEL_VERSION)};${compactJsFallback(parts.join("\n"))}})();`;
+  return `(()=>{"use strict";${compactJsFallback(parts.join("\n"))}})();`;
 }
 
 async function bundleAssets(): Promise<{ js: string; css: string; engine: string }> {
@@ -172,7 +160,6 @@ async function bundleAssets(): Promise<{ js: string; css: string; engine: string
       format: "iife",
       platform: "browser",
       target: ["es2022"],
-      define: { __PANEL_VERSION__: JSON.stringify(PANEL_VERSION) },
       write: false,
     });
     const minCss = await esbuild.transform(rawCss, {

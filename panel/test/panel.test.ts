@@ -164,15 +164,24 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     innerWidth: 480,
     innerHeight: 720,
   };
+  let disposed = false;
   const activeTimers = new Set<ReturnType<typeof setTimeout>>();
+  const scheduleTimer = (fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    if (disposed) return 0 as unknown as ReturnType<typeof setTimeout>;
+    const id = setTimeout(() => { activeTimers.delete(id); if (!disposed) fn(...args); }, ms);
+    id.unref?.();
+    activeTimers.add(id);
+    return id;
+  };
+  const cancelTimer = (id: ReturnType<typeof setTimeout>) => { activeTimers.delete(id); clearTimeout(id); };
   const ctx = vm.createContext({
     window: win,
     document: doc,
     navigator: { language: navLang, platform: "MacIntel", clipboard: { writeText: async () => {} } },
     performance: { now: () => 10_000 },
     console,
-    requestAnimationFrame: (fn: () => void) => setTimeout(fn, 0),
-    cancelAnimationFrame: clearTimeout,
+    requestAnimationFrame: (fn: () => void) => scheduleTimer(fn, 0),
+    cancelAnimationFrame: cancelTimer,
     ResizeObserver: class { observe() {} disconnect() {} },
     IntersectionObserver: class { observe() {} disconnect() {} },
     Image: class {},
@@ -180,13 +189,9 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     Date: { now: () => 10_000 },
     getComputedStyle: () => ({ getPropertyValue: () => "" }),
     __CHROME_STREAM_BOOT__: boot,
+    setTimeout: scheduleTimer,
+    clearTimeout: cancelTimer,
   });
-  ctx.setTimeout = (fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
-    const id = setTimeout(() => { activeTimers.delete(id); fn(...args); }, ms);
-    activeTimers.add(id);
-    return id;
-  };
-  ctx.clearTimeout = (id: ReturnType<typeof setTimeout>) => { activeTimers.delete(id); clearTimeout(id); };
   vm.runInContext(match[1], ctx);
 
   const initReq = posted.find((m) => m.method === "ui/initialize");
@@ -204,7 +209,11 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     },
   });
 
-  const cleanup = () => { for (const id of activeTimers) clearTimeout(id); activeTimers.clear(); };
+  const cleanup = () => {
+    disposed = true;
+    for (const id of activeTimers) clearTimeout(id);
+    activeTimers.clear();
+  };
   return { els, posted, msgHandler, win, cleanup };
 }
 
@@ -227,6 +236,26 @@ describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
 
     const logo = fs.readFileSync(path.join(repoDir, "assets", "logo.svg"), "utf8");
     assert.ok(logo.includes("#0B0D12") && logo.includes("#6895FF"), "logo.svg must use Lucid Indigo palette");
+
+    const plugin = JSON.parse(fs.readFileSync(path.join(repoDir, "plugin.json"), "utf8")) as { version: string };
+    assert.ok(!html.includes(plugin.version), "built panel.html must not bake plugin.json version");
+  });
+
+  it("reads runtime appVersion / relayVersion from boot payload for ui/initialize", () => {
+    const h1 = bootPanel({ connected: false, appVersion: "9.8.7", relayVersion: "9.8.6" });
+    try {
+      const init1 = h1.posted.find((m) => m.method === "ui/initialize") as { params?: { appInfo?: { version?: string } } };
+      assert.equal(init1?.params?.appInfo?.version, "9.8.7");
+    } finally {
+      h1.cleanup();
+    }
+    const h2 = bootPanel({ connected: false, relayVersion: "9.8.6" });
+    try {
+      const init2 = h2.posted.find((m) => m.method === "ui/initialize") as { params?: { appInfo?: { version?: string } } };
+      assert.equal(init2?.params?.appInfo?.version, "9.8.6");
+    } finally {
+      h2.cleanup();
+    }
   });
 
   it("clears loading bar on 0-tab/closed-window transition and shows actionable New Tab + Disconnect", async () => {

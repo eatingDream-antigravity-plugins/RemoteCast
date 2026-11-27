@@ -9,11 +9,10 @@ import type { FramePayload, InputEventPayload, PanelLang, PanelState, PortFileIn
 import { I18N } from "./i18n.ts";
 import type { I18nDict } from "./i18n.ts";
 
-declare const __PANEL_VERSION__: string | undefined;
 type Tm = ReturnType<typeof setTimeout> | number;
 type HChild = Node | string | false | null | undefined | HSpec;
 type HSpec = readonly [string, (string | 0)?, ...HChild[]];
-type BootPayload = FramePayload & { locale?: string; qualityApplied?: string };
+type BootPayload = FramePayload & { locale?: string; qualityApplied?: string; appVersion?: string; relayVersion?: string };
 type CfgState = { lang: string; defaultQuality: string; defaultConnectMode: string; bgPollIntervalSec: number; idlePauseSec: number; wheelCoalesceMs?: number; newTabUrl?: string };
 
 const doc = document;
@@ -29,7 +28,7 @@ const tg = (n: Element, c: string, v: unknown): boolean => n.classList.toggle(c,
 const pNow = (): number => performance.now(), nowMs = (): number => Date.now(), cl = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 const sTm = (f: () => void, m?: number): Tm => globalThis.setTimeout(f, m), cTm = (i: Tm): void => globalThis.clearTimeout(i as ReturnType<typeof setTimeout>), hid = (): boolean => doc.visibilityState === "hidden";
 const isMac = /mac/i.test(navigator?.platform || navigator?.userAgent || "");
-const root = doc.getElementById("app") as HTMLElement, app = App({ name: "Remote Cast", version: typeof __PANEL_VERSION__ === "string" ? __PANEL_VERSION__ : "0.6.0" }, {}), net = new AdaptiveBandwidthController("auto");
+const root = doc.getElementById("app") as HTMLElement, app = App({ name: "Remote Cast", version: b0.appVersion || b0.relayVersion || "0.1.0" }, {}), net = new AdaptiveBandwidthController("auto");
 const KEYS = new Set<string>([...REP, "Enter", "Escape", "Home", "End", "Space"]);
 const QK = "auto ultra low medium high".split(" "), IK = "Enter Escape Tab Backspace Undo Copy Paste SelectAll".split(" ");
 const DLG = "alert confirm prompt beforeunload".split(" "), DLG_K = "da df dp dl".split(" ");

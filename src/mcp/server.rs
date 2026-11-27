@@ -149,6 +149,9 @@ impl BootSnapshot {
             _ => Arc::from(""),
         };
         redact_relay_payload(&mut metadata);
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("appVersion".to_string(), json!(APP_VERSION));
+        }
         Some(Self { metadata, image })
     }
 
@@ -446,6 +449,7 @@ impl SwrBootCache {
         } = st.snapshot.get_or_insert_with(|| BootSnapshot {
             metadata: json!({
                 "hostname": "localhost",
+                "appVersion": APP_VERSION,
                 "connected": false,
                 "connectionMode": Value::Null,
                 "crisp": false,
@@ -598,6 +602,7 @@ impl SwrBootCache {
         }
 
         redact_relay_payload(snap);
+        snap["appVersion"] = json!(APP_VERSION);
         st.updated_at = Some(Instant::now());
     }
 }
@@ -1273,6 +1278,7 @@ mod tests {
         let r3 = responses.iter().find(|r| r["id"] == 3).unwrap();
         let html = r3["result"]["contents"][0]["text"].as_str().unwrap();
         assert!(html.contains("window.__CHROME_STREAM_BOOT__="));
+        assert!(html.contains(&format!("\"appVersion\":\"{APP_VERSION}\"")));
         // XSS escape & privacy redaction checks
         assert!(!html.contains("</script><script>alert(1)"));
         assert!(html.contains("\\u003c/script\\u003e"));

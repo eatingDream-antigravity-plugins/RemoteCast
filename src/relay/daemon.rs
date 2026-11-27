@@ -451,11 +451,11 @@ fn handle_client_conn(
                         || events.iter().any(|ev| ev["action"] == "disconnect")
                 }))
         {
-            let reply =
-                rpc_response_with_control(&cdp, &data_dir, Some(&stop_flag), method, params, id);
+            let reply = rpc_response(&cdp, &data_dir, method, params, id);
             let should_stop = method == "shutdown" && reply["result"]["stopping"] == true;
             writer.write_response(reply);
             if should_stop {
+                stop_flag.store(true, Ordering::SeqCst);
                 if let Some(thread) = &accept_thread {
                     thread.unpark();
                 }
@@ -481,7 +481,7 @@ fn handle_client_conn(
             .spawn(move || {
                 let _slot = slot;
                 let method = req.get("method").and_then(Value::as_str).unwrap_or("");
-                let response = rpc_response_with_control(&cdp, &data_dir, None, method, params, id);
+                let response = rpc_response(&cdp, &data_dir, method, params, id);
                 *activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
                 rpc_writer.write_response(response);
             });
@@ -493,34 +493,22 @@ fn handle_client_conn(
     }
 }
 
-fn rpc_response_with_control(
+fn rpc_response(
     cdp: &Arc<CdpClient>,
     data_dir: &Path,
-    stop_flag: Option<&AtomicBool>,
     method: &str,
     params: Value,
     id: Value,
 ) -> Value {
-    match dispatch_rpc_with_control(cdp, data_dir, stop_flag, method, params) {
+    match dispatch_rpc(cdp, data_dir, method, params) {
         Ok(result) => json!({ "id": id, "result": result }),
         Err(err) => json!({ "id": id, "error": err }),
     }
 }
 
-#[cfg(test)]
 fn dispatch_rpc(
     cdp: &Arc<CdpClient>,
     data_dir: &Path,
-    method: &str,
-    params: Value,
-) -> Result<Value, String> {
-    dispatch_rpc_with_control(cdp, data_dir, None, method, params)
-}
-
-fn dispatch_rpc_with_control(
-    cdp: &Arc<CdpClient>,
-    data_dir: &Path,
-    stop_flag: Option<&AtomicBool>,
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
@@ -747,9 +735,6 @@ fn dispatch_rpc_with_control(
                     "reason": "active_session",
                 }))
             } else {
-                if let Some(flag) = stop_flag {
-                    flag.store(true, Ordering::SeqCst);
-                }
                 Ok(json!({
                     "ok": true,
                     "stopping": true,
