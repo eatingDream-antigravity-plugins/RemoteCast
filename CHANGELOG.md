@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.5.2](https://github.com/eatingDream-antigravity-plugins/RemoteCast/compare/v0.5.1...v0.5.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* tighten chrome-stream skill trigger guard and RemoteCast branding ([#25](https://github.com/eatingDream-antigravity-plugins/RemoteCast/issues/25)) ([095a2d8](https://github.com/eatingDream-antigravity-plugins/RemoteCast/commit/095a2d852b6fb4f4ae177c06b422976f26139fe1))
+
 ## [0.5.1](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp/compare/v0.5.0...v0.5.1) (2026-11-26)
 
 
