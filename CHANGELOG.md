@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.6.1](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.6.0...v0.6.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* recycle stale idle relay daemons and fix standby error banner UI ([#36](https://github.com/eatingDream-antigravity-plugins/remote-cast/issues/36)) ([cb3ffc3](https://github.com/eatingDream-antigravity-plugins/remote-cast/commit/cb3ffc32ee022f74dcb2dac21eb9972e73a199cf))
+
 ## [0.6.0](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.5.5...v0.6.0) (2026-11-27)
 
 
