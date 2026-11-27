@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install Chrome Stream MCP plugin from GitHub Releases with SHA256 verification.
+# Install RemoteCast (chrome-stream-mcp) plugin from GitHub Releases with SHA256 verification.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
 #   CHROME_STREAM_VERSION=v0.1.0 sh scripts/install.sh
@@ -25,7 +25,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --help|-h)
       cat <<'EOF'
-Chrome Stream MCP installer
+RemoteCast (chrome-stream-mcp) installer
 
 Options:
   -v, --version <tag>   Install a specific release tag (e.g. v0.1.0). Defaults to latest.
@@ -149,10 +149,10 @@ cp "${STAGE_DIR}/LICENSE" "${INSTALL_DIR}/LICENSE"
 cp "${STAGE_DIR}/README.md" "${INSTALL_DIR}/README.md"
 
 echo ""
-echo "Installed Chrome Stream MCP ${VERSION} (${TARGET}) to:"
+echo "Installed RemoteCast (chrome-stream-mcp) ${VERSION} (${TARGET}) to:"
 echo "  ${INSTALL_DIR}"
 echo ""
 echo "Next steps:"
 echo "  1. Enable Chrome remote debugging at chrome://inspect/#remote-debugging"
 echo "  2. Run: ${INSTALL_DIR}/bin/chrome-stream-mcp doctor"
-echo "  3. Restart or reload your MCP host to load the Chrome Stream plugin"
+echo "  3. Restart or reload your MCP host to load the RemoteCast (chrome-stream-mcp) plugin"
