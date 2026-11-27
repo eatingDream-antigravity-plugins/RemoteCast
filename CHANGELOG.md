@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.5.3](https://github.com/eatingDream-antigravity-plugins/RemoteCast/compare/v0.5.2...v0.5.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* shorten app-only launch tool to chrome_stream_launch (&lt;=64 chars) ([#27](https://github.com/eatingDream-antigravity-plugins/RemoteCast/issues/27)) ([c5800c1](https://github.com/eatingDream-antigravity-plugins/RemoteCast/commit/c5800c1857d468bd3f39247059eace0724c2c969))
+
 ## [0.5.2](https://github.com/eatingDream-antigravity-plugins/RemoteCast/compare/v0.5.1...v0.5.2) (2026-11-27)
 
 
