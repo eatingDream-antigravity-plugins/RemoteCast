@@ -393,4 +393,58 @@ describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
       h.cleanup();
     }
   });
+
+  it("drops .ok on #op when a standby error is active and uses direct-child .f > .b in CSS", async () => {
+    const css = fs.readFileSync(path.join(panelDir, "styles.css"), "utf8");
+    assert.ok(css.includes(".f > .b"), "styles.css must scope .b sizing with .f > .b");
+    assert.ok(!/\.f\s+\.b\b/.test(css), "styles.css must not use descendant .f .b selector");
+
+    const h = bootPanel({ connected: false, portFile: { valid: true, port: 9222 } }, { navLang: "zh-CN" });
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      const op = h.els.get("op")!;
+      assert.equal(op.classList.contains("ok"), true, "#op shows .ok when portFile is valid and no error");
+      assert.equal(op.classList.contains("er"), false);
+
+      h.msgHandler({
+        source: h.win.parent,
+        data: {
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-result",
+          params: {
+            structuredContent: {
+              connected: false,
+              portFile: { valid: true, port: 9222 },
+              errorCode: "port_busy",
+              error: "Debug port 9222 is already in use",
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(op.classList.contains("ok"), false, "#op must drop .ok when standby error is active");
+      assert.equal(op.classList.contains("er"), true, "#op should show .er when standby error is active");
+      assert.equal(h.els.get("od")!.classList.contains("er"), true);
+
+      // Dismissing/clearing the error restores .ok on #op when portFile is still valid
+      h.msgHandler({
+        source: h.win.parent,
+        data: {
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-result",
+          params: {
+            structuredContent: {
+              connected: false,
+              portFile: { valid: true, port: 9222 },
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(op.classList.contains("ok"), true, "#op must restore .ok once standby error clears");
+      assert.equal(op.classList.contains("er"), false);
+    } finally {
+      h.cleanup();
+    }
+  });
 });

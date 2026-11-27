@@ -304,6 +304,7 @@ fn serve_relay_socket_with_limits(
     }
 
     let data_dir: Arc<Path> = Arc::from(data_dir);
+    let accept_thread = thread::current();
     let active_clients = Arc::new(AtomicUsize::new(0));
     let in_flight_rpcs = Arc::new(AtomicUsize::new(0));
     let last_activity = Arc::new(Mutex::new(Instant::now()));
@@ -340,10 +341,22 @@ fn serve_relay_socket_with_limits(
                 let data_dir = Arc::clone(&data_dir);
                 let rpcs = Arc::clone(&in_flight_rpcs);
                 let activity = Arc::clone(&last_activity);
+                let conn_stop = Arc::clone(&stop_flag);
+                let wake_thread = accept_thread.clone();
                 let _ = thread::Builder::new()
                     .name("chrome-stream-conn".to_string())
                     .spawn(move || {
-                        handle_client_conn(stream, cdp, data_dir, rpcs, activity, limits, slot)
+                        handle_client_conn(
+                            stream,
+                            cdp,
+                            data_dir,
+                            rpcs,
+                            activity,
+                            limits,
+                            slot,
+                            conn_stop,
+                            Some(wake_thread),
+                        )
                     });
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -359,7 +372,7 @@ fn serve_relay_socket_with_limits(
                 {
                     break;
                 }
-                thread::sleep(Duration::from_millis(40));
+                thread::park_timeout(Duration::from_millis(40));
             }
             Err(_) => thread::sleep(Duration::from_millis(50)),
         }
@@ -384,6 +397,7 @@ impl ClientWriter {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_client_conn(
     stream: UnixStream,
     cdp: Arc<CdpClient>,
@@ -392,6 +406,8 @@ fn handle_client_conn(
     last_activity: Arc<Mutex<Instant>>,
     limits: RelayLimits,
     connection_slot: RelaySlot,
+    stop_flag: Arc<AtomicBool>,
+    accept_thread: Option<thread::Thread>,
 ) {
     let Ok(writer_stream) = stream.try_clone() else {
         return;
@@ -425,15 +441,26 @@ fn handle_client_conn(
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         *last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
         // The client reader has reserved execution capacity for connection controls.
-        let is_control = |action| matches!(action, "disconnect" | "pause" | "resume");
+        let is_input_control = |action| matches!(action, "disconnect" | "pause" | "resume");
+        let is_control = |action| action == "shutdown" || is_input_control(action);
         if is_control(method)
             || (method == "input"
                 && params["events"].as_array().is_some_and(|events| {
-                    (events.len() == 1 && events[0]["action"].as_str().is_some_and(is_control))
+                    (events.len() == 1
+                        && events[0]["action"].as_str().is_some_and(is_input_control))
                         || events.iter().any(|ev| ev["action"] == "disconnect")
                 }))
         {
-            writer.write_response(rpc_response(&cdp, &data_dir, method, params, id));
+            let reply =
+                rpc_response_with_control(&cdp, &data_dir, Some(&stop_flag), method, params, id);
+            let should_stop = method == "shutdown" && reply["result"]["stopping"] == true;
+            writer.write_response(reply);
+            if should_stop {
+                if let Some(thread) = &accept_thread {
+                    thread.unpark();
+                }
+                break;
+            }
             continue;
         }
         let Some(slot) = RelaySlot::acquire(&in_flight_rpcs, limits.rpcs) else {
@@ -454,7 +481,7 @@ fn handle_client_conn(
             .spawn(move || {
                 let _slot = slot;
                 let method = req.get("method").and_then(Value::as_str).unwrap_or("");
-                let response = rpc_response(&cdp, &data_dir, method, params, id);
+                let response = rpc_response_with_control(&cdp, &data_dir, None, method, params, id);
                 *activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
                 rpc_writer.write_response(response);
             });
@@ -466,22 +493,34 @@ fn handle_client_conn(
     }
 }
 
-fn rpc_response(
+fn rpc_response_with_control(
     cdp: &Arc<CdpClient>,
     data_dir: &Path,
+    stop_flag: Option<&AtomicBool>,
     method: &str,
     params: Value,
     id: Value,
 ) -> Value {
-    match dispatch_rpc(cdp, data_dir, method, params) {
+    match dispatch_rpc_with_control(cdp, data_dir, stop_flag, method, params) {
         Ok(result) => json!({ "id": id, "result": result }),
         Err(err) => json!({ "id": id, "error": err }),
     }
 }
 
+#[cfg(test)]
 fn dispatch_rpc(
     cdp: &Arc<CdpClient>,
     data_dir: &Path,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    dispatch_rpc_with_control(cdp, data_dir, None, method, params)
+}
+
+fn dispatch_rpc_with_control(
+    cdp: &Arc<CdpClient>,
+    data_dir: &Path,
+    stop_flag: Option<&AtomicBool>,
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
@@ -697,6 +736,25 @@ fn dispatch_rpc(
                 "portFile": cdp.public_port_file(),
                 "locale": crate::i18n::current_lang().as_str(),
             }))
+        }
+        "shutdown" => {
+            let force = params.get("force").and_then(Value::as_bool) == Some(true);
+            if !force && (cdp.is_connected() || cdp.is_connecting()) {
+                Ok(json!({
+                    "ok": false,
+                    "stopping": false,
+                    "connected": true,
+                    "reason": "active_session",
+                }))
+            } else {
+                if let Some(flag) = stop_flag {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                Ok(json!({
+                    "ok": true,
+                    "stopping": true,
+                }))
+            }
         }
         other => Err(format!("Unknown relay method: {other}")),
     }
@@ -1383,6 +1441,8 @@ mod tests {
                 Arc::new(Mutex::new(Instant::now())),
                 limits,
                 slot,
+                Arc::new(AtomicBool::new(false)),
+                None,
             );
         });
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -1507,5 +1567,51 @@ mod tests {
 
         server.stop();
         assert!(!endpoint.socket.exists());
+    }
+
+    #[test]
+    fn shutdown_rpc_stops_idle_relay_and_refuses_when_connected() {
+        let endpoint = TestEndpoint::new();
+        let server = endpoint.start(mock_cdp(), RelayLimits::default());
+        let client = RelayClient::connect_only(endpoint.socket.clone());
+
+        let conn_res = client
+            .call(
+                "connect",
+                json!({ "qualityPreset": "low" }),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(conn_res["connected"], true);
+
+        let refused = client
+            .call("shutdown", json!({}), Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["stopping"], false);
+        assert_eq!(refused["connected"], true);
+        assert_eq!(refused["reason"], "active_session");
+        assert!(!server.worker.is_finished());
+
+        let disc = client
+            .call("disconnect", json!({}), Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(disc["connected"], false);
+
+        let stopped = client
+            .call("shutdown", json!({}), Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(stopped["ok"], true);
+        assert_eq!(stopped["stopping"], true);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (!server.worker.is_finished() || endpoint.socket.exists())
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(server.worker.is_finished());
+        assert!(!endpoint.socket.exists());
+        server.stop();
     }
 }
