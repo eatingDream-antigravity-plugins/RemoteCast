@@ -194,8 +194,7 @@ fn launch_with(
                     }
                     if port == 0 || port == personal_port {
                         return Err(
-                            "Could not find an unoccupied loopback port for Remote Chrome. Set CHROME_STREAM_REMOTE_PORT or use Personal mode."
-                                .into(),
+                            "Could not find an unoccupied loopback port for Remote Chrome.".into(),
                         );
                     }
                     port
@@ -208,9 +207,7 @@ fn launch_with(
         if explicit_remote_port.is_some() {
             pinned_port_occupied_error(port)
         } else {
-            format!(
-                "Debug port {port} became occupied while starting Remote Chrome. Retry Launch Remote Chrome or set CHROME_STREAM_REMOTE_PORT."
-            )
+            format!("Debug port {port} became occupied while starting Remote Chrome.")
         }
     };
 
@@ -260,9 +257,7 @@ fn launch_with(
 }
 
 fn pinned_port_occupied_error(port: u16) -> String {
-    format!(
-        "Debug port {port} is already in use by another browser, profile, or service. Unset CHROME_STREAM_REMOTE_PORT for automatic port selection, choose another port, or use Personal mode."
-    )
+    format!("Debug port {port} is already in use by another browser, profile, or service.")
 }
 
 fn browser_path(port: u16, url: &str) -> Option<String> {
@@ -351,7 +346,7 @@ fn chrome_args(profile: &Path, port: u16) -> [OsString; 6] {
         profile_arg,
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
-        "about:blank".into(),
+        "chrome://newtab".into(),
     ]
 }
 
@@ -360,6 +355,8 @@ fn chrome_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]
     return &[
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+        "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
         "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ];

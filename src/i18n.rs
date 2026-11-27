@@ -116,15 +116,150 @@ pub fn current_lang() -> Lang {
     resolve_lang_chain(None, None, None, None, cached_macos_apple_languages())
 }
 
-pub fn chrome_not_found_error(lang: Lang) -> &'static str {
-    match lang {
-        Lang::En => {
-            "Chrome remote debugging was not detected. Open Google Chrome and enable remote debugging at chrome://inspect/#remote-debugging (or launch a debug profile with --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug)."
-        }
-        Lang::ZhCn => {
-            "未检测到本机 Chrome 远程调试。请打开 Google Chrome 并在 chrome://inspect/#remote-debugging 开启远程调试（或使用 --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug 启动独立调试实例）。"
-        }
+#[cfg(test)]
+pub const ALL_ERROR_CODES: &[&str] = &[
+    "not_detected",
+    "port_busy",
+    "launch_failed",
+    "chrome_missing",
+    "allow_timeout",
+    "allow_denied",
+    "conn_lost",
+    "timeout",
+    "tab_changed",
+    "tab_close_failed",
+    "relay_busy",
+    "relay_down",
+    "unconfirmed",
+];
+
+/// Maps any raw backend/launcher/WebSocket/relay error string to one of the 13 canonical
+/// structured `errorCode`s rendered by the panel without leaking env vars, HTTP status codes,
+/// or protocol jargon.
+pub fn classify_error_code(raw: &str) -> &'static str {
+    let low = raw.to_ascii_lowercase();
+    if low.contains("remote debugging is off")
+        || low.contains("remote debugging was not detected")
+        || low.contains("chrome://inspect/#remote-debugging")
+        || low.contains("未检测到")
+        || low.contains("还没开启远程调试")
+    {
+        return "not_detected";
     }
+    if low.contains("already in use")
+        || low.contains("became occupied")
+        || low.contains("unoccupied loopback port")
+        || low.contains("free loopback port")
+    {
+        return "port_busy";
+    }
+    if low.contains("chrome executable") || low.contains("no executable configured") {
+        return "chrome_missing";
+    }
+    if low.contains("remote chrome") || low.contains("isolated") && low.contains("profile") {
+        return "launch_failed";
+    }
+    if low.contains("handshake") && (low.contains("timed out") || low.contains("allow")) {
+        return "allow_timeout";
+    }
+    if low.contains("http 101") || low.contains("switching protocols") || low.contains("declined") {
+        return "allow_denied";
+    }
+    if low.contains("did not close the tab") {
+        return "tab_close_failed";
+    }
+    if low.contains("tab epoch")
+        || low.contains("input target")
+        || low.contains("tab to close")
+        || low.contains("active tab switched")
+        || low.contains("event target differs")
+        || low.contains("no active tab")
+        || low.contains("no target with given id")
+        || low.contains("target closed")
+        || low.contains("target destroyed")
+    {
+        return "tab_changed";
+    }
+    if low.contains("relay busy")
+        || low.contains("too many client")
+        || low.contains("too many concurrent")
+    {
+        return "relay_busy";
+    }
+    if low.contains("did not confirm")
+        || low.contains("invalid connection control")
+        || low.contains("connection control failed")
+    {
+        return "unconfirmed";
+    }
+    if low.contains("relay")
+        && (low.contains("unavailable")
+            || low.contains("failed to start")
+            || low.contains("unable to connect to relay")
+            || low.contains("relay connection closed")
+            || low.contains("spawning"))
+    {
+        return "relay_down";
+    }
+    if low.contains("timeout") || low.contains("timed out") {
+        return "timeout";
+    }
+    "conn_lost"
+}
+
+pub fn error_message(code: &str, lang: Lang) -> &'static str {
+    match (code, lang) {
+        ("not_detected", Lang::En) => {
+            "Chrome's remote debugging is off. Open chrome://inspect/#remote-debugging and turn it on, or open a separate Chrome."
+        }
+        ("not_detected", Lang::ZhCn) => {
+            "Chrome 还没开启远程调试。请打开 chrome://inspect/#remote-debugging 开启，或改用独立 Chrome。"
+        }
+        ("port_busy", Lang::En) => {
+            "Couldn't find a free port for separate Chrome. Try again, or connect your own Chrome."
+        }
+        ("port_busy", Lang::ZhCn) => {
+            "独立 Chrome 找不到可用端口。请重试，或改为连接日常 Chrome。"
+        }
+        ("launch_failed", Lang::En) => "Couldn't open separate Chrome. Try again.",
+        ("launch_failed", Lang::ZhCn) => "独立 Chrome 没能打开，请重试。",
+        ("chrome_missing", Lang::En) => "Couldn't find Chrome on this Mac.",
+        ("chrome_missing", Lang::ZhCn) => "这台 Mac 上没有找到 Chrome。",
+        ("allow_timeout", Lang::En) => {
+            "Chrome didn't answer. If it asked for permission, click Allow and try again."
+        }
+        ("allow_timeout", Lang::ZhCn) => {
+            "Chrome 没有响应。如果弹出了授权窗口，请点「允许」后重试。"
+        }
+        ("allow_denied", Lang::En) => {
+            "Chrome declined the connection. Click Allow when it asks."
+        }
+        ("allow_denied", Lang::ZhCn) => "Chrome 拒绝了连接。弹出授权窗口时请点「允许」。",
+        ("conn_lost", Lang::En) => "Lost connection to Chrome.",
+        ("conn_lost", Lang::ZhCn) => "与 Chrome 的连接断开了。",
+        ("timeout", Lang::En) => "Chrome is taking too long. Try again.",
+        ("timeout", Lang::ZhCn) => "Chrome 响应太慢，请重试。",
+        ("tab_changed", Lang::En) => "The tab changed. Try again.",
+        ("tab_changed", Lang::ZhCn) => "标签页变了，请重试。",
+        ("tab_close_failed", Lang::En) => "Couldn't close the tab.",
+        ("tab_close_failed", Lang::ZhCn) => "标签页没能关闭。",
+        ("relay_busy", Lang::En) => "Remote Cast is busy. Try again in a moment.",
+        ("relay_busy", Lang::ZhCn) => "Remote Cast 正忙，请稍后再试。",
+        ("relay_down", Lang::En) => {
+            "Remote Cast's background service isn't running. Reopen the panel."
+        }
+        ("relay_down", Lang::ZhCn) => "Remote Cast 后台服务没有运行，请重新打开面板。",
+        ("unconfirmed", Lang::En) => {
+            "No confirmation from Chrome. Check the status and try again."
+        }
+        ("unconfirmed", Lang::ZhCn) => "没有收到 Chrome 的确认，请查看状态后重试。",
+        (_, Lang::En) => "Lost connection to Chrome.",
+        (_, Lang::ZhCn) => "与 Chrome 的连接断开了。",
+    }
+}
+
+pub fn chrome_not_found_error(lang: Lang) -> &'static str {
+    error_message("not_detected", lang)
 }
 
 #[cfg(test)]
@@ -170,5 +305,58 @@ mod tests {
             Lang::ZhCn
         );
         assert_eq!(resolve_lang_chain(None, None, None, None, None), Lang::En);
+    }
+
+    #[test]
+    fn classifies_and_localizes_all_13_error_codes_without_env_or_protocol_jargon() {
+        let samples = [
+            ("not_detected", chrome_not_found_error(Lang::En)),
+            ("port_busy", "Debug port 9222 is already in use"),
+            (
+                "launch_failed",
+                "Remote Chrome did not become ready on 127.0.0.1:9223",
+            ),
+            (
+                "chrome_missing",
+                "Could not start a Chrome executable: not found",
+            ),
+            (
+                "allow_timeout",
+                "Timed out waiting for Chrome DevTools handshake (65s).",
+            ),
+            (
+                "allow_denied",
+                "Expected HTTP 101 Switching Protocols, got: HTTP/1.1 403",
+            ),
+            ("conn_lost", "Chrome CDP connection closed"),
+            ("timeout", "CDP timeout on Page.navigate"),
+            ("tab_changed", "The tab epoch changed"),
+            ("tab_close_failed", "Chrome did not close the tab"),
+            ("relay_busy", "Relay busy: too many concurrent requests"),
+            ("relay_down", "Local CDP relay connection closed"),
+            (
+                "unconfirmed",
+                "The relay did not confirm revoking the Chrome connection",
+            ),
+        ];
+        for (expected, sample) in samples {
+            assert_eq!(classify_error_code(sample), expected, "sample={sample}");
+        }
+        for code in ALL_ERROR_CODES {
+            let en = error_message(code, Lang::En);
+            let zh = error_message(code, Lang::ZhCn);
+            assert!(!en.is_empty() && !zh.is_empty());
+            for text in [en, zh] {
+                assert!(
+                    !text.contains("CHROME_STREAM_"),
+                    "env leak in {code}: {text}"
+                );
+                assert!(
+                    !text.contains("HTTP 101"),
+                    "protocol leak in {code}: {text}"
+                );
+                assert!(!text.contains("CDP"), "CDP jargon in {code}: {text}");
+            }
+        }
     }
 }

@@ -121,14 +121,12 @@ impl InputDispatcher {
                     tab_mutated = true;
                     continue;
                 };
-                match client.send_cdp(
-                    "Target.activateTarget",
-                    json!({ "targetId": tid }),
-                    None,
-                    Duration::from_secs(3),
-                ) {
+                // Switch focus inside Chrome via session attach + Emulation.setFocusEmulationEnabled
+                // instead of Target.activateTarget, which raises Chrome and steals macOS focus.
+                match client.attach(tid) {
                     Ok(_) => {
                         client.tabs.lock().unwrap().set_active_target(tid, true);
+                        client.sync_focus_emulation(Some(tid));
                         client.capture.lock().unwrap().clear_latest_frame();
                         tab_mutated = true;
                     }
@@ -136,12 +134,9 @@ impl InputDispatcher {
                         client.handle_target_gone(tid, true);
                         let (fb_tid, fb_tabs) = client.resolve_target_id(None, true, true)?;
                         if let Some(fb) = fb_tid {
-                            let _ = client.send_cdp(
-                                "Target.activateTarget",
-                                json!({ "targetId": fb }),
-                                None,
-                                Duration::from_secs(3),
-                            );
+                            if client.attach(&fb).is_ok() {
+                                client.sync_focus_emulation(Some(&fb));
+                            }
                         }
                         latest_tabs = Some(fb_tabs);
                         recovered = true;
@@ -609,10 +604,12 @@ impl InputDispatcher {
     }
 
     fn open_tab(client: &Arc<CdpClient>, url: Option<&str>) -> Result<(), CdpError> {
-        let target_url = normalize_url(url.unwrap_or("about:blank"));
+        let default_url = client.default_new_tab_url();
+        let raw_url = url.map(str::trim).filter(|s| !s.is_empty());
+        let target_url = normalize_url(raw_url.unwrap_or(&default_url));
         let created = client.send_cdp(
             "Target.createTarget",
-            json!({ "url": target_url }),
+            json!({ "url": target_url, "background": true }),
             None,
             CMD_TIMEOUT,
         )?;
@@ -622,21 +619,19 @@ impl InputDispatcher {
             .ok_or_else(|| CdpError::new("Target.createTarget missing targetId"))?;
         client.tabs.lock().unwrap().activate_new_tab(tid);
         client.capture.lock().unwrap().clear_latest_frame();
-        let _ = client.send_cdp(
-            "Target.activateTarget",
-            json!({ "targetId": tid }),
-            None,
-            Duration::from_secs(3),
-        );
+        if client.attach(tid).is_ok() {
+            client.sync_focus_emulation(Some(tid));
+        }
         Ok(())
     }
 
     pub(crate) fn stale_target(
         client: &Arc<CdpClient>,
-        reason: &str,
+        _reason: &str,
         started_at: Instant,
     ) -> Value {
         let _ = client.list_tabs(false);
+        let lang = current_lang();
         let (active, epoch, tabs, dialog, pause_epoch, paused) = {
             let state = client.tabs.lock().unwrap();
             (
@@ -654,7 +649,8 @@ impl InputDispatcher {
             "needsRefresh": true,
             "recoverable": true,
             "connected": client.is_connected(),
-            "error": format!("{reason}. Refresh the panel before sending input again."),
+            "errorCode": "tab_changed",
+            "error": crate::i18n::error_message("tab_changed", lang),
             "activeTargetId": active,
             "epoch": epoch,
             "tabsHash": hash_tabs(&tabs),
@@ -818,6 +814,6 @@ pub fn key_def(name: &str) -> (String, String, i32, Option<String>) {
             };
             (s.to_string(), code, vk, txt)
         }
-        _ => ("Enter".into(), "Enter".into(), 13, Some("\r".into())),
+        other => (other.into(), other.into(), 0, None),
     }
 }

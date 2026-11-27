@@ -4,6 +4,7 @@ mod i18n;
 mod local_io;
 mod mcp;
 mod relay;
+mod settings;
 mod stream;
 
 use crate::cdp::discovery::{discover_port_file, probe_debug_port_ws_url, PortFileStatus};
@@ -21,22 +22,22 @@ use std::time::Duration;
 fn print_usage() {
     match current_lang() {
         Lang::En => println!(
-            "Chrome Stream MCP {APP_VERSION} — Native Rust Chrome DevTools screencast relay & MCP App server\n\
+            "Remote Cast {APP_VERSION} — Native Rust Chrome screencast relay & MCP App server\n\
              \n\
              USAGE:\n\
                chrome-stream-mcp serve            Start the MCP stdio JSON-RPC server\n\
-               chrome-stream-mcp relay            Start the persistent 0600 Unix-socket CDP relay daemon\n\
-               chrome-stream-mcp doctor [--json]  Inspect Chrome DevToolsActivePort, port 9222, and relay socket\n\
+               chrome-stream-mcp relay            Start the persistent 0600 Unix-socket relay daemon\n\
+               chrome-stream-mcp doctor [--json]  Inspect Chrome debugging readiness and relay status\n\
                chrome-stream-mcp --version        Print version\n\
                chrome-stream-mcp --help           Show this help message"
         ),
         Lang::ZhCn => println!(
-            "Chrome Stream MCP {APP_VERSION} — 本机 Chrome 远程调试投屏中继与 MCP App 服务\n\
+            "Remote Cast {APP_VERSION} — 本机 Chrome 投屏中继与 MCP App 服务\n\
              \n\
              用法:\n\
                chrome-stream-mcp serve            启动 MCP stdio JSON-RPC 服务\n\
-               chrome-stream-mcp relay            启动持久化 0600 Unix 套接字中继守护进程\n\
-               chrome-stream-mcp doctor [--json]  检查 Chrome 调试端口、9222 回退端口与中继状态\n\
+               chrome-stream-mcp relay            启动持久化 0600 Unix 套接字中继服务\n\
+               chrome-stream-mcp doctor [--json]  检查本机 Chrome 调试与中继状态\n\
                chrome-stream-mcp --version        打印版本号\n\
                chrome-stream-mcp --help           显示此帮助信息"
         ),
@@ -84,13 +85,14 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
         let panel_kib = report["panel"]["bytes"].as_u64().unwrap_or(0) as f64 / 1024.0;
         match lang {
             Lang::En => {
-                println!("Chrome Stream MCP Doctor (v{APP_VERSION})");
+                println!("Remote Cast Doctor (v{APP_VERSION})");
                 println!(
-                    "  Chrome CDP : {} (DevToolsActivePort valid={}, stale={}, port={:?}, fallback :{}={})",
+                    "  Chrome     : {} (DevToolsActivePort valid={}, stale={}, port={:?}, separate={:?}, fallback :{}={})",
                     if chrome_ok { "READY" } else { "NOT FOUND" },
                     port_file.valid,
                     port_file.stale,
                     port_file.port,
+                    managed_remote,
                     cfg.debug_port,
                     debug_port_ws.is_some()
                 );
@@ -102,7 +104,7 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
                 );
                 if let Some(st) = &relay_status {
                     println!(
-                        "  CDP Session: connected={}, activeTargetId={}",
+                        "  Session    : connected={}, activeTargetId={}",
                         st["connected"].as_bool().unwrap_or(false),
                         st["activeTargetId"].as_str().unwrap_or("-")
                     );
@@ -115,13 +117,14 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
                 );
             }
             Lang::ZhCn => {
-                println!("Chrome Stream MCP 诊断报告 (v{APP_VERSION})");
+                println!("Remote Cast 诊断报告 (v{APP_VERSION})");
                 println!(
-                    "  Chrome 调试: {} (DevToolsActivePort 有效={}, 过期={}, 端口={:?}, 备用 :{}={})",
+                    "  Chrome 调试: {} (DevToolsActivePort 有效={}, 过期={}, 端口={:?}, 独立端口={:?}, 备用 :{}={})",
                     if chrome_ok { "已就绪" } else { "未检测到" },
                     port_file.valid,
                     port_file.stale,
                     port_file.port,
+                    managed_remote,
                     cfg.debug_port,
                     debug_port_ws.is_some()
                 );
@@ -133,7 +136,7 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
                 );
                 if let Some(st) = &relay_status {
                     println!(
-                        "  调试会话   : 已连接={}, 当前标签页={}",
+                        "  当前会话   : 已连接={}, 当前标签页={}",
                         st["connected"].as_bool().unwrap_or(false),
                         st["activeTargetId"].as_str().unwrap_or("-")
                     );

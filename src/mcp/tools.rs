@@ -1,6 +1,7 @@
-use crate::i18n::{current_lang, Lang};
+use crate::i18n::{classify_error_code, current_lang, error_message, Lang};
 use crate::mcp::server::{stage_status_from_snapshot, SwrBootCache};
 use crate::relay::ipc::RelayBackend;
+use crate::settings::SettingsStore;
 use crate::stream::dedup::{hash_frame_data, hash_tabs, is_target_gone_error};
 use crate::stream::profiles::{resolve_profile, TabInfo};
 use serde_json::{json, Value};
@@ -9,6 +10,18 @@ use std::time::{Duration, Instant};
 
 pub const STAGE_URI: &str = "ui://chrome-stream-mcp/stage";
 pub const APP_MIME: &str = "text/html;profile=mcp-app";
+
+pub fn attach_settings_snapshot(val: &mut Value, settings: Option<&Arc<SettingsStore>>) {
+    let Some(store) = settings else {
+        return;
+    };
+    let snap = store.snapshot();
+    if let (Some(dst), Some(src)) = (val.as_object_mut(), snap.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
+}
 
 /// Strips sensitive local path / DevTools WS token fields and personal hostnames from any relay JSON.
 pub fn redact_relay_payload(val: &mut Value) {
@@ -165,14 +178,49 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
         },
         {
             "name": "chrome_stream_launch",
-            "title": "Launch Remote Chrome",
-            "description": "App-only tool: launch or reuse dedicated Remote Chrome on loopback and warm the active tab screencast.",
+            "title": "Launch Separate Chrome",
+            "description": "App-only tool: open or reuse an isolated loopback Chrome profile without permission prompts and warm the active tab.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "qualityPreset": { "type": "string", "enum": ["auto", "ultra", "low", "medium", "high"] },
                     "rttMs": { "type": "number", "minimum": 0 }
                 },
+                "additionalProperties": false
+            },
+            "_meta": {
+                "ui": {
+                    "visibility": ["app"]
+                }
+            }
+        },
+        {
+            "name": "chrome_stream_config",
+            "title": "Configure Remote Cast",
+            "description": "App-only tool: read or atomically update Remote Cast settings.json preferences with live hot-reload.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["get", "update"] },
+                    "patch": {
+                        "type": "object",
+                        "properties": {
+                            "lang": { "type": ["string", "null"], "enum": ["auto", "en", "zh-CN", null] },
+                            "defaultQuality": { "type": ["string", "null"], "enum": ["auto", "ultra", "low", "medium", "high", null] },
+                            "defaultConnectMode": { "type": ["string", "null"], "enum": ["auto", "personal", "remote", null] },
+                            "bgPollIntervalSec": { "type": ["integer", "null"], "minimum": -1, "maximum": 300 },
+                            "idlePauseSec": { "type": ["integer", "null"], "minimum": 0, "maximum": 300 },
+                            "debugPort": { "type": ["integer", "null"], "minimum": 1, "maximum": 65535 },
+                            "remotePort": { "type": ["integer", "null"], "minimum": 1, "maximum": 65535 },
+                            "newTabUrl": { "type": ["string", "null"] },
+                            "portFile": { "type": ["string", "null"] },
+                            "userDataDir": { "type": ["string", "null"] },
+                            "wheelCoalesceMs": { "type": ["integer", "null"], "minimum": 20, "maximum": 500 }
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["action"],
                 "additionalProperties": false
             },
             "_meta": {
@@ -195,9 +243,20 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
     tools
 }
 
+#[allow(dead_code)]
 pub fn dispatch_tool_with_cache(
     relay: &Arc<dyn RelayBackend>,
     swr_cache: Option<&Arc<SwrBootCache>>,
+    name: &str,
+    args: Value,
+) -> Value {
+    dispatch_tool_with_context(relay, swr_cache, None, name, args)
+}
+
+pub fn dispatch_tool_with_context(
+    relay: &Arc<dyn RelayBackend>,
+    swr_cache: Option<&Arc<SwrBootCache>>,
+    settings: Option<&Arc<SettingsStore>>,
     name: &str,
     args: Value,
 ) -> Value {
@@ -223,6 +282,7 @@ pub fn dispatch_tool_with_cache(
         "chrome_stream_launch" | "chrome_stream_launch_remote" => {
             handle_connect(relay, "launch_remote", args, Duration::from_secs(85))
         }
+        "chrome_stream_config" => handle_config(settings, args),
         _ => json!({
             "isError": true,
             "content": [{ "type": "text", "text": format!("Unknown tool: {name}") }]
@@ -231,18 +291,86 @@ pub fn dispatch_tool_with_cache(
 
     if let Some(sc) = out.get_mut("structuredContent") {
         redact_relay_payload(sc);
+        if name != "chrome_stream_config" {
+            attach_settings_snapshot(sc, settings);
+        }
     }
     let sc = out.get("structuredContent");
     if let Some((cache, generation)) = swr_cache.zip(generation) {
         if revoking {
             cache.finish_revoke(sc.filter(|sc| sc["ok"] == true && sc["connected"] == false));
-        } else if name != "chrome_stream_stage" {
+        } else if name != "chrome_stream_stage" && name != "chrome_stream_config" {
             if let Some(sc) = sc.filter(|sc| sc["unconfirmed"] != true) {
                 cache.update_from_tool_result(generation, sc);
             }
         }
     }
     out
+}
+
+fn handle_config(settings: Option<&Arc<SettingsStore>>, args: Value) -> Value {
+    let lang = current_lang();
+    let Some(store) = settings else {
+        let msg = error_message("relay_down", lang);
+        return json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": msg }],
+            "structuredContent": { "ok": false, "errorCode": "relay_down", "error": msg, "locale": lang.as_str() }
+        });
+    };
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("get");
+    match action {
+        "get" => {
+            let mut snap = store.snapshot();
+            snap["ok"] = json!(true);
+            snap["locale"] = json!(lang.as_str());
+            let text = match lang {
+                Lang::En => "Loaded settings.",
+                Lang::ZhCn => "已读取设置。",
+            };
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": snap
+            })
+        }
+        "update" => {
+            let patch = args.get("patch").cloned().unwrap_or_else(|| json!({}));
+            match store.update_patch(patch) {
+                Ok(mut snap) => {
+                    snap["ok"] = json!(true);
+                    snap["locale"] = json!(lang.as_str());
+                    let text = match lang {
+                        Lang::En => "Settings saved.",
+                        Lang::ZhCn => "设置已保存。",
+                    };
+                    json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "structuredContent": snap
+                    })
+                }
+                Err(err) => {
+                    let text = match lang {
+                        Lang::En => "Couldn't save settings.",
+                        Lang::ZhCn => "保存设置失败。",
+                    };
+                    let mut snap = store.snapshot();
+                    snap["ok"] = json!(false);
+                    snap["error"] = json!(text);
+                    snap["errorDetail"] = json!(err);
+                    snap["locale"] = json!(lang.as_str());
+                    json!({
+                        "isError": false,
+                        "content": [{ "type": "text", "text": text }],
+                        "structuredContent": snap
+                    })
+                }
+            }
+        }
+        _ => json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": "Invalid config action. Expected get or update." }]
+        }),
+    }
 }
 
 fn safe_status(relay: &Arc<dyn RelayBackend>) -> Value {
@@ -273,13 +401,18 @@ fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCac
         Ok(status) => status,
         Err(_) => {
             let text = match lang {
-                Lang::En => "Chrome Stream relay unavailable.",
-                Lang::ZhCn => "Chrome Stream 本地中继暂不可用。",
+                Lang::En => "Remote Cast isn't running.",
+                Lang::ZhCn => "Remote Cast 没有运行。",
             };
             return json!({
                 "isError": false,
                 "content": [{ "type": "text", "text": text }],
-                "structuredContent": { "connected": false, "locale": lang.as_str(), "error": text }
+                "structuredContent": {
+                    "connected": false,
+                    "locale": lang.as_str(),
+                    "errorCode": "relay_down",
+                    "error": error_message("relay_down", lang)
+                }
             });
         }
     };
@@ -299,27 +432,25 @@ fn handle_stage(relay: &Arc<dyn RelayBackend>, swr_cache: Option<&Arc<SwrBootCac
         .pointer("/portFile/valid")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let port_num = status
-        .pointer("/portFile/port")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(9222);
 
     let text = match lang {
         Lang::En => {
-            let port_desc = if port_ready {
-                format!("ready (port {port_num})")
+            if connected {
+                "Remote Cast: connected.".to_string()
+            } else if port_ready {
+                "Remote Cast: disconnected · Chrome ready.".to_string()
             } else {
-                "not detected".to_string()
-            };
-            format!("Chrome Stream: connected={connected}, remote debugging={port_desc}.")
+                "Remote Cast: disconnected · Chrome not found.".to_string()
+            }
         }
         Lang::ZhCn => {
-            let port_desc = if port_ready {
-                format!("已就绪（端口 {port_num}）")
+            if connected {
+                "Remote Cast：已连接。".to_string()
+            } else if port_ready {
+                "Remote Cast：未连接 · Chrome 已就绪。".to_string()
             } else {
-                "未检测到".to_string()
-            };
-            format!("Chrome Stream：已连接={connected}，远程调试={port_desc}。")
+                "Remote Cast：未连接 · 未发现 Chrome。".to_string()
+            }
         }
     };
 
@@ -345,8 +476,14 @@ fn handle_connect(
                 .map(|a| a.len())
                 .unwrap_or(0);
             let text = match lang {
-                Lang::En => format!("Connected to Chrome ({count} tab(s))."),
-                Lang::ZhCn => format!("已连接到本机 Chrome（共 {count} 个标签页）。"),
+                Lang::En => {
+                    if count == 1 {
+                        "Connected to Chrome (1 tab).".to_string()
+                    } else {
+                        format!("Connected to Chrome ({count} tabs).")
+                    }
+                }
+                Lang::ZhCn => format!("已连接 Chrome（{count} 个标签页）。"),
             };
             json!({
                 "content": [{ "type": "text", "text": text }],
@@ -359,20 +496,19 @@ fn handle_connect(
                 .get("connected")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let text = match lang {
-                Lang::En => format!("Connect error: {err}"),
-                Lang::ZhCn => format!("连接失败：{err}"),
-            };
+            let code = classify_error_code(&err);
+            let msg = error_message(code, lang);
             json!({
                 "isError": false,
-                "content": [{ "type": "text", "text": text }],
+                "content": [{ "type": "text", "text": msg }],
                 "structuredContent": {
                     "ok": false,
                     "connected": connected,
                     "connectionMode": st.get("connectionMode").cloned().unwrap_or(Value::Null),
                     "remotePort": st.get("remotePort").cloned().unwrap_or(Value::Null),
                     "locale": lang.as_str(),
-                    "error": err,
+                    "errorCode": code,
+                    "error": msg,
                     "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
                 }
             })
@@ -566,12 +702,16 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 .get("connected")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let lang = current_lang();
+            let code = classify_error_code(&err);
+            let msg = error_message(code, lang);
             let mut sc = json!({
                 "connected": live,
                 "connectionMode": post.get("connectionMode").cloned().unwrap_or(Value::Null),
                 "remotePort": post.get("remotePort").cloned().unwrap_or(Value::Null),
                 "recoverable": live,
-                "error": err,
+                "errorCode": code,
+                "error": msg,
                 "portFile": post.get("portFile").cloned().unwrap_or(Value::Null),
                 "activeTargetId": post.get("activeTargetId").cloned().unwrap_or(Value::Null),
                 "dialog": post.get("dialog").cloned().unwrap_or(Value::Null),
@@ -585,7 +725,7 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
             }
             json!({
                 "isError": false,
-                "content": [{ "type": "text", "text": format!("Poll error: {err}") }],
+                "content": [{ "type": "text", "text": msg }],
                 "structuredContent": sc
             })
         }
@@ -597,10 +737,7 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value, revoking: bool) -> V
     match relay.call("input", args, Duration::from_secs(30)) {
         Ok(mut res) => {
             if revoking && (res["ok"] != true || res["connected"] != false) {
-                return unconfirmed_control(
-                    current_lang(),
-                    "The relay did not confirm revoking the Chrome connection",
-                );
+                return unconfirmed_control(current_lang(), "unconfirmed");
             }
             if res.get("serverMs").and_then(|v| v.as_u64()).is_none() {
                 res["serverMs"] = json!(t_start.elapsed().as_millis() as u64);
@@ -612,9 +749,10 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value, revoking: bool) -> V
             })
         }
         Err(err) if revoking => {
-            unconfirmed_control(current_lang(), sanitized_control_error("input", &err))
+            unconfirmed_control(current_lang(), sanitized_control_code("input", &err))
         }
         Err(err) => {
+            let lang = current_lang();
             let st = safe_status(relay);
             let live = st
                 .get("connected")
@@ -628,16 +766,18 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value, revoking: bool) -> V
                         Duration::from_secs(15),
                     )
                     .ok();
+                let msg = error_message("tab_changed", lang);
                 return json!({
                     "isError": false,
-                    "content": [{ "type": "text", "text": "The input target closed. Refresh the panel before sending input again." }],
+                    "content": [{ "type": "text", "text": msg }],
                     "structuredContent": {
                         "ok": false,
                         "staleTarget": true,
                         "needsRefresh": true,
                         "recoverable": true,
                         "connected": true,
-                        "error": "The input target closed. Refresh the panel before sending input again.",
+                        "errorCode": "tab_changed",
+                        "error": msg,
                         "activeTargetId": rec.as_ref().and_then(|r| r.get("activeTargetId")).cloned().unwrap_or_else(|| st.get("activeTargetId").cloned().unwrap_or(Value::Null)),
                         "dialog": rec.as_ref().and_then(|r| r.get("dialog")).cloned().unwrap_or(Value::Null),
                         "epoch": rec.as_ref().and_then(|r| r.get("epoch")).cloned().unwrap_or(Value::Null),
@@ -651,14 +791,17 @@ fn handle_input(relay: &Arc<dyn RelayBackend>, args: Value, revoking: bool) -> V
                     }
                 });
             }
+            let code = classify_error_code(&err);
+            let msg = error_message(code, lang);
             json!({
                 "isError": false,
-                "content": [{ "type": "text", "text": format!("Input error: {err}") }],
+                "content": [{ "type": "text", "text": msg }],
                 "structuredContent": {
                     "ok": false,
                     "connected": live,
                     "recoverable": live,
-                    "error": err,
+                    "errorCode": code,
+                    "error": msg,
                     "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
                     "serverMs": t_start.elapsed().as_millis() as u64,
                 }
@@ -683,31 +826,23 @@ fn handle_disconnect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
     let method = if standby { "pause" } else { "disconnect" };
     let mut res = match relay.call(method, json!({}), Duration::from_secs(10)) {
         Ok(res) if res.is_object() => res,
-        Ok(_) => {
-            return unconfirmed_control(
-                lang,
-                "The relay returned an invalid connection control response",
-            )
-        }
-        Err(err) => return unconfirmed_control(lang, sanitized_control_error(method, &err)),
+        Ok(_) => return unconfirmed_control(lang, "unconfirmed"),
+        Err(err) => return unconfirmed_control(lang, sanitized_control_code(method, &err)),
     };
     if !standby && (res["ok"] != true || res["connected"] != false) {
-        return unconfirmed_control(
-            lang,
-            "The relay did not confirm revoking the Chrome connection",
-        );
+        return unconfirmed_control(lang, "unconfirmed");
     }
     let standby_active =
         standby && res["ok"] == true && res["connected"] == true && res["paused"] == true;
     let text = match (lang, standby, standby_active, res["connected"].as_bool()) {
         (Lang::En, false, _, _) => "Disconnected from Chrome.",
-        (Lang::ZhCn, false, _, _) => "已断开本机 Chrome 连接。",
-        (Lang::En, true, true, _) => "Screencast paused. Chrome authorization stays active.",
-        (Lang::ZhCn, true, true, _) => "已暂停画面传输，并保留 Chrome 授权。",
+        (Lang::ZhCn, false, _, _) => "已断开 Chrome 连接。",
+        (Lang::En, true, true, _) => "Paused. Chrome stays connected.",
+        (Lang::ZhCn, true, true, _) => "已暂停，Chrome 保持连接。",
         (Lang::En, true, false, Some(false)) => "Chrome is disconnected.",
         (Lang::ZhCn, true, false, Some(false)) => "Chrome 当前已断开。",
-        (Lang::En, true, false, _) => "The relay did not confirm standby.",
-        (Lang::ZhCn, true, false, _) => "中继未确认进入待机。",
+        (Lang::En, true, false, _) => error_message("unconfirmed", Lang::En),
+        (Lang::ZhCn, true, false, _) => error_message("unconfirmed", Lang::ZhCn),
     };
     res["locale"] = json!(lang.as_str());
     res["mode"] = json!(if standby { "standby" } else { "revoke" });
@@ -721,24 +856,31 @@ fn handle_disconnect(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
     })
 }
 
-fn unconfirmed_control(lang: Lang, error: &str) -> Value {
+fn unconfirmed_control(lang: Lang, code: &'static str) -> Value {
+    let error = error_message(code, lang);
     json!({
         "isError": true,
         "content": [{ "type": "text", "text": error }],
-        "structuredContent": { "ok": false, "unconfirmed": true, "error": error, "locale": lang.as_str() }
+        "structuredContent": {
+            "ok": false,
+            "unconfirmed": true,
+            "errorCode": code,
+            "error": error,
+            "locale": lang.as_str()
+        }
     })
 }
 
 // Relay errors can contain local paths and WebSocket tokens, including on older versions.
-fn sanitized_control_error(method: &str, err: &str) -> &'static str {
+fn sanitized_control_code(method: &str, err: &str) -> &'static str {
     if err == format!("Relay timeout on {method}") {
-        "The relay timed out while processing the Chrome connection control"
+        "timeout"
     } else if err.starts_with("Relay busy:") {
-        "The relay is busy"
+        "relay_busy"
     } else if err.starts_with("Local CDP relay connection closed") {
-        "The local relay connection closed"
+        "relay_down"
     } else {
-        "Chrome connection control failed. Query live status or retry."
+        "unconfirmed"
     }
 }
 
@@ -790,8 +932,24 @@ mod tests {
             assert_eq!(status["ok"], connected && paused);
             let text = result["content"][0]["text"].as_str().unwrap();
             assert_eq!(
-                text.contains("authorization stays active") || text.contains("保留 Chrome 授权"),
+                text.contains("Chrome stays connected") || text.contains("Chrome 保持连接"),
                 connected && paused
+            );
+        }
+    }
+
+    #[test]
+    fn all_tool_names_stay_within_64_char_antigravity_budget() {
+        const HOST_PREFIX_LEN: usize = 40;
+        let defs = tool_definitions(true);
+        let tools = defs.as_array().unwrap();
+        assert!(tools.iter().any(|t| t["name"] == "chrome_stream_config"));
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                HOST_PREFIX_LEN + name.len() <= 64,
+                "tool {name} exceeds 64-char host budget ({})",
+                HOST_PREFIX_LEN + name.len()
             );
         }
     }

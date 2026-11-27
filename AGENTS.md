@@ -7,13 +7,13 @@ Guidance for AI coding agents working in `chrome-stream-mcp`. For runtime MCP to
 - `src/cdp/` — Loopback-only Chrome DevTools discovery (`discovery.rs`), WebSocket protocol (`protocol.rs`), and screencast/input client (`client.rs`).
 - `src/relay/` — Persistent single-approval `0600` Unix-socket IPC relay daemon (`daemon.rs`, `ipc.rs`) keeping Chrome debugging authorization alive across reloads.
 - `src/mcp/` — MCP stdio JSON-RPC server (`server.rs`), 3 public tools + App-only panel tools with automatic path/token redaction.
-- `panel/` — Zero-dependency dark-first SEP-1865 canvas viewer (`build.mjs` -> `panel/dist/panel.html`, kept `<45 KiB`).
+- `panel/` — Zero-dependency dark-first SEP-1865 canvas viewer (`build.ts` -> `panel/dist/panel.html`, kept `<45 KiB`).
 - `plugin.json`, `mcp_config.json`, `skills/chrome-stream/SKILL.md` — Official Antigravity plugin & portable Agent Skill bundle (no always-on `rules/AGENTS.md` to keep idle prompt overhead at zero).
 
 ## Build, Test & Security Gates (run before every PR)
 
 ```sh
-node panel/build.mjs && node --test panel/net-policy.test.mjs
+npm --prefix panel run typecheck && npm --prefix panel run build && npm --prefix panel test
 cargo test --locked
 ./scripts/check_sanitized.sh
 ```

@@ -18,6 +18,7 @@ pub const POPUP_TRIGGER_WINDOW: Duration = Duration::from_millis(2500);
 pub struct TabStateStore {
     pub(crate) sessions: HashMap<String, String>, // targetId -> sessionId
     pub(crate) session_to_target: HashMap<String, String>, // sessionId -> targetId
+    pub(crate) focused_session: Option<String>,
     pub(crate) dialogs: HashMap<String, JsDialogInfo>, // targetId -> open modal JS dialog
     pub(crate) active_target_id: Option<String>,
     pub(crate) popup_switched_target: Option<String>,
@@ -35,6 +36,7 @@ impl TabStateStore {
         Self {
             sessions: HashMap::new(),
             session_to_target: HashMap::new(),
+            focused_session: None,
             dialogs: HashMap::new(),
             active_target_id: None,
             popup_switched_target: None,
@@ -55,6 +57,7 @@ impl TabStateStore {
         }
         self.sessions.clear();
         self.session_to_target.clear();
+        self.focused_session = None;
         self.dialogs.clear();
         self.recently_closed.clear();
         self.active_target_id = None;
@@ -120,12 +123,20 @@ impl TabStateStore {
     pub fn evict_session(&mut self, target_id: &str) {
         if let Some(old_sid) = self.sessions.remove(target_id) {
             self.session_to_target.remove(&old_sid);
+            if self.focused_session.as_deref() == Some(old_sid.as_str()) {
+                self.focused_session = None;
+            }
         }
         self.dialogs.remove(target_id);
     }
 
     pub fn detach_session(&mut self, sid: Option<&str>, param_tid: Option<&str>) -> Option<String> {
         let mapped_tid = sid.and_then(|s| self.session_to_target.remove(s));
+        if let Some(s) = sid {
+            if self.focused_session.as_deref() == Some(s) {
+                self.focused_session = None;
+            }
+        }
         let tid = param_tid.map(String::from).or(mapped_tid)?;
         let should_remove = match (sid, self.sessions.get(&tid)) {
             (None, _) => true,
@@ -133,7 +144,11 @@ impl TabStateStore {
             _ => false,
         };
         if should_remove {
-            self.sessions.remove(&tid);
+            if let Some(old) = self.sessions.remove(&tid) {
+                if self.focused_session.as_deref() == Some(old.as_str()) {
+                    self.focused_session = None;
+                }
+            }
             self.dialogs.remove(&tid);
         }
         Some(tid)
@@ -631,15 +646,10 @@ pub(crate) fn close_tab(
             .any(|tab| active.as_deref() == Some(&tab.target_id));
         if !active_still_valid || (was_active && epoch == expected_epoch + 1) {
             let next_tid = &remaining[close_idx.min(remaining.len() - 1)].target_id;
-            let activation = client.send_cdp_at_generation(
-                Some(generation),
-                "Target.activateTarget",
-                json!({ "targetId": next_tid }),
-                None,
-                Duration::from_secs(3),
-            );
+            // Update active target in state without calling Target.activateTarget,
+            // avoiding macOS window pop / focus stealing away from the host app.
             client.with_current_tabs(generation, |tabs| {
-                if activation.is_ok() && tabs.tab_epoch == epoch {
+                if tabs.tab_epoch == epoch {
                     tabs.set_active_target(next_tid, true);
                 }
             })?;
@@ -665,6 +675,7 @@ pub(crate) fn close_tab(
             }
         }
     }
+    client.sync_focus_emulation(active_tid.as_deref());
 
     client.notify_frame_waiters();
     let (active_tid, epoch, pause_epoch, dialog) = {

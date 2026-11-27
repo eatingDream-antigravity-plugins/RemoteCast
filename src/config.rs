@@ -11,6 +11,7 @@ pub struct Config {
     pub relay_pid_file: PathBuf,
     pub port_files: Vec<PathBuf>,
     pub debug_port: u16,
+    pub debug_port_from_env: bool,
     pub remote_port: Option<u16>,
     pub panel_html: PathBuf,
 }
@@ -59,14 +60,15 @@ impl Config {
             explicit_port_file.as_deref(),
             explicit_user_data_dir.as_deref(),
         );
-        let debug_port = parse_nonzero_port(
+        let explicit_debug_port = parse_nonzero_port(
             env::var("CHROME_STREAM_DEBUG_PORT")
                 .or_else(|_| env::var("CHROME_STREAM_CHROME_DEBUG_PORT"))
                 .or_else(|_| env::var("CHROME_DEBUG_PORT"))
                 .ok()
                 .as_deref(),
-        )
-        .unwrap_or(9222);
+        );
+        let debug_port = explicit_debug_port.unwrap_or(9222);
+        let debug_port_from_env = explicit_debug_port.is_some();
         let remote_port = parse_nonzero_port(env::var("CHROME_STREAM_REMOTE_PORT").ok().as_deref());
 
         let panel_html = env::var_os("CHROME_STREAM_PANEL_HTML")
@@ -79,6 +81,7 @@ impl Config {
             relay_pid_file,
             port_files,
             debug_port,
+            debug_port_from_env,
             remote_port,
             panel_html,
         }

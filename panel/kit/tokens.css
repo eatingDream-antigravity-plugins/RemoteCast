@@ -1,0 +1,114 @@
+/* Canonical Lucid Indigo Instrument Tokens (Dark #0B0D12 / Light #F8FAFD)
+ * Dark-first default; light theme ONLY via :root[data-theme="light"].
+ * No OS media theme queries, no zero-opacity keyframes, reduced-motion respected.
+ *
+ * Compact 8-digit hex equivalents (keeps single-file panels within 64 KiB):
+ *   Dark : --ln rgba(242,244,248,.08)  --l2 rgba(242,244,248,.05)  --ls rgba(242,244,248,.16)
+ *          --as rgba(104,149,255,.14)  --ab rgba(104,149,255,.32)
+ *   Light: --ln rgba(15,20,32,.09)     --l2 rgba(15,20,32,.06)     --ls rgba(15,20,32,.18)
+ *          --as rgba(41,82,204,.10)    --ab rgba(41,82,204,.26)
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #0B0D12;
+  --s1: #12151E;
+  --s2: #181C28;
+  --s3: #1D2231;
+  --s0: #07090D;
+  --t1: #F2F4F8;
+  --t2: #A6B0C3;
+  --t3: #6E788E;
+  --ln: #F2F4F814;
+  --l2: #F2F4F80D;
+  --ls: #F2F4F829;
+  --sh: inset 0 1px 0 #F2F4F80A;
+  --ac: #6895FF;
+  --ah: #82A8FF;
+  --as: #6895FF24;
+  --ab: #6895FF52;
+  --cb: #F2F4F8;
+  --ct: #0B0D12;
+  --ok: #34D399;
+  --wn: #FBBF24;
+  --er: #F87171;
+  --in: #6895FF;
+  --tk: 14%;
+  --sn: -apple-system, system-ui, "PingFang SC", sans-serif;
+  --sf: var(--sn);
+  --mn: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #F8FAFD;
+  --s1: #FFFFFF;
+  --s2: #EEF2F8;
+  --s3: #E4EAF4;
+  --s0: #E4EAF4;
+  --t1: #0F1420;
+  --t2: #4A5568;
+  --t3: #7A869A;
+  --ln: #0F142017;
+  --l2: #0F14200F;
+  --ls: #0F14202E;
+  --sh: inset 0 1px 0 #FFFFFFBF;
+  --ac: #2952CC;
+  --ah: #1F42AA;
+  --as: #2952CC1A;
+  --ab: #2952CC42;
+  --cb: #0F1420;
+  --ct: #FFFFFF;
+  --ok: #059669;
+  --wn: #B45309;
+  --er: #DC2626;
+  --in: #2952CC;
+  --tk: 10%;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--color-background-primary, var(--bg));
+  color: var(--color-text-primary, var(--t1));
+  font: 13px/1.45 var(--sn);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ac);
+  outline-offset: 2px;
+}
+
+.kl {
+  font-size: 11px;
+  color: var(--t3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+:lang(zh-CN) .kl {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
