@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/rem
 ### 2. 连接 Chrome
 
 - **连接日常 Chrome**：先在 Chrome 打开 `chrome://inspect/#remote-debugging` 开启远程调试，在 Antigravity 中打开 **Remote Cast**，点击 **连接日常 Chrome** 并在 Chrome 弹窗确认一次 **Allow**。暂停时点 **休眠** 即可保活连接。
-- **独立远程 Chrome（免 Allow）**：点击 **启动独立远程 Chrome**，将在 `127.0.0.1` 启动权限为 `0700` 的隔离配置目录。若 `9222` 端口已被占用，可通过 `CHROME_STREAM_DEBUG_PORT` 指定空闲端口或改用日常 Chrome。
+- **独立远程 Chrome（免 Allow）**：点击 **启动独立远程 Chrome**，将在 `127.0.0.1` 启动权限为 `0700` 的隔离配置目录，并自动从 `9223` 起选择空闲端口，与 `9222` 上的日常 Chrome 共存无冲突；也可通过 `CHROME_STREAM_REMOTE_PORT` 指定固定端口。
 
 ## AI Agent 专属指引
 

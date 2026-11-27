@@ -1,9 +1,14 @@
 use crate::cdp::capture::{self, FramePipeline};
-use crate::cdp::discovery::{discover_port_file, probe_debug_port_ws_url, PortFileStatus};
+#[cfg(not(test))]
+use crate::cdp::discovery::is_loopback_port_alive;
+use crate::cdp::discovery::{
+    discover_port_file, probe_debug_port_ws_url, validate_loopback_ws_url, PortFileStatus,
+};
 use crate::cdp::input::InputDispatcher;
 use crate::cdp::launcher;
 use crate::cdp::protocol::{default_ws_factory, CdpTransport, TransportEvent, TransportFactory};
 use crate::cdp::targets::{self, TabStateStore};
+use crate::config::Config;
 use crate::i18n::{chrome_not_found_error, current_lang};
 use crate::stream::dedup::{hash_tabs, is_target_gone_error};
 use crate::stream::profiles::{QualityProfile, TabInfo};
@@ -12,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -175,6 +180,7 @@ struct TransportState {
     connecting: bool,
     connection_mode: Option<ConnectionMode>,
     endpoint: Option<String>,
+    connected_port: Option<u16>,
     connect_generation: u64,
     last_keepalive_at: Instant,
 }
@@ -186,6 +192,7 @@ impl TransportState {
             connecting: false,
             connection_mode: None,
             endpoint: None,
+            connected_port: None,
             connect_generation: 0,
             last_keepalive_at: Instant::now(),
         }
@@ -193,6 +200,12 @@ impl TransportState {
 
     fn connection_mode(&self) -> Option<ConnectionMode> {
         self.connection_mode.filter(|_| self.is_open())
+    }
+
+    fn active_remote_port(&self) -> Option<u16> {
+        (self.connection_mode() == Some(ConnectionMode::Remote))
+            .then_some(self.connected_port)
+            .flatten()
     }
 
     fn is_open(&self) -> bool {
@@ -208,6 +221,8 @@ impl TransportState {
 pub struct CdpClient {
     port_files: Vec<PathBuf>,
     debug_port: u16,
+    remote_port: Option<u16>,
+    data_dir: Option<PathBuf>,
     ws_url_override: Option<String>,
     ws_factory: TransportFactory,
     connect_lock: Mutex<()>,
@@ -221,12 +236,26 @@ pub struct CdpClient {
     pending: Mutex<HashMap<u64, PendingCall>>,
     next_id: AtomicU64,
     frame_notify: (Mutex<u64>, Condvar),
-    fallback_port_ready: AtomicBool,
+    fallback_port_ready: AtomicU16,
+    last_remote_port: AtomicU16,
     warming: AtomicBool,
     disposed: AtomicBool,
 }
 
 impl CdpClient {
+    pub fn from_config(cfg: &Config) -> Arc<Self> {
+        Self::build(
+            cfg.port_files.clone(),
+            cfg.debug_port,
+            cfg.remote_port,
+            Some(cfg.data_dir.clone()),
+            None,
+            default_ws_factory(),
+            true,
+        )
+    }
+
+    #[allow(dead_code)]
     pub fn new_with_candidates(port_files: Vec<PathBuf>, debug_port: u16) -> Arc<Self> {
         Self::with_candidates_and_factory(port_files, debug_port, None, default_ws_factory(), true)
     }
@@ -253,6 +282,25 @@ impl CdpClient {
         )
     }
 
+    #[cfg(test)]
+    pub fn with_remote_factory(
+        port_file: PathBuf,
+        debug_port: u16,
+        remote_port: Option<u16>,
+        data_dir: Option<PathBuf>,
+        ws_factory: TransportFactory,
+    ) -> Arc<Self> {
+        Self::build(
+            vec![port_file],
+            debug_port,
+            remote_port,
+            data_dir,
+            None,
+            ws_factory,
+            false,
+        )
+    }
+
     pub fn with_candidates_and_factory(
         port_files: Vec<PathBuf>,
         debug_port: u16,
@@ -260,9 +308,31 @@ impl CdpClient {
         ws_factory: TransportFactory,
         spawn_keepalive: bool,
     ) -> Arc<Self> {
+        Self::build(
+            port_files,
+            debug_port,
+            None,
+            None,
+            ws_url_override,
+            ws_factory,
+            spawn_keepalive,
+        )
+    }
+
+    fn build(
+        port_files: Vec<PathBuf>,
+        debug_port: u16,
+        remote_port: Option<u16>,
+        data_dir: Option<PathBuf>,
+        ws_url_override: Option<String>,
+        ws_factory: TransportFactory,
+        spawn_keepalive: bool,
+    ) -> Arc<Self> {
         let client = Arc::new(Self {
             port_files,
             debug_port,
+            remote_port,
+            data_dir,
             ws_url_override,
             ws_factory,
             connect_lock: Mutex::new(()),
@@ -276,7 +346,8 @@ impl CdpClient {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             frame_notify: (Mutex::new(0), Condvar::new()),
-            fallback_port_ready: AtomicBool::new(false),
+            fallback_port_ready: AtomicU16::new(0),
+            last_remote_port: AtomicU16::new(0),
             warming: AtomicBool::new(false),
             disposed: AtomicBool::new(false),
         });
@@ -330,31 +401,84 @@ impl CdpClient {
         discover_port_file(&self.port_files)
     }
 
+    fn probe_remote_endpoint(&self) -> Option<(u16, String)> {
+        if let Some(pinned) = self.remote_port {
+            return probe_debug_port_ws_url(pinned).map(|url| (pinned, url));
+        }
+        if let Some(dir) = self.data_dir.as_deref() {
+            if let Some((port, url)) = launcher::discover_managed_remote_ws_url(dir) {
+                self.last_remote_port.store(port, Ordering::Relaxed);
+                return Some((port, url));
+            }
+        }
+        let remembered = self.last_remote_port.load(Ordering::Relaxed);
+        if remembered > 0 && remembered != self.debug_port {
+            if let Some(url) = probe_debug_port_ws_url(remembered) {
+                return Some((remembered, url));
+            }
+        }
+        let pf = self.port_file_status();
+        let personal_owns_debug_port = pf.valid && pf.port == Some(self.debug_port);
+        if !personal_owns_debug_port {
+            if let Some(url) = probe_debug_port_ws_url(self.debug_port) {
+                return Some((self.debug_port, url));
+            }
+        }
+        None
+    }
+
     /// Background non-blocking Chrome readiness probe (DevToolsActivePort + optional loopback debug port).
     /// Never opens a Chrome WebSocket so it never triggers Chrome's Allow dialog prematurely.
     pub fn prewarm_readiness(&self) {
         let pf = self.port_file_status();
         if pf.valid {
-            self.fallback_port_ready.store(false, Ordering::Relaxed);
+            self.fallback_port_ready.store(0, Ordering::Relaxed);
             return;
         }
-        let ok = probe_debug_port_ws_url(self.debug_port).is_some();
-        self.fallback_port_ready.store(ok, Ordering::Relaxed);
+        let port = self.probe_remote_endpoint().map(|(p, _)| p).unwrap_or(0);
+        self.fallback_port_ready.store(port, Ordering::Relaxed);
+    }
+
+    fn effective_fallback_port(&self) -> u16 {
+        #[cfg(not(test))]
+        {
+            let mut fb_port = self.fallback_port_ready.load(Ordering::Relaxed);
+            if fb_port > 0 && !is_loopback_port_alive(fb_port) {
+                fb_port = 0;
+                self.fallback_port_ready.store(0, Ordering::Relaxed);
+            }
+            if fb_port == 0 {
+                fb_port = self.probe_remote_endpoint().map(|(p, _)| p).unwrap_or(0);
+                self.fallback_port_ready.store(fb_port, Ordering::Relaxed);
+            }
+            fb_port
+        }
+        #[cfg(test)]
+        {
+            self.fallback_port_ready.load(Ordering::Relaxed)
+        }
     }
 
     /// Privacy-safe port summary for MCP/UI payloads (never leaks local home path or browser WS UUID).
     pub fn public_port_file(&self) -> Value {
+        if let Some(remote_port) = self.connected_remote_port() {
+            return json!({
+                "exists": true,
+                "valid": true,
+                "stale": false,
+                "port": remote_port,
+                "updatedAt": Value::Null,
+                "fallback": true,
+            });
+        }
         let pf = self.port_file_status();
         let mut summary = pf.public_summary();
         if !pf.valid {
-            let fb_ready = self.fallback_port_ready.load(Ordering::Relaxed);
-            #[cfg(not(test))]
-            let fb_ready = fb_ready || probe_debug_port_ws_url(self.debug_port).is_some();
-            self.fallback_port_ready.store(fb_ready, Ordering::Relaxed);
-            if fb_ready {
+            let fb_port = self.effective_fallback_port();
+            if fb_port > 0 {
                 summary["valid"] = json!(true);
                 summary["stale"] = json!(false);
-                summary["port"] = json!(self.debug_port);
+                summary["port"] = json!(fb_port);
                 summary["fallback"] = json!(true);
             }
         }
@@ -370,6 +494,10 @@ impl CdpClient {
             ConnectionMode::Personal => Some("personal"),
             ConnectionMode::Remote => Some("remote"),
         }
+    }
+
+    pub fn connected_remote_port(&self) -> Option<u16> {
+        self.transport_state.lock().unwrap().active_remote_port()
     }
 
     pub fn is_connecting(&self) -> bool {
@@ -469,9 +597,14 @@ impl CdpClient {
             .get("valid")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let (connected, connecting, connection_mode) = {
+        let (connected, connecting, connection_mode, remote_port) = {
             let tr = self.transport_state.lock().unwrap();
-            (tr.is_open(), tr.connecting, tr.connection_mode())
+            (
+                tr.is_open(),
+                tr.connecting,
+                tr.connection_mode(),
+                tr.active_remote_port(),
+            )
         };
         let (paused, pause_epoch, no_tabs, active_tid, dialog, epoch) = {
             let ts = self.tabs.lock().unwrap();
@@ -503,6 +636,7 @@ impl CdpClient {
             "locale": current_lang().as_str(),
             "connected": connected,
             "connectionMode": connection_mode,
+            "remotePort": remote_port,
             "connecting": connecting,
             "paused": paused,
             "pauseEpoch": pause_epoch,
@@ -532,6 +666,7 @@ impl CdpClient {
         rtt_ms: f64,
     ) -> Value {
         let connection_mode = self.connection_mode();
+        let remote_port = self.connected_remote_port();
         let connected = connection_mode.is_some();
         let (paused, pause_epoch, tabs, active_tid, epoch, dialog) = {
             let ts = self.tabs.lock().unwrap();
@@ -601,6 +736,7 @@ impl CdpClient {
             "locale": current_lang().as_str(),
             "connected": connected,
             "connectionMode": connection_mode,
+            "remotePort": remote_port,
             "connecting": self.is_connecting(),
             "paused": paused,
             "pauseEpoch": pause_epoch,
@@ -716,6 +852,7 @@ impl CdpClient {
             let old = tr.transport.take();
             tr.connection_mode = None;
             tr.endpoint = None;
+            tr.connected_port = None;
             self.reset_connection_state(old.is_some());
             old
         };
@@ -816,12 +953,17 @@ impl CdpClient {
                 && tr.endpoint.as_deref() == Some(url.as_str())
             {
                 tr.connecting = false;
+                if let Some(port) = tr.active_remote_port() {
+                    self.last_remote_port.store(port, Ordering::Relaxed);
+                    self.fallback_port_ready.store(port, Ordering::Relaxed);
+                }
                 self.capture.lock().unwrap().notify_activity();
                 return Ok(());
             }
             let old = tr.transport.take();
             tr.connection_mode = None;
             tr.endpoint = None;
+            tr.connected_port = None;
             if old.is_some() {
                 self.reset_connection_state(true);
             }
@@ -854,11 +996,16 @@ impl CdpClient {
             }
             tr.connecting = false;
             let transport = connect_res?;
+            let connected_port = validate_loopback_ws_url(&url).ok().map(|(_, port, _)| port);
             tr.transport = Some(Arc::clone(&transport));
             tr.connection_mode = Some(mode);
             tr.endpoint = Some(url);
+            tr.connected_port = connected_port;
             if mode == ConnectionMode::Remote {
-                self.fallback_port_ready.store(true, Ordering::Relaxed);
+                if let Some(port) = connected_port {
+                    self.last_remote_port.store(port, Ordering::Relaxed);
+                    self.fallback_port_ready.store(port, Ordering::Relaxed);
+                }
             }
             tr.last_keepalive_at = Instant::now();
             self.tabs.lock().unwrap().set_paused(false);
@@ -881,7 +1028,7 @@ impl CdpClient {
         revoked: impl Fn() -> bool,
     ) -> Result<(String, ConnectionMode), CdpError> {
         if let Some(data_dir) = launch_dir {
-            let url = launcher::launch_remote(data_dir, self.debug_port, revoked)
+            let url = launcher::launch_remote(data_dir, self.debug_port, self.remote_port, revoked)
                 .map_err(CdpError::new)?;
             return Ok((url, ConnectionMode::Remote));
         }
@@ -894,7 +1041,8 @@ impl CdpClient {
             }
         }
         if requested != Some(ConnectionMode::Personal) {
-            if let Some(url) = probe_debug_port_ws_url(self.debug_port) {
+            if let Some((port, url)) = self.probe_remote_endpoint() {
+                self.last_remote_port.store(port, Ordering::Relaxed);
                 return Ok((url, ConnectionMode::Remote));
             }
         }
@@ -912,6 +1060,7 @@ impl CdpClient {
             let had_transport = tr.transport.take().is_some();
             tr.connection_mode = None;
             tr.endpoint = None;
+            tr.connected_port = None;
             self.reset_connection_state(had_transport);
         }
         self.notify_frame_waiters();

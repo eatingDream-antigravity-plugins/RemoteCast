@@ -370,6 +370,7 @@ fn handle_connect(
                     "ok": false,
                     "connected": connected,
                     "connectionMode": st.get("connectionMode").cloned().unwrap_or(Value::Null),
+                    "remotePort": st.get("remotePort").cloned().unwrap_or(Value::Null),
                     "locale": lang.as_str(),
                     "error": err,
                     "portFile": st.get("portFile").cloned().unwrap_or(Value::Null),
@@ -568,6 +569,7 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
             let mut sc = json!({
                 "connected": live,
                 "connectionMode": post.get("connectionMode").cloned().unwrap_or(Value::Null),
+                "remotePort": post.get("remotePort").cloned().unwrap_or(Value::Null),
                 "recoverable": live,
                 "error": err,
                 "portFile": post.get("portFile").cloned().unwrap_or(Value::Null),

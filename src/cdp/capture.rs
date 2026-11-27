@@ -722,6 +722,7 @@ pub(crate) fn poll_frame(
         return Ok(json!({
             "connected": false,
             "connectionMode": Value::Null,
+            "remotePort": Value::Null,
             "crisp": false,
             "format": Value::Null,
             "paused": false,
@@ -800,9 +801,11 @@ pub(crate) fn poll_frame(
             let include_tabs =
                 params.known_tabs_hash.is_empty() || params.known_tabs_hash != t_hash;
             let connection_mode = client.connection_mode();
+            let remote_port = client.connected_remote_port();
             let mut resp = json!({
                 "connected": connection_mode.is_some(),
                 "connectionMode": connection_mode,
+                "remotePort": remote_port,
                 "crisp": false,
                 "format": Value::Null,
                 "paused": is_paused,
@@ -1038,6 +1041,7 @@ pub(crate) fn poll_frame(
     let mut resp = json!({
         "connected": connection_mode.is_some(),
         "connectionMode": connection_mode,
+        "remotePort": client.connected_remote_port(),
         "crisp": crisp,
         "format": frame.as_ref().map(|f| f.format.as_str()),
         "paused": cur_paused,

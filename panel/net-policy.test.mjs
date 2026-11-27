@@ -834,6 +834,7 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
               connected: true,
               activeTargetId: "t1",
               connectionMode: "remote",
+              remotePort: 9223,
               crisp: true,
               format: "webp",
               changed: false,
@@ -847,6 +848,7 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(els.get("qh").hidden, false, "HD cue must surface on crisp WebP");
       assert.equal(els.get("rm").hidden, false, "Remote chip must surface in remote mode");
+      assert.equal(els.get("rm").textContent, "Remote · 9223", "Remote chip must show active remote port");
 
       // Trigger an input batch (`chrome_stream_input`) with a slow 1200ms response:
       // flIn MUST send targetEpoch AND MUST NOT pollute AdaptiveBandwidthController RTT EWMA!

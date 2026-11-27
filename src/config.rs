@@ -11,7 +11,13 @@ pub struct Config {
     pub relay_pid_file: PathBuf,
     pub port_files: Vec<PathBuf>,
     pub debug_port: u16,
+    pub remote_port: Option<u16>,
     pub panel_html: PathBuf,
+}
+
+fn parse_nonzero_port(raw: Option<&str>) -> Option<u16> {
+    raw.and_then(|s| s.trim().parse::<u16>().ok())
+        .filter(|&p| p > 0)
 }
 
 impl Config {
@@ -53,13 +59,15 @@ impl Config {
             explicit_port_file.as_deref(),
             explicit_user_data_dir.as_deref(),
         );
-        let debug_port = env::var("CHROME_STREAM_DEBUG_PORT")
-            .or_else(|_| env::var("CHROME_STREAM_CHROME_DEBUG_PORT"))
-            .or_else(|_| env::var("CHROME_DEBUG_PORT"))
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
-            .filter(|&p| p > 0)
-            .unwrap_or(9222);
+        let debug_port = parse_nonzero_port(
+            env::var("CHROME_STREAM_DEBUG_PORT")
+                .or_else(|_| env::var("CHROME_STREAM_CHROME_DEBUG_PORT"))
+                .or_else(|_| env::var("CHROME_DEBUG_PORT"))
+                .ok()
+                .as_deref(),
+        )
+        .unwrap_or(9222);
+        let remote_port = parse_nonzero_port(env::var("CHROME_STREAM_REMOTE_PORT").ok().as_deref());
 
         let panel_html = env::var_os("CHROME_STREAM_PANEL_HTML")
             .map(PathBuf::from)
@@ -71,6 +79,7 @@ impl Config {
             relay_pid_file,
             port_files,
             debug_port,
+            remote_port,
             panel_html,
         }
     }
@@ -246,5 +255,15 @@ mod tests {
         assert!(list.contains(&PathBuf::from(
             "/tmp/fake-home/Library/Application Support/Google/Chrome Canary/DevToolsActivePort"
         )));
+    }
+
+    #[test]
+    fn parses_nonzero_explicit_remote_port() {
+        assert_eq!(parse_nonzero_port(None), None);
+        assert_eq!(parse_nonzero_port(Some("")), None);
+        assert_eq!(parse_nonzero_port(Some("0")), None);
+        assert_eq!(parse_nonzero_port(Some("not-a-port")), None);
+        assert_eq!(parse_nonzero_port(Some("9223")), Some(9223));
+        assert_eq!(parse_nonzero_port(Some(" 9230 ")), Some(9230));
     }
 }
