@@ -1010,11 +1010,11 @@ describe("Chrome Stream MCP panel net-policy.js", () => {
       });
       await new Promise((r) => setTimeout(r, 10));
 
-      // Offline Launch Remote (#ol) calls chrome_stream_launch_remote
+      // Offline Launch Remote (#ol) calls chrome_stream_launch
       els.get("ol").listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
-      const launchCall = posted.find((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_launch_remote");
-      assert.ok(launchCall, "Launch Remote Chrome button must call chrome_stream_launch_remote");
+      const launchCall = posted.find((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_launch");
+      assert.ok(launchCall, "Launch Remote Chrome button must call chrome_stream_launch");
 
       msgHandler2({
         source: win.parent,

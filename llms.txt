@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/Rem
 
 - `chrome_stream_frame`: Long-polls adaptive motion JPEG or crisp settled WebP stills with 0-byte unchanged deduplication.
 - `chrome_stream_input`: Dispatches coalesced inputs bound to `(targetId, targetEpoch)` with stale-target rejection.
-- `chrome_stream_launch_remote`: Launches or reuses an isolated loopback Remote Chrome (`127.0.0.1`, `0700` profile) without requiring local Allow confirmation.
+- `chrome_stream_launch`: Launches or reuses an isolated loopback Remote Chrome (`127.0.0.1`, `0700` profile) without requiring local Allow confirmation.
 
 ## CLI Subcommands
 

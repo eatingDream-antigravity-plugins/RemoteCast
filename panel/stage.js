@@ -325,7 +325,7 @@ const mount = () => {
   };
 
   const cbs = {
-    ob: () => conn("personal"), or: () => (ready ? conn(lastMode, 1) : initBridge()), ol: () => conn("launch_remote", 1),
+    ob: () => conn("personal"), or: () => (ready ? conn(lastMode, 1) : initBridge()), ol: () => conn("launch", 1),
     nt: openNT, n2: openNT, er: () => (ready ? (setErr(), askUrg(1)) : initBridge()), dx: () => setErr(),
     sn: () => { S.fh = ""; S.cr = false; wake(); setPop(0); toast(T[63]); poll(1); },
     dc: doDisc, bp: togglePa, pb: () => S.on && (S.pa ? togglePa() : (wake(), syncPauseUi(), poll(1))),
@@ -606,7 +606,7 @@ const poll = async (f = 0) => {
 const conn = async (mode = "personal", f = 0) => {
   if (isCn || !canCall()) return;
   lastMode = mode; isCn = 1; errMsg = null; cErr = 0; clrTm(0); !S.on && uOff();
-  const ep = S.ep, t0 = pNow(), rem = mode === "launch_remote";
+  const ep = S.ep, t0 = pNow(), rem = mode === "launch";
   try {
     const c = await rpcSc(rem ? mode : "connect", !rem && mode !== "auto" ? { ...qArgs(), mode } : qArgs());
     if (!c?.connected) return isCn = 0, goOff(c?.error || null, c?.portFile);

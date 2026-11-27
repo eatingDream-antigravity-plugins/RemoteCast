@@ -22,7 +22,7 @@ Complete operational reference for AI agents and power users configuring **Remot
 | :--- | :--- | :--- |
 | `chrome_stream_frame` | `{ targetId?, sinceSeq?, lastFrameHash?, knownTabsHash?, qualityPreset?, rttMs?, waitMs?, forceRefresh? }` | Long-polls for changed JPEG motion frames or crisp settled WebP stills (`crisp: true, format: "webp"`); returns `unchanged: true, imageBytes: 0` for unchanged frames. The bootstrap cache shares its stored image across unchanged updates. |
 | `chrome_stream_input` | `{ targetId?, targetEpoch?, events: [...] }` | Dispatches coalesced mouse, wheel, touch, keyboard, IME, dialog, navigation, tab, and pause/resume actions bound to `(targetId, targetEpoch)`. Closing a tab requires an explicit `targetId`. A stale `targetEpoch` or missing target yields `staleTarget: true`. |
-| `chrome_stream_launch_remote` | `{ qualityPreset?, rttMs? }` | Reuses a live endpoint verified against the isolated profile, or starts an isolated Chrome (`0700` `<data_dir>/remote-profile`, `--remote-debugging-address=127.0.0.1`), connects in `"remote"` mode, and warms the active tab. |
+| `chrome_stream_launch` | `{ qualityPreset?, rttMs? }` | Reuses a live endpoint verified against the isolated profile, or starts an isolated Chrome (`0700` `<data_dir>/remote-profile`, `--remote-debugging-address=127.0.0.1`), connects in `"remote"` mode, and warms the active tab. |
 
 ## 2. Standby vs. Revoke & Dedicated Remote Chrome
 

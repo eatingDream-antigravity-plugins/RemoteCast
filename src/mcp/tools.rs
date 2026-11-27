@@ -164,7 +164,7 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
             }
         },
         {
-            "name": "chrome_stream_launch_remote",
+            "name": "chrome_stream_launch",
             "title": "Launch Remote Chrome",
             "description": "App-only tool: launch or reuse dedicated Remote Chrome on loopback and warm the active tab screencast.",
             "inputSchema": {
@@ -220,7 +220,7 @@ pub fn dispatch_tool_with_cache(
         "chrome_stream_frame" => handle_frame(relay, args),
         "chrome_stream_input" => handle_input(relay, args, revoking),
         "chrome_stream_disconnect" => handle_disconnect(relay, args),
-        "chrome_stream_launch_remote" => {
+        "chrome_stream_launch" | "chrome_stream_launch_remote" => {
             handle_connect(relay, "launch_remote", args, Duration::from_secs(85))
         }
         _ => json!({

@@ -615,7 +615,10 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 fn is_app_only_tool(name: &str) -> bool {
     matches!(
         name,
-        "chrome_stream_frame" | "chrome_stream_input" | "chrome_stream_launch_remote"
+        "chrome_stream_frame"
+            | "chrome_stream_input"
+            | "chrome_stream_launch"
+            | "chrome_stream_launch_remote"
     )
 }
 
@@ -1106,7 +1109,7 @@ mod tests {
                         "chrome_stream_frame",
                         "chrome_stream_input",
                         "chrome_stream_disconnect",
-                        "chrome_stream_launch_remote",
+                        "chrome_stream_launch",
                     ]
                 );
                 assert_eq!(
@@ -1139,6 +1142,7 @@ mod tests {
         for blocked in [
             "chrome_stream_frame",
             "chrome_stream_input",
+            "chrome_stream_launch",
             "chrome_stream_launch_remote",
         ] {
             let err_reply = server
@@ -1244,7 +1248,7 @@ mod tests {
                 "chrome_stream_frame",
                 "chrome_stream_input",
                 "chrome_stream_disconnect",
-                "chrome_stream_launch_remote",
+                "chrome_stream_launch",
             ]
         );
         for tool in tools {
@@ -1292,6 +1296,47 @@ mod tests {
     }
 
     #[test]
+    fn advertised_tool_names_fit_antigravity_64_char_limit_and_launch_alias_works() {
+        let tools = tool_definitions(true);
+        let list = tools.as_array().unwrap();
+        assert!(!list.is_empty());
+        for tool in list {
+            let name = tool["name"].as_str().unwrap();
+            let full = format!("mcp_chrome-stream-mcp_chrome-stream-mcp_{name}");
+            assert!(
+                !full.is_empty() && full.len() <= 64,
+                "tool {full} exceeds 64-char limit ({})",
+                full.len()
+            );
+            assert!(
+                full.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+                "tool {full} violates ^[a-zA-Z0-9_-]{{1,64}}$"
+            );
+        }
+        assert!(
+            !list
+                .iter()
+                .any(|tool| tool["name"] == "chrome_stream_launch_remote"),
+            "legacy alias must not be advertised in tools/list"
+        );
+
+        let relay: Arc<dyn RelayBackend> = Arc::new(DummyRelay {
+            delay_ms: 0,
+            poll_attempts: AtomicUsize::new(0),
+        });
+        for name in ["chrome_stream_launch", "chrome_stream_launch_remote"] {
+            let resp = dispatch_tool_with_cache(
+                &relay,
+                None,
+                name,
+                json!({ "qualityPreset": "high", "rttMs": 700 }),
+            );
+            assert_eq!(resp["structuredContent"]["connectionMode"], "remote");
+        }
+    }
+
+    #[test]
     fn swr_preserves_remote_metadata_and_crisp_pixels_through_standby() {
         let relay: Arc<dyn RelayBackend> = Arc::new(DummyRelay {
             delay_ms: 0,
@@ -1301,7 +1346,7 @@ mod tests {
         let launched = dispatch_tool_with_cache(
             &relay,
             Some(&cache),
-            "chrome_stream_launch_remote",
+            "chrome_stream_launch",
             json!({ "qualityPreset": "high", "rttMs": 700 }),
         );
         assert_eq!(launched["structuredContent"]["connectionMode"], "remote");
