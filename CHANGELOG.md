@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.5.5](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.5.4...v0.5.5) (2026-11-27)
+
+
+### Bug Fixes
+
+* use dedicated auto-selected debug port for Remote Chrome ([#31](https://github.com/eatingDream-antigravity-plugins/remote-cast/issues/31)) ([707d2ff](https://github.com/eatingDream-antigravity-plugins/remote-cast/commit/707d2ff3c0a5754f44a25dca3897c511a02678b0))
+
 ## [0.5.4](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.5.3...v0.5.4) (2026-11-27)
 
 
