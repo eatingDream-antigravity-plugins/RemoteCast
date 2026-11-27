@@ -1,6 +1,6 @@
-# RemoteCast (chrome-stream-mcp) — AI & Configuration Guide
+# Remote Cast (chrome-stream-mcp) — AI & Configuration Guide
 
-Complete operational reference for AI agents and power users configuring **RemoteCast** (`chrome-stream-mcp`): MCP tool schemas, Standby vs. Revoke semantics, isolated Remote Chrome mode, weak-network profiles, environment variables, CLI commands, and source builds. Homepage: <https://remotecast.eatingdream.dev>.
+Complete operational reference for AI agents and power users configuring **Remote Cast** (`chrome-stream-mcp`): MCP tool schemas, Standby vs. Revoke semantics, isolated Remote Chrome mode, weak-network profiles, environment variables, CLI commands, and source builds. Homepage: <https://remotecast.eatingdream.dev>.
 
 ## 1. MCP Protocol & Tools
 
@@ -88,7 +88,7 @@ Generic stdio MCP client configuration
 Requires Rust (`cargo`) and Node.js 20+ (panel bundler & tests; zero npm dependencies):
 
 ```sh
-git clone https://github.com/eatingDream-antigravity-plugins/RemoteCast.git && cd RemoteCast
+git clone https://github.com/eatingDream-antigravity-plugins/remote-cast.git && cd remote-cast
 node panel/build.mjs && node --test panel/net-policy.test.mjs
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --locked
 cargo build --release --locked

@@ -4,7 +4,7 @@ version = "0.5.3"
 edition = "2021"
 license = "MIT"
 description = "Low-bandwidth native Rust Chrome DevTools screencast relay, interactive browser controller, and MCP App server."
-repository = "https://github.com/eatingDream-antigravity-plugins/RemoteCast"
+repository = "https://github.com/eatingDream-antigravity-plugins/remote-cast"
 keywords = ["chrome", "cdp", "screencast", "mcp", "browser"]
 categories = ["command-line-utilities", "network-programming", "web-programming"]
 

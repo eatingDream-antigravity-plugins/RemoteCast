@@ -4,9 +4,9 @@ description: >-
   ONLY use when the user explicitly asks to stream, view, standby, wake, or debug tabs in their external local Google Chrome via Chrome Stream MCP (`chrome_stream_stage`, `chrome_stream_connect`, `chrome_stream_disconnect`). NEVER use for general web browsing, logins, or web app tasks (use Antigravity's built-in `browser` subagent instead).
 ---
 
-# RemoteCast (chrome-stream-mcp)
+# Remote Cast (chrome-stream-mcp)
 
-Use RemoteCast (`chrome-stream-mcp`) when the user explicitly wants to view or interact with tabs in their local Google Chrome through the RemoteCast MCP App stage. For full configuration tables, environment variables, and app-only tool specs, read `docs/ai-guide.md`.
+Use Remote Cast (`chrome-stream-mcp`) when the user explicitly wants to view or interact with tabs in their local Google Chrome through the Remote Cast MCP App stage. For full configuration tables, environment variables, and app-only tool specs, read `docs/ai-guide.md`.
 
 ## Public MCP Tools
 

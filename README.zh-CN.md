@@ -1,68 +1,77 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="RemoteCast" width="80" height="80">
+<img src="assets/logo.svg" alt="Remote Cast" width="80" height="80">
 
-# RemoteCast (chrome-stream-mcp)
+# Remote Cast (`chrome-stream-mcp`)
 
-**在 Antigravity 内实时查看和操作本机 Google Chrome —— 即使手机远程或弱网环境下，依然清晰跟手。**
+**在 Antigravity 内直接查看和操作本机 Google Chrome —— 即使手机远程或弱网环境下，画面依然清晰跟手。**
 
-[主页](https://remotecast.eatingdream.dev) · [English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/RemoteCast/releases) · [AI 使用指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[主页](https://remotecast.eatingdream.dev) · [English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/remote-cast/releases) · [AI 使用指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
-[![CI](https://github.com/eatingDream-antigravity-plugins/RemoteCast/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/RemoteCast/actions/workflows/ci.yml)
-[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/RemoteCast/releases)
+[![CI](https://github.com/eatingDream-antigravity-plugins/remote-cast/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/remote-cast/actions/workflows/ci.yml)
+[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/remote-cast/releases)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555)
 
-<img src="docs/social-preview.png" alt="RemoteCast 面板预览" width="860">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/remotecast-connected-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/remotecast-connected-light.png">
+  <img src="docs/images/remotecast-connected-dark.png" alt="Remote Cast 实时浏览器面板预览" width="620">
+</picture>
 
 </div>
 
-## 概览
+## 适合你吗？
 
-RemoteCast（`chrome-stream-mcp`）通过 Rust 本地中继和 SEP-1865 MCP App，在 Antigravity 中传输本机 Chrome 画面，并提供输入和标签页控制。Chrome 调试流量仅使用环回地址（`127.0.0.1` 和 `::1`）。
+- **适合使用 Remote Cast**：你需要直接在 Antigravity 里查看、点击、输入和切换自己本机 Chrome 的标签页（保留已有登录态和扩展），或在远程弱网下操控隔离的本机 Chrome。
+- **不需要安装**：如果你只是想让 AI 自己去浏览网页或跑自动化操作，直接用 Antigravity 内置的 `browser` 子代理即可，无需接入个人 Chrome。
 
-## 核心特性
+## 为什么选择 Remote Cast
 
-- **日常 Chrome 与一键独立远程 Chrome 双模式**：可复用你现有的 Chrome（保留已登录账号与扩展），也可一键启动独立回环远程 Chrome（免本机点 **Allow**）。
-- **休眠保活，远程不重弹 Allow**：顶栏主按钮为 **休眠 / 唤醒**（0 FPS 停流但保持已授权连接存活）；会撤销授权的 **彻底断开 · 撤销授权** 收纳于 `⋯` 菜单并附明确警告。
-- **弱网渐进高清**：滑动/打字时守住文字清晰下限，停手约 380 ms 自动补发一张高清 WebP 静帧，静止期间 0 字节去重。
-- **抗抖动自适应调度**：基于 EWMA RTT 平滑与非对称迟滞（连续 2 次慢才降档、连续 3 次快才升档），弱网不抖动、滚轮与点击更跟手。
-- **标签纪元防误触与干净空态**：所有页面输入绑定明确标签纪元，后台切页绝不误点错标签；关闭最后一个标签页展示干净空态，不强弹 `about:blank`。
-- **Editorial-Warm 极简面板**：暗色优先零闪屏、零外部依赖单文件面板（`< 43.5 KB`），严格 `default-src 'none'` CSP，支持中英双语即时切换。
+- **日常 Chrome 与一键隔离 Chrome 双模式**：可直接连上你正在用的日常 Chrome（保留账号登录和插件），也可以一键启动独立隔离的本机 Chrome，无需在本机电脑上点 **Allow**。
+- **休眠保活，远程不丢授权**：点击顶栏 **休眠** 可立刻降到 0 FPS 省电，同时保持已授权连接存活；会撤销授权的 **彻底断开** 收纳在 `⋯` 菜单中，避免远程误触。
+- **弱网流畅、停手即高清**：滚动和打字时自动平滑降档不闪烁，停手后立刻补发高清 WebP 静帧，页面静止时零流量开销。
+- **不错点、不强弹空白页**：每次点击和按键都锁定在当前所见标签页，后台切页不会误触；关闭最后一个标签页后展示干净空态，不再强行弹出 `about:blank`。
+- **原生 Rust 极速轻量**：单个本地二进制加零依赖单文件面板（`< 45 KB`），暗色优先无白屏闪烁，支持中英双语即时切换。
 
 ## 快速开始
 
 ### 1. 一键安装（macOS 与 Linux）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/remote-cast/main/scripts/install.sh | sh
 ```
+
+<sub>自动从 GitHub Releases 下载预编译二进制、校验 SHA-256 摘要，并安装到 <code>~/.gemini/config/plugins/chrome-stream-mcp</code>。随时可执行 <code>curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/remote-cast/main/scripts/install.sh | sh -s -- --uninstall</code> 卸载。</sub>
 
 安装完成后重载 Antigravity 即可生效。
 
 ### 2. 连接 Chrome
 
-- **连接日常 Chrome**仅使用 Chrome 的 `DevToolsActivePort` 文件。先在 `chrome://inspect/#remote-debugging` 启用远程调试，再在 Antigravity 中打开 **RemoteCast**。点击 **连接日常 Chrome**，然后在 Chrome 中确认 **Allow**。点击 **休眠**可保留已授权的连接。
-- **独立远程 Chrome（免 Allow）**在 `127.0.0.1` 启动，使用权限为 `0700` 的隔离配置目录。只有正在运行的浏览器端点与该目录匹配时，启动操作才会复用它。如果端口已被占用，请用 `CHROME_STREAM_DEBUG_PORT` 指定空闲端口，或连接日常 Chrome。
+- **连接日常 Chrome**：先在 Chrome 打开 `chrome://inspect/#remote-debugging` 开启远程调试，在 Antigravity 中打开 **Remote Cast**，点击 **连接日常 Chrome** 并在 Chrome 弹窗确认一次 **Allow**。暂停时点 **休眠** 即可保活连接。
+- **独立远程 Chrome（免 Allow）**：点击 **启动独立远程 Chrome**，将在 `127.0.0.1` 启动权限为 `0700` 的隔离配置目录。若 `9222` 端口已被占用，可通过 `CHROME_STREAM_DEBUG_PORT` 指定空闲端口或改用日常 Chrome。
 
 ## AI Agent 专属指引
 
-完整的 MCP 工具参数表、`CHROME_STREAM_*` 环境变量、CLI 诊断命令与跨客户端 stdio 配置已整理至面向 Agent 的文档中：
+面向 Agent 的工具参数表、环境变量、CLI 诊断命令和 stdio 配置文档：
 
-- **通用 Skill（`agentskills.io`）**：[`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md)（或运行 `npx skills add eatingDream-antigravity-plugins/RemoteCast`）
-- **完整 AI 与配置参考**：[`docs/ai-guide.md`](docs/ai-guide.md)
+```sh
+npx skills add eatingDream-antigravity-plugins/remote-cast
+```
+
+- **通用 Skill**：[`skills/chrome-stream/SKILL.md`](skills/chrome-stream/SKILL.md)
+- **完整 AI 与配置指南**：[`docs/ai-guide.md`](docs/ai-guide.md)
 - **LLM 索引入口**：[`llms.txt`](llms.txt)
 
-> 提示词示例：*「阅读 `chrome-stream-mcp` 的 `llms.txt` 和 `docs/ai-guide.md`，帮我配置 stdio MCP、运行 `chrome-stream-mcp doctor --json`，或以休眠/独立远程模式接入 Chrome。」*
+> 提示词示例：*「阅读 `chrome-stream-mcp` 的 `llms.txt` 和 `docs/ai-guide.md`，帮我运行 `chrome-stream-mcp doctor --json`，或以休眠/独立远程模式连接 Chrome。」*
 
 ## 安全与隐私边界
 
-- **严格环回（`127.0.0.1` / `::1`）**：拒绝一切非本机地址，绝不将 Chrome 调试端口暴露至局域网或公网。
-- **本地访问控制**使用权限为 `0600` 的 Unix 套接字，并验证对端用户 ID。中继在使用套接字和权限为 `0700` 的 Chrome 配置目录前检查目录所有者和写权限。
-- **显式连接与 12 秒空闲停流**：打开面板不自动连接；12 秒无交互自动暂停抓屏护显卡，下次交互立即唤醒。
-- **诊断脱敏**。`chrome-stream-mcp doctor --json` 默认省略本机文件路径和原始 DevTools WebSocket URL。
-- **MCP Apps 能力**。宿主协商 MCP App MIME 类型后，`resources/read` 会返回包含标签页和像素的启动快照。其他宿主收到静态面板 HTML。
+- **严格环回（`127.0.0.1` / `::1`）**：拒绝所有非本机地址，绝不将 Chrome 调试端口暴露到局域网或公网。
+- **同用户本地访问控制**：使用 `0600` 权限的 Unix 套接字并校验对端用户 ID；在使用套接字和 `0700` 隔离配置目录前检查目录所有者与权限。
+- **显式连接与 12 秒空闲停流**：打开面板不会自动连接 Chrome；12 秒无操作自动暂停抓屏护显卡，下次点击或按键瞬间唤醒。
+- **诊断信息默认脱敏**：`chrome-stream-mcp doctor --json` 默认隐藏本机文件路径和原始调试 WebSocket 地址。
 
 ## 相关文档
 
@@ -72,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/Rem
 
 ## Antigravity 插件套件
 
-隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[ContextRadar](https://github.com/eatingDream-antigravity-plugins/ContextRadar)（`context-radar-mcp`）· [ClamGuard](https://github.com/eatingDream-antigravity-plugins/ClamGuard)（`mac-clamshell-mcp`）· **RemoteCast**（`chrome-stream-mcp`）· [ColabDeck](https://github.com/eatingDream-antigravity-plugins/ColabDeck)（`colab-mcp`），由 [PanelKit](https://github.com/eatingDream-antigravity-plugins/PanelKit)（`agy-mcp-kit`）统一驱动。
+隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar)（`context-radar-mcp`）· [Clam Guard](https://github.com/eatingDream-antigravity-plugins/clam-guard)（`mac-clamshell-mcp`）· **Remote Cast**（`chrome-stream-mcp`）· [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck)（`colab-mcp`），由 [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit)（`agy-mcp-kit`）统一驱动。
 
 ## 许可证
 
