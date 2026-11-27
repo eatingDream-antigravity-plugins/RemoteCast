@@ -1,4 +1,4 @@
-# RemoteCast (chrome-stream-mcp)
+# Remote Cast (chrome-stream-mcp)
 
 > Low-bandwidth native Rust Chrome DevTools Protocol (CDP) screencast relay, interactive browser controller, and SEP-1865 MCP App server for viewing and controlling local Google Chrome tabs over slow or remote connections. Homepage: https://remotecast.eatingdream.dev
 
@@ -12,7 +12,7 @@
 ## Quick Install (macOS / Linux)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/remote-cast/main/scripts/install.sh | sh
 ```
 
 ## Public MCP Tools

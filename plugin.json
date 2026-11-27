@@ -1,6 +1,6 @@
 {
   "name": "chrome-stream-mcp",
-  "displayName": "RemoteCast",
+  "displayName": "Remote Cast",
   "version": "0.5.3",
   "description": "Low-bandwidth native Rust Chrome DevTools screencast relay, interactive tab controller, and MCP App viewer.",
   "author": {
@@ -8,11 +8,11 @@
     "url": "https://github.com/eatingDream"
   },
   "homepage": "https://remotecast.eatingdream.dev",
-  "repository": "https://github.com/eatingDream-antigravity-plugins/RemoteCast",
+  "repository": "https://github.com/eatingDream-antigravity-plugins/remote-cast",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "Open RemoteCast to view and control local Chrome tabs",
-    "Check RemoteCast remote debugging connection status",
-    "Disconnect RemoteCast to stop screencasting and save battery"
+    "Open Remote Cast to view and control local Chrome tabs",
+    "Check Remote Cast remote debugging connection status",
+    "Disconnect Remote Cast to stop screencasting and save battery"
   ]
 }

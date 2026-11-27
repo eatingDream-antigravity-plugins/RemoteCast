@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','SF Pro Display',Helvetica,Arial,sans-serif">
   <title id="t">Chrome Stream MCP — Native Rust Chrome DevTools Screencast Relay &amp; MCP App</title>
-  <desc id="d">Social preview card for eatingDream-antigravity-plugins/RemoteCast featuring the Chrome Stream editorial-warm dark stage UI mockup and key architecture highlights.</desc>
+  <desc id="d">Social preview card for eatingDream-antigravity-plugins/remote-cast featuring the Remote Cast dark stage UI mockup and key architecture highlights.</desc>
   <defs>
     <radialGradient id="glow-terracotta" cx="82%" cy="18%" r="55%">
       <stop offset="0%" stop-color="#D97757" stop-opacity="0.22"/>
@@ -91,7 +91,7 @@
     </g>
 
     <!-- Bottom Repo Line -->
-    <text x="2" y="502" font-size="13" fill="#8B8478" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">MIT License · github.com/eatingDream-antigravity-plugins/RemoteCast</text>
+    <text x="2" y="502" font-size="13" fill="#8B8478" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">MIT License · github.com/eatingDream-antigravity-plugins/remote-cast</text>
   </g>
 
   <!-- RIGHT COLUMN: Editorial-Warm Interactive Stage Mockup -->

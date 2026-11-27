@@ -1,15 +1,17 @@
 #!/bin/sh
-# Install RemoteCast (chrome-stream-mcp) plugin from GitHub Releases with SHA256 verification.
+# Install Remote Cast (chrome-stream-mcp) plugin from GitHub Releases with SHA256 verification.
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/RemoteCast/main/scripts/install.sh | sh
-#   CHROME_STREAM_VERSION=v0.1.0 sh scripts/install.sh
+#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/remote-cast/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/remote-cast/main/scripts/install.sh | sh -s -- --uninstall
+#   CHROME_STREAM_VERSION=v0.5.4 sh scripts/install.sh
 
 set -eu
 
-REPO="${CHROME_STREAM_REPO:-eatingDream-antigravity-plugins/RemoteCast}"
+REPO="${CHROME_STREAM_REPO:-eatingDream-antigravity-plugins/remote-cast}"
 PLUGINS_DIR="${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}"
 INSTALL_DIR="${PLUGINS_DIR}/chrome-stream-mcp"
 VERSION="${CHROME_STREAM_VERSION:-}"
+UNINSTALL=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -18,18 +20,22 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -gt 0 ] || { echo "error: --version requires a value" >&2; exit 1; }
       VERSION="$1"
       ;;
-    --dir|-d)
+    --dir|-d|--dest)
       shift
       [ "$#" -gt 0 ] || { echo "error: --dir requires a value" >&2; exit 1; }
       INSTALL_DIR="$1"
       ;;
+    --uninstall)
+      UNINSTALL=1
+      ;;
     --help|-h)
       cat <<'EOF'
-RemoteCast (chrome-stream-mcp) installer
+Remote Cast (chrome-stream-mcp) installer
 
 Options:
-  -v, --version <tag>   Install a specific release tag (e.g. v0.1.0). Defaults to latest.
+  -v, --version <tag>   Install a specific release tag (e.g. v0.5.4). Defaults to latest.
   -d, --dir <path>      Target plugin directory (default: ${ANTIGRAVITY_PLUGINS_DIR:-$HOME/.gemini/config/plugins}/chrome-stream-mcp).
+      --uninstall       Remove the installed plugin directory.
   -h, --help            Show this help message.
 EOF
       exit 0
@@ -41,6 +47,23 @@ EOF
   esac
   shift
 done
+
+if [ "$UNINSTALL" -eq 1 ]; then
+  case "$INSTALL_DIR" in
+    ""|"/"|"$HOME"|"$HOME/"|"$PLUGINS_DIR"|"$PLUGINS_DIR/")
+      echo "error: refusing to remove unsafe directory: ${INSTALL_DIR}" >&2
+      exit 1
+      ;;
+  esac
+  if [ -d "$INSTALL_DIR" ]; then
+    rm -rf "$INSTALL_DIR"
+    echo "Removed Remote Cast (chrome-stream-mcp) from ${INSTALL_DIR}"
+    echo "Reload Antigravity to finish uninstalling."
+  else
+    echo "Remote Cast (chrome-stream-mcp) is not installed at ${INSTALL_DIR}"
+  fi
+  exit 0
+fi
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -149,10 +172,10 @@ cp "${STAGE_DIR}/LICENSE" "${INSTALL_DIR}/LICENSE"
 cp "${STAGE_DIR}/README.md" "${INSTALL_DIR}/README.md"
 
 echo ""
-echo "Installed RemoteCast (chrome-stream-mcp) ${VERSION} (${TARGET}) to:"
+echo "Installed Remote Cast (chrome-stream-mcp) ${VERSION} (${TARGET}) to:"
 echo "  ${INSTALL_DIR}"
 echo ""
 echo "Next steps:"
 echo "  1. Enable Chrome remote debugging at chrome://inspect/#remote-debugging"
 echo "  2. Run: ${INSTALL_DIR}/bin/chrome-stream-mcp doctor"
-echo "  3. Restart or reload your MCP host to load the RemoteCast (chrome-stream-mcp) plugin"
+echo "  3. Restart or reload your MCP host to load the Remote Cast (chrome-stream-mcp) plugin"
