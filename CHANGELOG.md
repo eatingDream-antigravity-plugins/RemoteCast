@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.5.4](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.5.3...v0.5.4) (2026-11-27)
+
+
+### Bug Fixes
+
+* unify Remote Cast titles, kebab-case URLs, iframe height, and outcome-first docs ([#29](https://github.com/eatingDream-antigravity-plugins/remote-cast/issues/29)) ([15ebf9b](https://github.com/eatingDream-antigravity-plugins/remote-cast/commit/15ebf9ba8c675a67f05c97e13d410e4c43998fc5))
+
 ## [0.5.3](https://github.com/eatingDream-antigravity-plugins/RemoteCast/compare/v0.5.2...v0.5.3) (2026-11-27)
 
 
