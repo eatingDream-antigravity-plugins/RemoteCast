@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+reviews:
+  profile: "assertive"
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: true
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_title_keywords:
+      - "chore(main): release"
+  path_filters:
+    - "!CHANGELOG.md"
+    - "!**/package-lock.json"
+    - "!Cargo.lock"
+    - "!**/panel/dist/panel.html"
+    - "!docs/screenshots/**"
+    - "!assets/*.png"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        - Enforce `clippy` (`-D warnings`) cleanliness, fail-closed relay/session state, and compile-time test guards blocking live Chrome dialing or network I/O in tests.
+        - Verify loopback-only (`127.0.0.1` / `::1`) CDP targets, `0600` Unix-socket IPC relay permissions, zero outbound network requests, and redaction of local paths and WebSocket tokens from tool outputs.
+        - Check that MCP tool IDs stay <= 64 characters and staging never auto-dials Chrome or auto-creates `about:blank` when all tabs are closed.
+    - path: "panel/**/*.{ts,css}"
+      instructions: |
+        - Enforce strict erasable TypeScript, `default-src 'none'` CSP compliance, no `innerHTML` or untrusted DOM injection, `panel/dist/panel.html` staying <= 64 KiB, and EN+ZH i18n parity.
