@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in contributing to [Chrome Stream MCP](https://github.com/eatingDream-antigravity-plugins/RemoteCast).
+Thank you for your interest in contributing to [RemoteCast (chrome-stream-mcp)](https://github.com/eatingDream-antigravity-plugins/RemoteCast).
 
 ## Workflow
 
