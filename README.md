@@ -50,7 +50,7 @@ Reload Antigravity after installation.
 ### 2. Connect Chrome
 
 - **Personal Chrome**: Enable remote debugging at `chrome://inspect/#remote-debugging`, open **Remote Cast**, click **Connect Personal Chrome**, and confirm **Allow** once in Chrome. Use **Standby** when pausing so you never have to re-approve remotely.
-- **Remote Chrome (No Allow)**: Click **Launch Remote Chrome** for a fresh, isolated loopback profile (`0700` permissions on `127.0.0.1`). If port `9222` is busy, set `CHROME_STREAM_DEBUG_PORT` to a free port or connect Personal Chrome.
+- **Remote Chrome (No Allow)**: Click **Launch Remote Chrome** for a fresh, isolated loopback profile (`0700` permissions on `127.0.0.1`). It automatically picks a free port (starting at `9223`) so it runs cleanly alongside Personal Chrome on `9222`, or pins a port via `CHROME_STREAM_REMOTE_PORT`.
 
 ## For AI Agents
 

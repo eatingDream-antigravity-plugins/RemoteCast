@@ -29,7 +29,7 @@ Complete operational reference for AI agents and power users configuring **Remot
 - **Personal Chrome** (`mode: "personal"`) discovers Chrome exclusively from its `DevToolsActivePort` files. Confirm **Allow** in Chrome. The local relay can keep that authorized WebSocket across host reloads and standby.
 - **Standby** (`mode: "standby"`) uses the relay's `pause` RPC and reports retained authorization only after the relay confirms both the connection and the pause.
 - **Revoke** (`mode: "revoke"`) closes the Chrome DevTools Protocol (CDP) WebSocket and clears the bootstrap page, tabs, and pixels. A relay failure returns `isError: true` with `unconfirmed: true`. Query live status or retry the revoke.
-- **Dedicated Remote Chrome** starts with `--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=<port>`, and `--user-data-dir=<data_dir>/remote-profile`. The launcher checks ongoing sessions against the profile's endpoint record and the live browser endpoint. On a conflict, set `CHROME_STREAM_DEBUG_PORT` to a free port or use Personal mode. The explicit `connect` option `mode: "remote"` attaches to the configured loopback port.
+- **Dedicated Remote Chrome** starts with `--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=<port>`, and `--user-data-dir=<data_dir>/remote-profile`. The launcher first reuses an already-running managed session matching the profile's endpoint record, and otherwise auto-selects a free loopback port starting at `CHROME_STREAM_DEBUG_PORT + 1` (`9223..=9232`, falling back to an OS-assigned free loopback port) so it never collides with Personal Chrome on `9222`. Set `CHROME_STREAM_REMOTE_PORT` to pin a fixed port. The explicit `connect` option `mode: "remote"` attaches to the pinned or live managed Remote Chrome port (or the configured fallback port when unused by Personal Chrome).
 - The relay checks same-user Unix socket credentials and validates the directory chain before using socket or profile files. Requests to the relay and MCP server have a 1 MiB line limit. Relay replies have a 16 MiB limit for calls and a 64 KiB limit for probes.
 
 ## 3. Weak-Network Profiles & Progressive Sharpness
@@ -48,7 +48,8 @@ Complete operational reference for AI agents and power users configuring **Remot
 
 | Variable | Purpose | Default |
 | :--- | :--- | :--- |
-| `CHROME_STREAM_DEBUG_PORT` | Loopback debugging port for Remote Chrome / fallback probe | `9222` |
+| `CHROME_STREAM_DEBUG_PORT` | Personal / fallback loopback debugging port | `9222` |
+| `CHROME_STREAM_REMOTE_PORT` | Pin a specific loopback debugging port for dedicated Remote Chrome | Auto (`9223..=9232`, else OS free port) |
 | `CHROME_STREAM_PORT_FILE` | Explicit path to Chrome `DevToolsActivePort` | Auto-discovered |
 | `CHROME_STREAM_USER_DATA_DIR` | Custom Chrome user data directory for port-file scan | Standard macOS/Linux paths |
 | `CHROME_STREAM_CHROME_BIN` | Explicit Chrome/Chromium executable for `launch_remote` | Platform Chrome candidates |

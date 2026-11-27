@@ -136,7 +136,7 @@ pub fn run_relay_daemon(cfg: &Config) -> Result<(), String> {
     create_private_directory(&cfg.data_dir)
         .map_err(|e| format!("Could not prepare relay data directory: {e}"))?;
 
-    let cdp = CdpClient::new_with_candidates(cfg.port_files.clone(), cfg.debug_port);
+    let cdp = CdpClient::from_config(cfg);
     match serve_relay_socket(
         &cfg.relay_sock,
         &cfg.data_dir,
@@ -542,6 +542,7 @@ fn dispatch_rpc(
                     "ok": connection_mode.is_some(),
                     "connected": connection_mode.is_some(),
                     "connectionMode": connection_mode,
+                    "remotePort": cdp.connected_remote_port(),
                     "paused": cdp.is_paused(),
                     "pauseEpoch": cdp.pause_epoch(),
                     "screencastPausedIdle": false,
@@ -666,6 +667,8 @@ fn dispatch_rpc(
             Ok(json!({
                 "ok": true,
                 "connected": connected,
+                "connectionMode": cdp.connection_mode(),
+                "remotePort": cdp.connected_remote_port(),
                 "paused": paused,
                 "pauseEpoch": pause_epoch,
                 "portFile": cdp.public_port_file(),
@@ -685,6 +688,7 @@ fn dispatch_rpc(
                 "ok": true,
                 "connected": connected,
                 "connectionMode": cdp.connection_mode(),
+                "remotePort": cdp.connected_remote_port(),
                 "paused": paused,
                 "standby": mode == "standby" && paused,
                 "mode": mode,
@@ -1012,18 +1016,178 @@ mod tests {
         )
         .unwrap();
         assert_eq!(launched["connectionMode"], "remote");
+        assert_eq!(launched["remotePort"], port);
+        assert_eq!(launched["portFile"]["port"], port);
         assert_eq!(launched["qualityApplied"], "high");
         assert_eq!(launched["activeTargetId"], "t1");
         assert_eq!(launched["connected"], true);
         assert_eq!(urls.recv().unwrap(), url);
-        assert_eq!(cdp.status_snapshot(1, "test")["connectionMode"], "remote");
+        let st = cdp.status_snapshot(1, "test");
+        assert_eq!(st["connectionMode"], "remote");
+        assert_eq!(st["remotePort"], port);
+        assert_eq!(st["portFile"]["port"], port);
         let poll = cdp
             .poll_frame(
                 serde_json::from_value(json!({ "qualityPreset": "high", "waitMs": 0 })).unwrap(),
             )
             .unwrap();
         assert_eq!(poll["connectionMode"], "remote");
+        assert_eq!(poll["remotePort"], port);
         responder.join().unwrap();
+    }
+
+    #[test]
+    fn remote_port_tracks_across_status_standby_wake_disconnect_and_personal_switch() {
+        use std::net::TcpListener;
+
+        let endpoint = TestEndpoint::new();
+        let personal_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let personal_port = personal_listener.local_addr().unwrap().port();
+        let port_file = endpoint.dir.join("DevToolsActivePort");
+        fs::write(
+            &port_file,
+            format!("{personal_port}\n/devtools/browser/personal\n"),
+        )
+        .unwrap();
+
+        let remote_profile = endpoint.dir.join("remote-profile");
+        fs::create_dir(&remote_profile).unwrap();
+        let remote_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote_port = remote_listener.local_addr().unwrap().port();
+        assert_ne!(remote_port, personal_port);
+        fs::write(
+            remote_profile.join(".chrome-stream-endpoint"),
+            format!("{remote_port}\n/devtools/browser/remote-dedicated\n"),
+        )
+        .unwrap();
+
+        let remote_url = format!("ws://127.0.0.1:{remote_port}/devtools/browser/remote-dedicated");
+        let served_url = remote_url.clone();
+        let stop_http = Arc::new(AtomicBool::new(false));
+        let stop_http_worker = Arc::clone(&stop_http);
+        remote_listener.set_nonblocking(true).unwrap();
+        let responder = thread::spawn(move || {
+            while !stop_http_worker.load(Ordering::Acquire) {
+                match remote_listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut request = BufReader::new(&stream);
+                        let mut line = String::new();
+                        if request.read_line(&mut line).is_ok() {
+                            while line != "\r\n" {
+                                line.clear();
+                                if request.read_line(&mut line).unwrap_or(0) == 0 {
+                                    break;
+                                }
+                            }
+                            let body = json!({ "webSocketDebuggerUrl": served_url }).to_string();
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let (dialed, urls) = mpsc::channel();
+        let cdp = CdpClient::with_remote_factory(
+            port_file,
+            personal_port,
+            None,
+            Some(endpoint.dir.clone()),
+            Arc::new(move |target, _, on_event| {
+                dialed.send(target.to_string()).unwrap();
+                Ok(mock_transport(on_event))
+            }),
+        );
+
+        // Before connecting, status shows Personal Chrome ready on personal_port.
+        let initial = cdp.status_snapshot(1, "test");
+        assert_eq!(initial["connected"], false);
+        assert_eq!(initial["portFile"]["valid"], true);
+        assert_eq!(initial["portFile"]["port"], personal_port);
+        assert!(initial["remotePort"].is_null());
+
+        // Launch Remote connects cleanly to dedicated remote_port without touching personal_port.
+        let launched = dispatch_rpc(&cdp, &endpoint.dir, "launch_remote", json!({})).unwrap();
+        assert_eq!(launched["connected"], true);
+        assert_eq!(launched["connectionMode"], "remote");
+        assert_eq!(launched["remotePort"], remote_port);
+        assert_eq!(launched["portFile"]["port"], remote_port);
+        assert_eq!(urls.recv().unwrap(), remote_url);
+
+        // Standby keeps remote_port and Wake/connect(remote) resumes without redialing.
+        let standby = dispatch_rpc(
+            &cdp,
+            &endpoint.dir,
+            "disconnect",
+            json!({ "mode": "standby" }),
+        )
+        .unwrap();
+        assert_eq!(standby["connected"], true);
+        assert_eq!(standby["paused"], true);
+        assert_eq!(standby["connectionMode"], "remote");
+        assert_eq!(standby["remotePort"], remote_port);
+        let woke =
+            dispatch_rpc(&cdp, &endpoint.dir, "connect", json!({ "mode": "remote" })).unwrap();
+        assert_eq!(woke["connected"], true);
+        assert_eq!(woke["paused"], false);
+        assert_eq!(woke["connectionMode"], "remote");
+        assert_eq!(woke["remotePort"], remote_port);
+        assert!(
+            urls.try_recv().is_err(),
+            "wake from standby must not redial"
+        );
+
+        // Revoke disconnects and offline status reports Personal Chrome ready on personal_port.
+        let revoked = dispatch_rpc(
+            &cdp,
+            &endpoint.dir,
+            "disconnect",
+            json!({ "mode": "revoke" }),
+        )
+        .unwrap();
+        assert_eq!(revoked["connected"], false);
+        assert!(revoked["remotePort"].is_null());
+        assert_eq!(revoked["portFile"]["port"], personal_port);
+
+        // Explicit connect(mode: "remote") reconnects to the live managed Remote Chrome on remote_port.
+        let reconnected =
+            dispatch_rpc(&cdp, &endpoint.dir, "connect", json!({ "mode": "remote" })).unwrap();
+        assert_eq!(reconnected["connected"], true);
+        assert_eq!(reconnected["connectionMode"], "remote");
+        assert_eq!(reconnected["remotePort"], remote_port);
+        assert_eq!(reconnected["portFile"]["port"], remote_port);
+        assert_eq!(urls.recv().unwrap(), remote_url);
+
+        // Switching back to Personal Chrome connects to personal_port and clears remotePort.
+        let switched = dispatch_rpc(
+            &cdp,
+            &endpoint.dir,
+            "connect",
+            json!({ "mode": "personal" }),
+        )
+        .unwrap();
+        assert_eq!(switched["connected"], true);
+        assert_eq!(switched["connectionMode"], "personal");
+        assert!(switched["remotePort"].is_null());
+        assert_eq!(switched["portFile"]["port"], personal_port);
+        assert_eq!(
+            urls.recv().unwrap(),
+            format!("ws://127.0.0.1:{personal_port}/devtools/browser/personal")
+        );
+
+        stop_http.store(true, Ordering::Release);
+        responder.join().unwrap();
+        drop(personal_listener);
     }
 
     #[test]

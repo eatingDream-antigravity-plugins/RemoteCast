@@ -187,6 +187,12 @@ pub fn stage_status_from_snapshot(snap: &Value) -> Value {
         Some(mode @ ("personal" | "remote")) => json!(mode),
         _ => Value::Null,
     };
+    out["remotePort"] = snap["remotePort"]
+        .as_u64()
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|&port| port > 0)
+        .map(|port| json!(port))
+        .unwrap_or(Value::Null);
     out["portFile"] = json!({
         "exists": snap["portFile"]["exists"].as_bool().unwrap_or(false),
         "valid": snap["portFile"]["valid"].as_bool().unwrap_or(false),
@@ -461,6 +467,12 @@ impl SwrBootCache {
         if let Some(mode) = sc.get("connectionMode") {
             mode_changed = snap.get("connectionMode") != Some(mode);
             snap["connectionMode"] = mode.clone();
+            if mode == "personal" {
+                snap["remotePort"] = Value::Null;
+            }
+        }
+        if let Some(rp) = sc.get("remotePort") {
+            snap["remotePort"] = rp.clone();
         }
         for key in ["locale", "pauseEpoch", "connecting"] {
             if let Some(value) = sc.get(key) {
@@ -478,6 +490,7 @@ impl SwrBootCache {
 
         if connected == Some(false) {
             snap["connectionMode"] = Value::Null;
+            snap["remotePort"] = Value::Null;
             snap["crisp"] = json!(false);
             snap["format"] = Value::Null;
             snap["paused"] = json!(false);

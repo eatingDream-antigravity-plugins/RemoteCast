@@ -7,6 +7,7 @@ mod relay;
 mod stream;
 
 use crate::cdp::discovery::{discover_port_file, probe_debug_port_ws_url, PortFileStatus};
+use crate::cdp::launcher::discover_managed_remote_ws_url;
 use crate::config::{Config, APP_VERSION};
 use crate::i18n::{current_lang, Lang};
 use crate::relay::ipc::{probe_relay_ping, RelayBackend, RelayClient};
@@ -45,7 +46,11 @@ fn print_usage() {
 fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
     let lang = current_lang();
     let port_file = discover_port_file(&cfg.port_files);
-    let debug_port_ws = if port_file.valid {
+    let managed_remote = cfg
+        .remote_port
+        .and_then(|port| probe_debug_port_ws_url(port).map(|_| port))
+        .or_else(|| discover_managed_remote_ws_url(&cfg.data_dir).map(|(port, _)| port));
+    let debug_port_ws = if port_file.valid || managed_remote.is_some() {
         None
     } else {
         probe_debug_port_ws_url(cfg.debug_port)
@@ -62,7 +67,7 @@ fn run_doctor(cfg: &Config, as_json: bool) -> ExitCode {
     let report = doctor_report(
         cfg,
         &port_file,
-        debug_port_ws.is_some(),
+        managed_remote.is_some() || debug_port_ws.is_some(),
         relay_ping.as_ref(),
         relay_status.as_ref(),
     );

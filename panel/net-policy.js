@@ -2,7 +2,7 @@
 const TIERS = ["ultra", "low", "medium", "high"];
 export const REP = new Set("Backspace Delete ArrowUp ArrowDown ArrowLeft ArrowRight PageUp PageDown Tab".split(" "));
 export const isTargetErrorText = (m) => /no target with given id|target closed|session with given id not found|inspected target navigated or closed|target.*destroyed/i.test(String(m || ""));
-export const rttBand = (ms) => { const n = Number(ms); return !Number.isFinite(n) || n <= 0 ? "ok" : n >= 200 ? "er" : n >= 80 ? "wn" : "ok"; };
+export const rttBand = (ms) => { const n = +ms; return !nFin(n) || n <= 0 ? "ok" : n >= 200 ? "er" : n >= 80 ? "wn" : "ok"; };
 export const parsePanelLocaleTag = (raw) => {
   const s = String(raw || "").trim().toLowerCase().replace(/_/g, "-");
   return !s || /^(c|posix|utf-8)$/.test(s) ? null : /^zh($|-)|-(hans|hant)/.test(s) ? "zh-CN" : "en";
@@ -25,7 +25,7 @@ export class AdaptiveBandwidthController {
   getEffectiveQuality() { return this.mode === "auto" ? this.effectiveTier : this.mode; }
   _t(r, b, n) { return r >= 750 || (b >= 14000 && n >= 850) ? "ultra" : r >= 350 || (b >= 14000 && n >= 420) ? "low" : r >= 140 ? "medium" : "high"; }
   recordSample({ totalMs: tm, serverMs: sm = 0, imageBytes: ib = 0, now: nw = Date.now() }) {
-    const s = this, net = Math.max(1, Math.round((Number(tm) || 0) - Math.max(0, Number(sm) || 0)));
+    const s = this, net = Math.max(1, Math.round((+tm || 0) - Math.max(0, +sm || 0)));
     s.lastNetRttMs = net;
     const r = !s.calibrated || s.ewmaRttMs <= 0 ? net : Math.round(s.ewmaRttMs * 0.75 + net * 0.25);
     s.ewmaRttMs = r;
@@ -82,7 +82,7 @@ export const coalesceInputEvents = (raw) => {
       p.x = e.x; p.y = e.y; continue;
     }
     if (pa === "key" && p.key === e.key && (p.modifiers || 0) === (e.modifiers || 0) && REP.has(e.key)) {
-      const n = (Number(p.repeat) || 1) + (Number(e.repeat) || 1);
+      const n = (+p.repeat || 1) + (+e.repeat || 1);
       if (n <= 20) { p.repeat = n; continue; }
     }
     out.push({ ...e });
@@ -109,11 +109,11 @@ export const isSafeImageUrl = (u) => typeof u === "string" && u.startsWith("data
 export const applyFramePayloadState = (S, d, reqEpoch = S.ep, totalMs = 0) => {
   if (!shouldApplyFrameResponse({ reqEpoch, currentEpoch: S.ep, currentTargetId: S.aid, payload: d }).apply) return null;
   S.on = true;
-  const srvEp = Number(d.epoch);
+  const srvEp = +d.epoch;
   nFin(srvEp) && srvEp > 0 && (S.tep = srvEp);
   d.connectionMode && (S.cm = d.connectionMode);
   if (typeof d.paused === "boolean") {
-    const pe = Number(d.pauseEpoch), ok = nFin(pe), cur = Number(S.pe) || 0;
+    const pe = +d.pauseEpoch, ok = nFin(pe), cur = +S.pe || 0;
     (ok ? pe > cur || (!totalMs && pe >= cur) : !totalMs) && (ok && (S.pe = pe), S.pa = d.paused, S.st = !d.paused);
   }
   S.id = !S.pa && !!d.screencastPausedIdle; S.dlg = d.dialog || null; S.nv = false;
