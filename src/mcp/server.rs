@@ -105,6 +105,13 @@ impl HtmlCache {
     }
 }
 
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn serialize_boot_data(val: &impl Serialize) -> String {
     let raw = serde_json::to_string(val).unwrap_or_else(|_| "null".to_string());
     let mut out = String::with_capacity(raw.len() + 32);
@@ -151,6 +158,9 @@ impl BootSnapshot {
         redact_relay_payload(&mut metadata);
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert("appVersion".to_string(), json!(APP_VERSION));
+            if obj.get("bootTs").and_then(Value::as_u64).is_none() {
+                obj.insert("bootTs".to_string(), json!(now_epoch_ms()));
+            }
         }
         Some(Self { metadata, image })
     }
@@ -603,6 +613,7 @@ impl SwrBootCache {
 
         redact_relay_payload(snap);
         snap["appVersion"] = json!(APP_VERSION);
+        snap["bootTs"] = json!(now_epoch_ms());
         st.updated_at = Some(Instant::now());
     }
 }
@@ -788,9 +799,16 @@ impl McpServer {
             .apps_capable()
             .then(|| self.swr_cache.get_swr(Duration::from_millis(1200)))
             .flatten();
-        if let (Some(bd), Some(store)) = (boot_data.as_mut(), self.settings.as_ref()) {
-            attach_settings_snapshot(&mut bd.metadata, Some(store));
-        } else if boot_data.is_none() && self.apps_capable() {
+        if let Some(bd) = boot_data.as_mut() {
+            if let Some(store) = self.settings.as_ref() {
+                attach_settings_snapshot(&mut bd.metadata, Some(store));
+            }
+            if bd.metadata.get("bootTs").and_then(Value::as_u64).is_none() {
+                if let Some(obj) = bd.metadata.as_object_mut() {
+                    obj.insert("bootTs".to_string(), json!(now_epoch_ms()));
+                }
+            }
+        } else if self.apps_capable() {
             if let Some(store) = self.settings.as_ref() {
                 let mut meta = json!({ "connected": false });
                 attach_settings_snapshot(&mut meta, Some(store));
@@ -1748,5 +1766,79 @@ mod tests {
             release_tx.send(()).unwrap();
         }
         worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn resources_read_injects_boot_ts_and_disconnected_settings_fallback_without_auto_dialing() {
+        struct FailingRelay {
+            calls: AtomicUsize,
+        }
+        impl RelayBackend for FailingRelay {
+            fn call(
+                &self,
+                method: &str,
+                _params: Value,
+                _timeout: Duration,
+            ) -> Result<Value, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    matches!(method, "boot_snapshot" | "status"),
+                    "resources/read must never dial Chrome via {method}"
+                );
+                Err("relay down".into())
+            }
+        }
+
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "chrome-stream-boot-ts-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let html_path = dir.join("panel.html");
+        fs::write(&html_path, "<script>/*__CHROME_STREAM_BOOT__*/</script>").unwrap();
+
+        // 1. Warm BootSnapshot includes bootTs
+        let srv_warm = McpServer::new(dummy_relay(), html_path.clone());
+        initialize(&srv_warm, apps_capabilities());
+        let warm_read = srv_warm
+            .handle_message(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": { "uri": STAGE_URI }
+            }))
+            .unwrap();
+        let warm_html = warm_read["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(
+            warm_html.contains("\"bootTs\":"),
+            "warm boot snapshot must include bootTs: {warm_html}"
+        );
+
+        // 2. Disconnected settings fallback includes bootTs + connected:false + redacted settings
+        let store = SettingsStore::new(dir.clone());
+        store
+            .update_patch(json!({ "lang": "zh-CN", "defaultQuality": "high" }))
+            .unwrap();
+        let relay = Arc::new(FailingRelay {
+            calls: AtomicUsize::new(0),
+        });
+        let srv_fallback = McpServer::with_settings(
+            Arc::clone(&relay) as Arc<dyn RelayBackend>,
+            html_path,
+            Some(store),
+        );
+        initialize(&srv_fallback, apps_capabilities());
+        let fb_read = srv_fallback
+            .handle_message(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": STAGE_URI }
+            }))
+            .unwrap();
+        let fb_html = fb_read["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(fb_html.contains("\"connected\":false"));
+        assert!(fb_html.contains("\"bootTs\":"));
+        assert!(fb_html.contains("\"lang\":\"zh-CN\""));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -35,6 +35,19 @@ const DLG = "alert confirm prompt beforeunload".split(" "), DLG_K = "da df dp dl
 const PAGE_ACT = new Set<string>("click mousedown mouseup mousemove scroll type key dialog navigate back forward reload close_tab".split(" "));
 const BN = ["left", "middle", "right"] as const, BM = [1, 4, 2] as const;
 const ls = (k: string, v?: string): string => { try { return v === undefined ? localStorage.getItem(k) || "" : (localStorage.setItem(k, v), ""); } catch { return ""; } };
+type SwrBlob = { v?: number; savedAt?: number; data?: BootPayload };
+const SWR_K = "chrome_stream_swr";
+const readSwr = (): SwrBlob | null => {
+  try {
+    const r = ls(SWR_K), p = r ? (JSON.parse(r) as SwrBlob) : null;
+    return p && p.v === 1 && fin(p.savedAt) && p.data && typeof p.data === "object" ? p : null;
+  } catch { return null; }
+};
+const swr0 = readSwr();
+const b0Empty = b0.connected === undefined && !b0.bootTs;
+const useSwr = !!swr0 && (b0Empty || (swr0.savedAt as number) > (+(b0.bootTs ?? 0) || 0));
+const boot: BootPayload = useSwr ? { ...b0, ...swr0!.data } : b0;
+const freshBoot = !useSwr && typeof b0.bootTs === "number" && nowMs() - b0.bootTs < 2500;
 const CFGS: readonly [string, string, keyof CfgState, 0 | 1, string][] = [
   ["sl", "lg", "lang", 0, "auto:la|en:=English|zh-CN:=简体中文"],
   ["sq", "dq", "defaultQuality", 0, QK.map((k) => `${k}:q_${k}`).join("|")],
@@ -81,23 +94,23 @@ const ico = (idx: number, sz = 14, pid?: string): SVGSVGElement => {
 };
 
 const S: PanelState = {
-  on: !!b0.connected, cm: b0.connectionMode || "", cr: !!b0.crisp, fm: b0.format || "",
-  tabs: isA(b0.tabs) ? b0.tabs : [], th: b0.tabsHash || "",
-  aid: b0.activeTargetId || null, ep: +(b0.epoch ?? 1) || 1, tep: +(b0.epoch ?? 1) || 1, pe: +(b0.pauseEpoch ?? 0) || 0, pg: b0.page || {},
-  seq: b0.seq || 0, fh: b0.frameHash || "", by: b0.imageBytes || 0, uc: false,
-  nv: false, st: !b0.paused, pa: !!b0.paused, id: !!b0.screencastPausedIdle,
-  dlg: b0.dialog || null, nt: !!(b0.connected && isNoTabsPayload(b0)),
+  on: !!boot.connected, cm: boot.connectionMode || "", cr: !!boot.crisp, fm: boot.format || "",
+  tabs: isA(boot.tabs) ? boot.tabs : [], th: boot.tabsHash || "",
+  aid: boot.activeTargetId || null, ep: +(boot.epoch ?? 1) || 1, tep: +(boot.epoch ?? 1) || 1, pe: +(boot.pauseEpoch ?? 0) || 0, pg: boot.page || {},
+  seq: useSwr ? 0 : boot.seq || 0, fh: useSwr ? "" : boot.frameHash || "", by: useSwr ? 0 : boot.imageBytes || 0, uc: false,
+  nv: false, st: !boot.paused, pa: !!boot.paused, id: !!boot.screencastPausedIdle,
+  dlg: boot.dialog || null, nt: !!(boot.connected && isNoTabsPayload(boot)),
 };
-let cfg: CfgState = { lang: "auto", defaultQuality: "auto", defaultConnectMode: "auto", bgPollIntervalSec: 0, idlePauseSec: 12, ...(b0.settings as Partial<CfgState> | undefined) };
-let cfgPath = b0.settingsPath || "settings.json", cfgGen = +(b0.settingsGen ?? 0) || 0, cfgErr = b0.settingsError || "", hostCtx: HostContext | null = null;
+let cfg: CfgState = { lang: "auto", defaultQuality: "auto", defaultConnectMode: "auto", bgPollIntervalSec: 0, idlePauseSec: 12, ...(boot.settings as Partial<CfgState> | undefined) };
+let cfgPath = boot.settingsPath || "settings.json", cfgGen = +(boot.settingsGen ?? 0) || 0, cfgErr = boot.settingsError || "", hostCtx: HostContext | null = null;
 
 const pickLg = (c: HostContext | null = hostCtx): PanelLang =>
-  resolvePanelLang({ saved: cfg.lang && cfg.lang !== "auto" ? cfg.lang : ls("chrome_stream_lang"), hostLocale: (c?.locale || c?.language || "") as string, navLang: navigator?.language || "", bootLocale: b0.locale || "" });
-let curLg: PanelLang = pickLg(), T: I18nDict = I18N[curLg] || I18N.en, portF: PortFileInfo | null = b0.portFile || null, tabSig = "", qApp = b0.qualityApplied || "low";
+  resolvePanelLang({ saved: cfg.lang && cfg.lang !== "auto" ? cfg.lang : ls("chrome_stream_lang"), hostLocale: (c?.locale || c?.language || "") as string, navLang: navigator?.language || "", bootLocale: boot.locale || b0.locale || "" });
+let curLg: PanelLang = pickLg(), T: I18nDict = I18N[curLg] || I18N.en, portF: PortFileInfo | null = boot.portFile || null, tabSig = "", qApp = boot.qualityApplied || "low";
 let errCode: string | null = null, errRaw: string | null = null, errDet = 0, cErr = false, hadTabs = S.tabs.length > 0;
-let isCn: string | 0 = 0, isDisc = 0, isPa = 0, isSw = 0, isSb = !!(b0.connected && (b0.standby === true || (b0.paused === true && b0.standby !== false))), qMode: QualityMode = (QK.includes(cfg.defaultQuality) ? cfg.defaultQuality : "auto") as QualityMode, lastMode = "personal", dlgKey = "", imeOn = false, popOn = false, setOn = false;
+let isCn: string | 0 = 0, isDisc = 0, isPa = 0, isSw = 0, isSb = !!(boot.connected && (boot.standby === true || (boot.paused === true && boot.standby !== false))), qMode: QualityMode = (QK.includes(cfg.defaultQuality) ? cfg.defaultQuality : "auto") as QualityMode, lastMode = "personal", dlgKey = "", imeOn = false, popOn = false, setOn = false;
 let qIn: Array<[InputEventPayload, string | null, number]> = [], inB = 0, inT: Tm = 0, pB = 0, pT: Tm = 0, oT: Tm = 0, oB = 0, urg: { f: boolean } | 0 = 0, act = nowMs(), tT: Tm = 0, dropTimers = (): void => {};
-let pErr = 0, offErr = 0, offUrg = 0, lastFetchAt = b0.connected ? nowMs() : 0, lastForceAt = 0, stopReveal: (() => void) | null = null;
+let pErr = 0, offErr = 0, offUrg = 0, pollSeq = 0, lastFetchAt = boot.connected ? (freshBoot ? +(b0.bootTs || nowMs()) : nowMs()) : 0, lastForceAt = 0, stopReveal: (() => void) | null = null;
 let pGen = 0, painted = 0, started = 0, synced = 0, ready = 0, tSig = "", lAr = 0, fTimes: number[] = [], fpsVal = 0, saveT: Tm = 0;
 const closing = new Set<string>(), tMap = new Map<string, HTMLElement>();
 let lNodes: HTMLElement[] = [], gNodes: HTMLElement[] = [], qBtns: HTMLElement[] = [], lgBtns: HTMLElement[] = [];
@@ -139,6 +152,11 @@ const syncPe = (d: FramePayload | null | undefined, fb?: boolean): number => {
   return typeof d?.paused === "boolean" && (g || fb) ? ((S.st = !(S.pa = d.paused)), g ? 1 : 0) : 0;
 };
 const clrTm = (w: number | boolean): void => { if (w) { cTm(pT); pT = 0; } else { cTm(oT); oT = 0; } };
+const saveSwr = (): void => {
+  const pf = portF ? { exists: !!portF.exists, valid: !!portF.valid, stale: !!portF.stale, fallback: !!portF.fallback, port: portF.port ?? null } : null;
+  const st = { ...cfg } as Record<string, unknown>; delete st.portFile; delete st.userDataDir;
+  ls(SWR_K, JSON.stringify({ v: 1, savedAt: nowMs(), data: { connected: S.on, connectionMode: S.cm || null, tabs: S.tabs, tabsHash: S.th, activeTargetId: S.aid, page: S.pg, qualityApplied: qApp, paused: S.pa, standby: isSb, noTabs: S.nt, portFile: pf, settings: st } }));
+};
 const hideCvs = (): void => { painted = 0; hd(D.vc, 1); D.vc.className = "c"; hd(D.ph, 0); hd(D.pb, 1); };
 const liveSched = (): void => { if (S.on && !isSb && S.st && !S.pa && !isDisc) sched(nextMs(0), 0); };
 
@@ -213,32 +231,32 @@ const syncPauseUi = (): void => {
 
 const schedOffP = (ms = net.computeOfflinePollDelay({ hidden: hid(), errCount: offErr })): void => {
   clrTm(0);
-  if (ms >= 0 && (!S.on || isSb) && !isCn && !isDisc && canCall()) oT = sTm(() => { oT = 0; void probeOff(); }, ms);
+  if (!hid() && ms >= 0 && (!S.on || isSb) && !isCn && !isDisc && canCall()) oT = sTm(() => { oT = 0; void probeOff(); }, ms);
 };
 const probeOff = async (): Promise<void> => {
   if ((S.on && !isSb) || isCn || isDisc || oB || !canCall()) return;
-  oB = 1; const t0 = pNow();
+  oB = 1; const seq = ++pollSeq, t0 = pNow();
   try {
     const d = await reqFrame(0, 0, 0);
+    if (seq !== pollSeq || isCn || isDisc) return;
     lastFetchAt = nowMs(); offErr = d?.error ? Math.min(4, offErr + 1) : 0;
     if (!d?.screencastPausedIdle) net.recordSample({ totalMs: rnd(pNow() - t0), serverMs: d?.serverMs || 0, imageBytes: 0 });
-    if (isCn || isDisc) return;
-    if (d?.connected === false) { if (isSb) { isSb = false; goOff(eCode(d), d.error, d.portFile); return; } setPf(d); uOff(); }
+    if (d?.connected === false) { if (isSb) { isSb = false; goOff(eCode(d), d.error, d.portFile); return; } setPf(d); uOff(); saveSwr(); }
     else if (d?.connected === true && (d.paused || d.standby)) {
       const wasSb = isSb;
       S.on = true; isSb = true; S.pa = true; S.st = false; S.id = false; S.nt = isNoTabsPayload(d);
-      setPf(d); syncPe(d, true); syncTabList(d); wasSb ? uOff() : sView();
+      setPf(d); syncPe(d, true); syncTabList(d); wasSb ? uOff() : sView(); saveSwr();
     } else if (d?.connected) { isSb = false; act = nowMs(); onPoll(d, 0, S.ep); liveSched(); return; }
     else if (d) { setPf(d); if (!S.on) uOff(); }
-  } catch { offErr = Math.min(4, offErr + 1); } finally {
+  } catch { if (seq !== pollSeq) return; offErr = Math.min(4, offErr + 1); } finally {
     oB = 0; if ((!S.on || isSb) && !isCn && !isDisc) schedOffP(offUrg ? 20 : undefined); offUrg = 0;
   }
 };
 const goOff = (code?: string | null, raw?: unknown, pf?: PortFileInfo): void => {
-  S.on = S.pa = S.id = S.nt = S.cr = S.nv = isSb = false; isDisc = isPa = isSw = 0; cErr = false; hadTabs = false;
+  pollSeq++; S.on = S.pa = S.id = S.nt = S.cr = S.nv = isSb = false; isDisc = isPa = isSw = 0; cErr = false; hadTabs = false;
   S.dlg = null; S.st = true; S.th = S.cm = S.fm = "";
   errCode = code || null; errRaw = raw ? eRaw(raw) : null; errDet = 0; fTimes = []; fpsVal = 0; if (pf) portF = pf;
-  dropIn(); clrTm(1); sView(); schedOffP();
+  dropIn(); clrTm(1); sView(); saveSwr(); schedOffP();
 };
 const uOff = (): void => {
   const ok = !!portF?.valid;
@@ -272,7 +290,7 @@ const syncCfg = (d: FramePayload, quiet?: number): void => {
   if (d.settings && typeof d.settings === "object" && (!g || g > cfgGen || quiet)) {
     const ext = !quiet && cfgGen > 0 && g > cfgGen && !saveT;
     if (g > cfgGen) cfgGen = g;
-    cfg = { ...cfg, ...(d.settings as Partial<CfgState>) }; syncNetCfg();
+    cfg = { ...cfg, ...(d.settings as Partial<CfgState>) }; syncNetCfg(); saveSwr();
     const nl = pickLg(); if (nl !== curLg) { curLg = nl; applyLangUi(); }
     if (setOn || ec || quiet) syncCfgUi();
     if (ext) toast(T.trl);
@@ -291,7 +309,7 @@ const applyLangUi = (): void => {
 };
 const setSS = (m: string, c = ""): void => { tx(D.ss, m); D.ss.className = c; };
 const saveCfg = async (patch: Record<string, unknown>): Promise<void> => {
-  cfg = { ...cfg, ...(patch as Partial<CfgState>) }; syncNetCfg();
+  cfg = { ...cfg, ...(patch as Partial<CfgState>) }; syncNetCfg(); saveSwr();
   if ("lang" in patch) { ls("chrome_stream_lang", patch.lang === "auto" ? "" : String(patch.lang)); const nx = pickLg(); if (nx !== curLg) { curLg = nx; applyLangUi(); } }
   if ("defaultQuality" in patch && typeof patch.defaultQuality === "string" && QK.includes(patch.defaultQuality)) setQ(patch.defaultQuality, 1);
   if (!canCall()) return;
@@ -382,9 +400,9 @@ const mount = (): void => {
         isSb = false; S.tabs = []; S.aid = null; rstF(1); goOff(null, null, d.portFile); toast(T.td); return;
       }
       if (!rev && d?.connected === true && (d?.paused || d?.standby) && d?.ok !== false && !d?.unconfirmed) {
-        isDisc = 0; isSb = true; S.pa = true; S.st = false; S.id = false;
+        pollSeq++; isDisc = 0; isSb = true; S.pa = true; S.st = false; S.id = false;
         const pe = +(d.pauseEpoch ?? NaN); if (fin(pe) && pe > S.pe) S.pe = pe;
-        setPf(d); setErr(); sView(); schedOffP(); toast(T.tsb); return;
+        setPf(d); setErr(); sView(); saveSwr(); schedOffP(); toast(T.tsb); return;
       }
       setPErr(d, "ed", 1);
     } catch (e) { setBErr(e, 1); }
@@ -398,8 +416,8 @@ const mount = (): void => {
       if (d?.connected === false && !isRec(d)) { isCn = 0; isSb = false; goOff(eCode(d, "e_conn_lost"), d.error, d.portFile); return; }
       if (!d || d.ok === false) { isCn = 0; setPErr(d, "ep", 1); uOff(); schedOffP(); return; }
       const pe = +(d.pauseEpoch ?? NaN); if (fin(pe) && pe >= S.pe) S.pe = pe;
-      isCn = 0; isSb = false; S.pa = typeof d.paused === "boolean" ? d.paused : false; S.st = !S.pa; S.ep++; S.id = false; act = nowMs(); setErr();
-      sView(); uSt(); toast(T.trs); if (!S.pa) { askUrg(1); liveSched(); } else schedOffP();
+      pollSeq++; isCn = 0; isSb = false; S.pa = typeof d.paused === "boolean" ? d.paused : false; S.st = !S.pa; S.ep++; S.id = false; act = nowMs(); setErr();
+      sView(); uSt(); saveSwr(); toast(T.trs); if (!S.pa) { askUrg(1); liveSched(); } else schedOffP();
     } catch (e) { isCn = 0; setBErr(e, 1); uOff(); schedOffP(); }
   };
   const togglePa = async (): Promise<void> => {
@@ -410,7 +428,7 @@ const mount = (): void => {
       if (d?.connected === false && !isRec(d)) return goOff(eCode(d, "e_conn_lost"), d.error, d.portFile);
       if (!d || d.ok === false) { setPErr(d, "ep", 1); isPa = 0; syncPauseUi(); askUrg(1); return; }
       const pe = +(d.pauseEpoch ?? NaN); if (fin(pe) && pe >= S.pe) S.pe = pe;
-      S.pa = typeof d.paused === "boolean" ? d.paused : want; S.st = !S.pa; S.ep++; S.id = false; act = nowMs(); setErr(); toast(S.pa ? T.tpa : T.trs);
+      pollSeq++; S.pa = typeof d.paused === "boolean" ? d.paused : want; S.st = !S.pa; S.ep++; S.id = false; act = nowMs(); setErr(); saveSwr(); toast(S.pa ? T.tpa : T.trs);
     } catch (e) { setBErr(e, 1); }
     isPa = 0; syncPauseUi(); S.pa ? clrTm(1) : askUrg(1);
   };
@@ -530,8 +548,8 @@ const setQ = (v: string, silent?: number): void => {
   qBtns.forEach((b) => { const onQ = b.dataset.q === v; sa(b, "aria-checked", onQ); tg(b, "on", onQ); });
   uSt(); if (!silent) toast(`✓ ${qLbl()}`); if (S.on && !isSb) askUrg(1);
 };
-const chgTab = (tid: string | null): void => { dropIn(); S.aid = tid; S.id = false; S.dlg = null; S.ep++; rstF(); setMeta(S.tabs.find((t) => t.targetId === tid)); syncBnr(); setSw(tid ? 1 : 0); };
-const swTab = (tid: string): void => { if (tid && tid !== S.aid) { chgTab(tid); uTabs(); uSt(); evIn("switch_tab", { targetId: tid }, 1, tid, S.tep); } };
+const chgTab = (tid: string | null): void => { pollSeq++; dropIn(); S.aid = tid; S.id = false; S.dlg = null; S.ep++; rstF(); setMeta(S.tabs.find((t) => t.targetId === tid)); syncBnr(); setSw(tid ? 1 : 0); };
+const swTab = (tid: string): void => { if (tid && tid !== S.aid) { chgTab(tid); uTabs(); uSt(); saveSwr(); evIn("switch_tab", { targetId: tid }, 1, tid, S.tep); } };
 const clTab = (tid: string): void => {
   if (!tid || closing.has(tid)) return;
   closing.add(tid); hadTabs = true;
@@ -539,7 +557,7 @@ const clTab = (tid: string): void => {
   S.tabs = o.tabs; S.th = ""; S.id = false;
   if (o.wasActive) chgTab(o.activeTargetId);
   if (!o.tabs.length) { S.nt = true; setSw(0); syncPh(); }
-  uTabs(); uSt(); toast(T.tcl); evIn("close_tab", { targetId: tid }, 1, tid, tep);
+  uTabs(); uSt(); saveSwr(); toast(T.tcl); evIn("close_tab", { targetId: tid }, 1, tid, tep);
 };
 const mkTab = (tid: string): HTMLElement => {
   const x = h("b.x", `t=×;@l=${T.ct}`), node = h(".p", "tabindex=0;R=tab", ["s.tt"], x);
@@ -579,6 +597,7 @@ const uSt = (): void => {
 const recover = (m?: string): void => { S.aid = S.dlg = null; rstF(1); if (m) toast(m); askUrg(1); };
 const onPoll = (d: FramePayload | undefined, totalMs: number, reqEpoch = S.ep): void => {
   if (!d) return;
+  const firstSync = !synced;
   if (totalMs > 0) synced = 1;
   if (d.connected === false) { setPf(d); isRec(d) ? recover(T.tsw) : goOff(eCode(d), d.error, d.portFile); return; }
   const wasPa = S.pa, oA = S.aid, oE = S.tep, hadBefore = S.tabs.length > 0, paintIt = applyFramePayloadState(S, d, reqEpoch, totalMs);
@@ -598,6 +617,7 @@ const onPoll = (d: FramePayload | undefined, totalMs: number, reqEpoch = S.ep): 
   uTabs(); syncBnr(); syncDots();
   S.nt || S.pa || S.dlg ? (setSw(0), (S.nv = false), syncPh()) : paintIt ? paint(d.imageDataUrl!) : (fitStage(), isSw && painted && S.fh && setSw(0), syncPh());
   uSt();
+  if (firstSync || !d.unchanged || sw || wasPa !== S.pa || oA !== S.aid || isA(d.tabs)) saveSwr();
 };
 const pushIn = (ev: InputEventPayload, imm = 1, tid = S.aid, tep = S.tep): void => {
   const wasIdle = S.id; act = nowMs(); S.cr = false;
@@ -640,20 +660,22 @@ const flIn = async (): Promise<void> => {
     inB = 0; uSt(); if (qIn.length) void flIn();
   }
 };
-const sched = (ms: number, f = 0): void => { clrTm(1); if (ms >= 0 && S.on && !isSb && !isDisc && (!S.pa || f)) pT = sTm(() => { pT = 0; void poll(f); }, ms); };
+const sched = (ms: number, f = 0): void => { clrTm(1); if ((!hid() || f) && ms >= 0 && S.on && !isSb && !isDisc && (!S.pa || f)) pT = sTm(() => { pT = 0; void poll(f); }, ms); };
 const askUrg = (f = 0): void => { if (!S.on || isSb || isDisc || (S.pa && !f)) return; pB ? (urg = { f: !!(f || (urg && urg.f)) }) : sched(20, f); };
 const timing = (idleMs: number, inputBusy = 0) => net.computePollTiming({ idleMs, inputBusy: !!inputBusy, screencastIdle: S.id, hidden: hid(), errCount: pErr, settled: S.cr });
-const nextMs = (idleMs: number, busy = 0): number => (!hid() && S.nt ? 1200 : timing(idleMs, busy).nextDelayMs);
+const nextMs = (idleMs: number, busy = 0): number => (!hid() && S.nt ? Math.max(1200, Math.min(15000, rnd(net.ewmaRttMs * 3))) : timing(idleMs, busy).nextDelayMs);
 const reqFrame = (f: number, w: number, keep = 1): Promise<FramePayload | undefined> =>
   rpcSc("frame", { targetId: S.aid || undefined, sinceSeq: !f && keep ? S.seq : 0, lastFrameHash: S.fh || undefined, knownTabsHash: S.th || undefined, ...qArgs(), waitMs: f ? 0 : w, forceRefresh: !!f });
 const poll = async (f = 0): Promise<void> => {
   if (pB || isDisc || isSb || !canCall() || (!f && S.pa)) { if (f && pB && !isDisc && !isSb) urg = { f: true }; return; }
-  pB = 1; const ep = S.ep, t0 = pNow();
+  pB = 1; const ep = S.ep, seq = ++pollSeq, t0 = pNow();
   try {
     const d = await reqFrame(f, hid() ? 0 : S.nt ? 1000 : timing(nowMs() - act).waitMs);
+    if (seq !== pollSeq) return;
     lastFetchAt = nowMs(); pErr = d?.error && !d?.recovered ? Math.min(4, pErr + 1) : 0;
     onPoll(d, rnd(pNow() - t0), ep);
   } catch (err) {
+    if (seq !== pollSeq) return;
     pErr = Math.min(4, pErr + 1);
     isTargetErrorText((err as { message?: string } | null)?.message) ? ((S.aid = null), rstF(1), (urg = { f: true })) : setBErr(err);
   } finally {
@@ -663,7 +685,7 @@ const poll = async (f = 0): Promise<void> => {
 };
 const conn = async (mode = "personal", f = 0): Promise<void> => {
   if (isCn || !canCall()) return;
-  lastMode = mode; isCn = mode; setErr(); clrTm(0); if (!S.on) uOff();
+  lastMode = mode; isCn = mode; pollSeq++; setErr(); clrTm(0); if (!S.on) uOff();
   const ep = S.ep, t0 = pNow(), rem = mode === "launch";
   try {
     const c = await rpcSc(rem ? mode : "connect", !rem && mode !== "auto" ? { ...qArgs(), mode } : qArgs());
@@ -671,7 +693,7 @@ const conn = async (mode = "personal", f = 0): Promise<void> => {
     act = nowMs(); S.on = S.st = true; S.pa = S.id = isSb = false; S.pe = +(c.pauseEpoch ?? 0) || 0;
     setPf(c); if (c.activeTargetId) S.aid = c.activeTargetId; syncTabList(c);
     S.dlg = c.dialog || null; S.nt = isNoTabsPayload(c);
-    if (S.nt) { isCn = 0; sView(); syncPh(); uSt(); liveSched(); return; }
+    if (S.nt) { isCn = 0; sView(); syncPh(); uSt(); saveSwr(); liveSched(); return; }
     const d = await reqFrame(f || 1, 0, 0);
     isCn = 0; lastFetchAt = nowMs(); pErr = offErr = 0; onPoll(d, rnd(pNow() - t0), ep); liveSched();
   } catch (err) {
@@ -681,11 +703,15 @@ const conn = async (mode = "personal", f = 0): Promise<void> => {
 };
 const forceNow = (): void => {
   if (!ready) return;
-  const t = nowMs(); if (t - lastForceAt < 250) return;
+  const t = nowMs();
+  if (t - lastForceAt < 250) {
+    if (!hid()) S.on && !isSb ? !S.pa && !pB && !pT && liveSched() : !isCn && !isDisc && !oB && !oT && schedOffP();
+    return;
+  }
   lastForceAt = t; pErr = offErr = 0;
   S.on && !isSb ? !S.pa && ((act = t), S.id && ((S.id = false), syncPauseUi()), clrTm(1), void poll(1)) : !isCn && !isDisc && (clrTm(0), oB ? (offUrg = 1) : void probeOff());
 };
-const onHide = (): void => { if (ready) { S.on && !isSb && !S.pa && !pB && pT ? sched(nextMs(nowMs() - act, inB || qIn.length), 0) : (!S.on || isSb) && !isCn && !isDisc && !oB && oT && schedOffP(); } };
+const onHide = (): void => { if (ready) { clrTm(1); clrTm(0); urg = 0; offUrg = 0; } };
 
 ck(doc, (e: Event) => { const el = e.target as Element | null; if (popOn && !el?.closest?.("#pp,#bq")) setPop(false); if (setOn && !el?.closest?.("#sw,#bg,#bg0")) setSet(false); });
 on(doc, "keydown", (e: KeyboardEvent) => {
@@ -696,14 +722,14 @@ const syncHostCtx = (ctx: HostContext | null | undefined, fullCtx?: HostContext)
 const onResult = (r: { structuredContent?: unknown }): void => {
   const d = r?.structuredContent as FramePayload | undefined; if (!d) return;
   const sig = [!!d.connected, !!d.paused, !!d.standby, +(d.pauseEpoch ?? 0) || 0, !!d.portFile?.valid, +(d.portFile?.port ?? 0) || 0, d.activeTargetId, d.tabsHash, d.errorCode, d.error].join("|");
-  if (sig === tSig) { if (d.connected && !started && ready) { started = 1; lastForceAt = nowMs(); isSb ? schedOffP() : !S.pa && void poll(0); } return; }
-  tSig = sig; const wasLive = S.on && !isSb; setPf(d); syncPe(d, !synced || !!d.standby || d.mode === "standby");
+  if (sig === tSig) { if (d.connected && !started && ready) { started = 1; lastForceAt = nowMs(); isSb ? schedOffP() : !S.pa && (freshBoot ? liveSched() : void poll(0)); } return; }
+  tSig = sig; pollSeq++; const wasLive = S.on && !isSb; setPf(d); syncPe(d, !synced || !!d.standby || d.mode === "standby");
   if (d.activeTargetId && !synced) S.aid = d.activeTargetId;
   syncTabList(d); if ("dialog" in d) S.dlg = d.dialog || null;
   if (d.connected) {
     S.on = true; S.nt = isNoTabsPayload(d); act = lastFetchAt = nowMs();
     isSb = d.standby === true || d.mode === "standby" || (S.pa && (!wasLive || !painted) && d.standby !== false);
-    if (d.errorCode || d.error) setPErr(d); sView(); uTabs(); uSt();
+    if (d.errorCode || d.error) setPErr(d); sView(); uTabs(); uSt(); saveSwr();
     if (ready) { isSb ? schedOffP() : !S.pa && void poll(0); }
     return;
   }
@@ -714,16 +740,16 @@ app.ontoolresult = onResult; app.onhostcontextchanged = syncHostCtx;
 app.onteardown = () => { clrTm(1); clrTm(0); stopReveal?.(); stopReveal = null; return {}; };
 
 mount(); sView();
-if (b0.connected) {
-  if (+(b0.rttMs ?? 0) > 0) net.lastNetRttMs = net.ewmaRttMs = +(b0.rttMs ?? 0);
-  S.nt ? sUrl("") : b0.page && sUrl(b0.page.url || "");
+if (S.on) {
+  if (+(boot.rttMs ?? 0) > 0) net.lastNetRttMs = net.ewmaRttMs = +(boot.rttMs ?? 0);
+  S.nt ? sUrl("") : S.pg && sUrl(S.pg.url || "");
   uTabs(); uSt();
-  if (!S.nt && !isSb && b0.changed && isSafeImageUrl(b0.imageDataUrl)) paint(b0.imageDataUrl);
+  if (!S.nt && !isSb && !useSwr && b0.changed && isSafeImageUrl(b0.imageDataUrl)) paint(b0.imageDataUrl);
 }
 const initBridge = (): Promise<void> => (setErr(), app.connect().then(() => {
   ready = 1; syncHostCtx(app.getHostContext()); if (!canCall()) setErr("b_notools");
   uOff(); syncPauseUi(); stopReveal?.();
   stopReveal = setupRevealObservers({ onReveal: forceNow, onHide, getLastFetchAt: () => lastFetchAt, bridgeApp: app });
-  if (!started && canCall()) { started = 1; lastForceAt = nowMs(); S.on && !isSb ? !S.pa && void poll(0) : schedOffP(); }
+  if (!started && canCall()) { started = 1; lastForceAt = nowMs(); S.on && !isSb ? !S.pa && (freshBoot ? liveSched() : void poll(0)) : schedOffP(); }
 }).catch((err) => { ready = 0; uOff(); syncPauseUi(); setBErr(err); }));
 void initBridge();
