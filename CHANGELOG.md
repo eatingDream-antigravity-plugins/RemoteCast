@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.6.2](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.6.1...v0.6.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* harden panel XSS, installer, discovery, settings, and relay IPC ([#38](https://github.com/eatingDream-antigravity-plugins/remote-cast/issues/38)) ([4a95bec](https://github.com/eatingDream-antigravity-plugins/remote-cast/commit/4a95becd5b555ac38f47fc187836e8d385753111))
+
 ## [0.6.1](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.6.0...v0.6.1) (2026-11-27)
 
 
