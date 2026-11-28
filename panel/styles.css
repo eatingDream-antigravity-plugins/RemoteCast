@@ -123,6 +123,7 @@ html, body, #app, .a, .tt, .s, .lb, #sp2, .sg button { overflow: hidden; }
 .dv { width: 1px; background: var(--l2); margin: 0 2px; }
 .f { max-width: 440px; margin: auto; padding: 16px; gap: 10px; }
 .bd.ok { background: #34D39924; }
+.bd.wn { color: var(--wn); background: #FBBF2424; border-color: #FBBF2440; }
 .bd.er { color: var(--er); background: #F871711A; border-color: #F8717138; }
 .nt { align-self: center; margin: 0 auto; text-align: center; line-height: 1.4; max-width: 320px; }
 .d, .ol li { border-top: 1px solid var(--l2); }
@@ -135,5 +136,6 @@ code { padding: 1px 4px; display: inline-block; max-width: 100%; white-space: no
 #sp2 { display: block; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; line-height: 20px; }
 @keyframes cp { 50% { box-shadow: 0 0 0 2px var(--bg), 0 0 0 5px #0000; } }
 @keyframes cs { 0% { transform: translateX(-100%); } to { transform: translateX(300%); } }
+@media (max-width: 640px) { #rv span { display: none; } #rv { width: 28px; padding: 0; } }
 @media (max-width: 500px) { .hb span, .w, .uk, .fp { display: none; } .hb, .i { width: 26px; padding: 0; } .a { padding: 4px 6px; } .nr { gap: 4px; } .in, .in:not(:focus) { padding: 0 8px; } .q { padding: 0 6px; } }
 @media (max-width: 420px) { .h { gap: 4px; } .h .l { display: none; } .p { max-width: 112px; } .nr { flex-wrap: wrap; } .u { order: 2; flex: 1 0 100%; } .pg, #bq, #bi { order: 1; } #bq { margin-left: auto; } .rm { max-width: 44px; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; } }

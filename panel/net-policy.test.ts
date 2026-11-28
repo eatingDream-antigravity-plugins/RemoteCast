@@ -1051,39 +1051,68 @@ describe("Remote Cast panel net-policy.ts", () => {
       const inputCountAfterPaste = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").length;
       assert.equal(inputCountAfterPaste, inputCountBeforePaste, "delayed Paste fallback must be dropped when popupSwitched mutates target/epoch");
 
-      // Overflow Revoke & Disconnect (#dc): unconfirmed error MUST keep panel online & banner sticky across live poll
+      // Primary Standby (#dc): unconfirmed error MUST keep panel online & banner sticky across live poll
       els.get("dc")!.listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
-      const discFailCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect").pop();
-      assert.equal(discFailCall?.params?.arguments?.mode, "revoke");
-      assert.equal(els.get("vn")!.hidden, false, "Revoke must NOT go offline optimistically before confirmation");
+      const standbyFailCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect").pop();
+      assert.equal(standbyFailCall?.params?.arguments?.mode, "standby");
+      assert.equal(els.get("vn")!.hidden, false, "Standby must NOT switch view optimistically before confirmation");
       msgHandler2!({
         source: win.parent,
-        data: { jsonrpc: "2.0", id: discFailCall!.id, result: { structuredContent: { ok: false, unconfirmed: true, error: "relay busy" } } },
+        data: { jsonrpc: "2.0", id: standbyFailCall!.id, result: { structuredContent: { ok: false, unconfirmed: true, error: "relay busy" } } },
       });
       await new Promise((r) => setTimeout(r, 30));
-      assert.equal(els.get("vn")!.hidden, false, "unconfirmed Revoke must remain online for retry");
+      assert.equal(els.get("vn")!.hidden, false, "unconfirmed Standby must remain online for retry");
       const stickyPoll2 = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_frame").pop();
       msgHandler2!({
         source: win.parent,
         data: { jsonrpc: "2.0", id: stickyPoll2!.id, result: { structuredContent: { connected: true, activeTargetId: "t-popup", changed: false, unchanged: true } } },
       });
       await new Promise((r) => setTimeout(r, 10));
-      assert.equal(els.get("bn")!.hidden, false, "follow-up live poll must NOT erase sticky Revoke failure banner");
+      assert.equal(els.get("bn")!.hidden, false, "follow-up live poll must NOT erase sticky Standby failure banner");
       // Dismiss (#dx) clears sticky banner
       els.get("dx")!.listeners.get("click")?.[0]?.();
       assert.equal(els.get("bn")!.hidden, true, "Dismiss must clear sticky control error");
 
-      // Retry Revoke and confirm connected:false -> now goes offline
+      // Retry Standby (#dc) and confirm connected:true, paused:true, standby:true -> enters Standby Ready card (#vo)
       els.get("dc")!.listeners.get("click")?.[0]?.();
       await new Promise((r) => setTimeout(r, 10));
+      const standbyOkCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect").pop();
+      assert.equal(standbyOkCall?.params?.arguments?.mode, "standby");
+      msgHandler2!({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: standbyOkCall!.id, result: { structuredContent: { ok: true, connected: true, paused: true, standby: true, pauseEpoch: 6 } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("vo")!.hidden, false, "confirmed Standby must show Standby Ready card");
+      assert.equal(els.get("op")!.textContent, "Standby · Grant Kept");
+      assert.equal(els.get("ob")!.textContent, "Resume Stream");
+      assert.equal(els.get("orv")!.hidden, false, "Standby Ready card must expose Revoke Grant button");
+
+      // Resume Stream (#ob) from Standby Ready -> sends resume without re-dialing connect, returns to live #vn
+      els.get("ob")!.listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
+      const resumeStandbyCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_input").pop();
+      assert.equal(resumeStandbyCall?.params?.arguments?.events?.[0]?.action, "resume");
+      msgHandler2!({
+        source: win.parent,
+        data: { jsonrpc: "2.0", id: resumeStandbyCall!.id, result: { structuredContent: { ok: true, connected: true, paused: false, pauseEpoch: 7 } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(els.get("vn")!.hidden, false, "confirmed Resume Stream must return to live view");
+
+      // Explicit Revoke (#rv) in live view sends mode:revoke -> confirmed connected:false -> Offline card
+      els.get("rv")!.listeners.get("click")?.[0]?.();
+      await new Promise((r) => setTimeout(r, 10));
       const discOkCall = posted.filter((m) => m.method === "tools/call" && m.params?.name === "chrome_stream_disconnect").pop();
+      assert.equal(discOkCall?.params?.arguments?.mode, "revoke");
       msgHandler2!({
         source: win.parent,
         data: { jsonrpc: "2.0", id: discOkCall!.id, result: { structuredContent: { ok: true, connected: false } } },
       });
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(els.get("vo")!.hidden, false, "confirmed Revoke must switch to offline view");
+      assert.equal(els.get("orv")!.hidden, true, "Offline view must hide Revoke Grant button");
 
       // Connect Personal Chrome (#ob) MUST send explicit mode:"personal"
       els.get("ob")!.listeners.get("click")?.[0]?.();

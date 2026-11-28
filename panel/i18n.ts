@@ -1,6 +1,6 @@
 // Authoritative EN / ZH-CN UI & error copy for Remote Cast (exported as keyed objects for i18n parity & guard checks).
 export const I18N_KEYS: readonly string[] = (
-  "nf|rt|cm|os|oss|cn|ht|s1|s2|s3|tb|nt|ct|pa|rs|dc|rn|bk|fw|rl|up|ql|lv|ch|mc|sc|" +
+  "nf|rt|cm|os|oss|cn|ht|s1|s2|s3|tb|nt|ct|pa|rs|dc|dcl|rv3|rvl|sbb|rsb|rsg|sbn|tsb|tsbi|rn|bk|fw|rl|up|ql|lv|ch|mc|sc|" +
   "q_auto|q_ultra|q_low|q_medium|q_high|qt_auto|qt_ultra|qt_low|qt_medium|qt_high|" +
   "fs|ps|rv|nc|kb|lv2|nt0|nt0b|wc|wcb|ld|pp|ip|tp|ti|se|bs|un|cp|ps2|sa|su|sd|pd|id|" +
   "ok|ca|rp|da|df|dp|dl|ts|td|tpa|trs|trf|tcl|tsw|tsc|tnt|tcp|tps|trc|ttc|tdc|trl|" +
@@ -12,9 +12,9 @@ export const I18N_KEYS: readonly string[] = (
 ).split("|");
 
 const EN: readonly string[] = (
-  "Chrome not found|Retry|Connect my Chrome|Open separate Chrome|No permission prompt. Uses a clean profile.|Connecting…|How to connect|Open Chrome.|In Chrome, open $0 and turn on remote debugging.|Click *Connect my Chrome*, then Allow in Chrome. Or open a separate Chrome — no prompt.|Tabs|New tab|Close tab|Pause|Resume|Disconnect|Next time, Chrome will ask you to Allow again. Just stepping away? Use Pause.|Back|Forward|Reload|URL or search|Quality|Level|Chrome|My Chrome|Separate Chrome|" +
+  "Chrome not found|Retry|Connect my Chrome|Open separate Chrome|No permission prompt. Uses a clean profile.|Connecting…|How to connect|Open Chrome.|In Chrome, open $0 and turn on remote debugging.|Click *Connect my Chrome*, then Allow in Chrome. Or open a separate Chrome — no prompt.|Tabs|New tab|Close tab|Pause|Resume|Standby|Standby (keeps Chrome Allow)|Revoke|Revoke Grant|Standby · Grant Kept|Resume Stream|Resuming…|0 FPS standby — Chrome stays authorized. Resume anytime without re-allowing.|Standby · Grant kept|Entering standby…|Standby keeps Chrome Allow alive at 0 FPS. Use Revoke to drop it.|Back|Forward|Reload|URL or search|Quality|Level|Chrome|My Chrome|Separate Chrome|" +
   "Auto|Saver|Low|Balanced|High|Adjusts to your network.|For very slow networks: lower quality, fewer frames.|For weak networks.|Good quality, smooth.|Sharpest. Needs a fast network.|" +
-  "Frame size|Page size|Refresh view|No change|Keyboard|Live view|No open tabs|Chrome is still connected.|Chrome window closed|Open a new tab to keep going, or disconnect.|Loading…|Paused · Click to resume|Paused while idle · Click to resume|Type or paste…|Type in|Send ↵|Delete|Undo|Copy|Paste|Select all|Scroll up|Scroll down|Paused|Paused while idle|" +
+  "Frame size|Page size|Refresh view|No change|Keyboard|Live view|No open tabs|Chrome is still connected.|Chrome window closed|Open a new tab to keep going, or enter standby.|Loading…|Paused · Click to resume|Paused while idle · Click to resume|Type or paste…|Type in|Send ↵|Delete|Undo|Copy|Paste|Select all|Scroll up|Scroll down|Paused|Paused while idle|" +
   "OK|Cancel|Reply…|Alert|Confirm|Input|Leave this page?|✓ Sent|Disconnected|✓ Paused|✓ Resumed|↻ Refreshed|✓ Closed|Switching…|✓ Switched|↗ New tab|✓ Copied|✓ Pasted|Right-click|Switched tab|Disconnecting…|Settings file changed — reloaded.|" +
   "Settings|Dismiss|Details|Chrome ready|Separate Chrome ready|Auto · | · {n} queued|Separate|Untitled|Language|Follow system|Default quality|Connect to|Background refresh|Idle pause|Off|5s|12s|15s|30s|60s|Paused (bg)|" +
   "Settings file|Saving…|✓ Saved|Couldn't save|settings.json has an error. Using your last good settings.|Couldn't disconnect. Try again.|Couldn't pause. Try again.|" +
@@ -24,9 +24,9 @@ const EN: readonly string[] = (
 ).split("|");
 
 const ZH: readonly string[] = (
-  "未发现 Chrome|重试|连接日常 Chrome|打开独立 Chrome|无需授权，使用全新配置。|正在连接…|连接说明|打开 Chrome。|在 Chrome 中打开 $0，开启远程调试。|点 *连接日常 Chrome*，再在 Chrome 弹窗里点「允许」；也可以打开独立 Chrome，无需授权。|标签页|新建标签页|关闭标签页|暂停|继续|断开连接|断开后，下次连接 Chrome 会再次请你点「允许」。只是暂时不用的话，点「暂停」就好。|后退|前进|刷新|输入网址或搜索|画质|档位|连接方式|日常 Chrome|独立 Chrome|" +
+  "未发现 Chrome|重试|连接日常 Chrome|打开独立 Chrome|无需授权，使用全新配置。|正在连接…|连接说明|打开 Chrome。|在 Chrome 中打开 $0，开启远程调试。|点 *连接日常 Chrome*，再在 Chrome 弹窗里点「允许」；也可以打开独立 Chrome，无需授权。|标签页|新建标签页|关闭标签页|暂停|继续|待机|待机（保留 Chrome 授权）|撤销|撤销授权|待机中 · 已保留授权|恢复画面|正在恢复…|0 FPS 待机中，Chrome 授权仍保留，随时点击即可无弹窗恢复。|已待机 · 保留授权|正在待机…|待机会保持 Chrome 授权（0 FPS）；点「撤销」才会彻底断开连接。|后退|前进|刷新|输入网址或搜索|画质|档位|连接方式|日常 Chrome|独立 Chrome|" +
   "自动|省流|流畅|均衡|高清|跟随网速调整。|网很慢时用：画质低、帧数少。|网速一般时用。|画质和流畅兼顾。|最清晰，需要网速快。|" +
-  "画面大小|页面尺寸|刷新画面|画面无变化|键盘|实时画面|没有打开的标签页|Chrome 仍保持连接。|Chrome 窗口已关闭|新建标签页继续，或断开连接。|正在加载…|已暂停 · 点击继续|闲置已暂停 · 点击继续|输入或粘贴…|填入|发送 ↵|退格|撤销|复制|粘贴|全选|向上滚动|向下滚动|已暂停|闲置暂停|" +
+  "画面大小|页面尺寸|刷新画面|画面无变化|键盘|实时画面|没有打开的标签页|Chrome 仍保持连接。|Chrome 窗口已关闭|新建标签页继续，或进入待机。|正在加载…|已暂停 · 点击继续|闲置已暂停 · 点击继续|输入或粘贴…|填入|发送 ↵|退格|撤销|复制|粘贴|全选|向上滚动|向下滚动|已暂停|闲置暂停|" +
   "确定|取消|输入回复…|提示|确认|输入|离开此页？|✓ 已发送|已断开|✓ 已暂停|✓ 已继续|↻ 已刷新|✓ 已关闭|正在切换…|✓ 已切换|↗ 已新建标签页|✓ 已复制|✓ 已粘贴|右键|已切换标签页|正在断开…|配置文件已更新。|" +
   "设置|关闭|详情|Chrome 已就绪|独立 Chrome 已就绪|自动 · | · 待发送 {n}|独立|无标题|语言|跟随系统|默认画质|默认连接|后台刷新|闲置暂停|关|5 秒|12 秒|15 秒|30 秒|60 秒|暂停|" +
   "配置文件|正在保存…|✓ 已保存|保存失败|配置文件有误，暂时沿用上次的有效设置。|断开失败，请重试。|暂停失败，请重试。|" +

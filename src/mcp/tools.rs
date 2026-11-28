@@ -176,7 +176,7 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
         {
             "name": "chrome_stream_disconnect",
             "title": "Disconnect Remote Cast",
-            "description": "Stop screencast streaming and either revoke the Chrome DevTools session or keep it authorized in standby.",
+            "description": "Stop screencast streaming. Use mode=\"standby\" (recommended) to drop to 0 FPS while keeping Chrome's Allow permission warm, or mode=\"revoke\" (default) to close the debugging session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -941,6 +941,21 @@ mod tests {
         let rendered = result.to_string();
         assert!(!rendered.contains("/tmp/example"));
         assert!(!rendered.contains("ws://"));
+    }
+
+    #[test]
+    fn explicit_revoke_disconnects_and_omits_standby_flag() {
+        let relay: Arc<dyn RelayBackend> = Arc::new(ControlRelay(
+            Ok(json!({ "ok": true, "connected": false, "paused": false, "pauseEpoch": 2 })),
+            "disconnect",
+        ));
+        let result = handle_disconnect(&relay, json!({ "mode": "revoke" }));
+        assert_ne!(result["isError"], true);
+        let status = &result["structuredContent"];
+        assert_eq!(status["ok"], true);
+        assert_eq!(status["connected"], false);
+        assert_eq!(status["standby"], false);
+        assert_eq!(status["mode"], "revoke");
     }
 
     #[test]

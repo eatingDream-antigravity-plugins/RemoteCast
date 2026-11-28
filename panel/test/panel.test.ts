@@ -174,11 +174,12 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     return id;
   };
   const cancelTimer = (id: ReturnType<typeof setTimeout>) => { activeTimers.delete(id); clearTimeout(id); };
+  let nowMs = 10_000;
   const ctx = vm.createContext({
     window: win,
     document: doc,
     navigator: { language: navLang, platform: "MacIntel", clipboard: { writeText: async () => {} } },
-    performance: { now: () => 10_000 },
+    performance: { now: () => nowMs },
     console,
     requestAnimationFrame: (fn: () => void) => scheduleTimer(fn, 0),
     cancelAnimationFrame: cancelTimer,
@@ -186,7 +187,7 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     IntersectionObserver: class { observe() {} disconnect() {} },
     Image: class {},
     Map, Set, Array, Object, Math, JSON, RegExp, Promise, Error, Number, String, Boolean,
-    Date: { now: () => 10_000 },
+    Date: { now: () => nowMs },
     getComputedStyle: () => ({ getPropertyValue: () => "" }),
     __CHROME_STREAM_BOOT__: boot,
     setTimeout: scheduleTimer,
@@ -214,7 +215,7 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     for (const id of activeTimers) clearTimeout(id);
     activeTimers.clear();
   };
-  return { els, posted, msgHandler, win, cleanup };
+  return { els, posted, msgHandler, win, winListeners, setNow: (v: number) => { nowMs = v; }, cleanup };
 }
 
 describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
@@ -496,6 +497,163 @@ describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
       assert.equal(tab.getAttribute("role"), "tab");
       assert.equal(tab.getAttribute("onload"), null);
       assert.equal(tab.getAttribute("ONERROR"), null);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("boots into Standby Ready on connected+paused without auto-unpausing and supports 1-click Resume or Revoke", async () => {
+    const h = bootPanel(
+      {
+        connected: true,
+        paused: true,
+        standby: true,
+        pauseEpoch: 3,
+        connectionMode: "personal",
+        tabs: [{ targetId: "t1", title: "Home", url: "https://a.test" }],
+        activeTargetId: "t1",
+      },
+      { navLang: "zh-CN" }
+    );
+    try {
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(h.els.get("vo")!.hidden, false, "Standby boot must show #vo Standby Ready card");
+      assert.equal(h.els.get("vn")!.hidden, true, "Standby boot must hide live #vn view");
+      assert.equal(h.els.get("op")!.textContent, I18N["zh-CN"].sbb);
+      assert.equal(h.els.get("op")!.classList.contains("wn"), true);
+      assert.equal(h.els.get("ob")!.textContent, I18N["zh-CN"].rsb);
+      assert.equal(h.els.get("ol")!.hidden, true, "Open separate Chrome must be hidden in Standby Ready");
+      assert.equal(h.els.get("orv")!.hidden, false, "Revoke Grant button must be visible in Standby Ready");
+      assert.equal(h.els.get("dt")!.hidden, true, "Setup guide must be hidden in Standby Ready");
+
+      const frameCalls = h.posted.filter((m) => m.params?.name === "chrome_stream_frame");
+      assert.equal(frameCalls.length, 0, "Standby boot must not start immediate live frame polling");
+
+      // Click Revoke Grant (#orv) from Standby Ready card -> sends mode:revoke
+      h.els.get("orv")!.listeners.get("click")![0]();
+      await new Promise((r) => setTimeout(r, 10));
+      const revCall = h.posted.filter((m) => m.params?.name === "chrome_stream_disconnect").pop();
+      assert.equal(revCall?.params?.arguments?.mode, "revoke");
+      h.msgHandler({
+        source: h.win.parent,
+        data: { jsonrpc: "2.0", id: revCall!.id, result: { structuredContent: { ok: true, connected: false, portFile: { valid: true, port: 9222 } } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(h.els.get("vo")!.hidden, false);
+      assert.equal(h.els.get("orv")!.hidden, true);
+      assert.equal(h.els.get("op")!.textContent, I18N["zh-CN"].rmy);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("enters Standby Ready from tool-result notification and empty-tab Standby/Revoke buttons", async () => {
+    const h = bootPanel({
+      connected: true,
+      connectionMode: "personal",
+      tabs: [{ targetId: "t1", title: "Home", url: "https://a.test" }],
+      activeTargetId: "t1",
+      epoch: 1,
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(h.els.get("vn")!.hidden, false);
+
+      // Empty-tab #n3 sends standby and #n4 sends revoke
+      h.els.get("n3")!.listeners.get("click")![0]();
+      await new Promise((r) => setTimeout(r, 10));
+      const n3Call = h.posted.filter((m) => m.params?.name === "chrome_stream_disconnect").pop();
+      assert.equal(n3Call?.params?.arguments?.mode, "standby");
+      h.msgHandler({
+        source: h.win.parent,
+        data: { jsonrpc: "2.0", id: n3Call!.id, result: { structuredContent: { ok: true, connected: true, paused: true, standby: true, pauseEpoch: 2 } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(h.els.get("vo")!.hidden, false);
+
+      // Resume Stream (#ob) -> returns to #vn
+      h.els.get("ob")!.listeners.get("click")![0]();
+      await new Promise((r) => setTimeout(r, 10));
+      const resCall = h.posted.filter((m) => m.params?.name === "chrome_stream_input").pop();
+      assert.equal(resCall?.params?.arguments?.events?.[0]?.action, "resume");
+      h.msgHandler({
+        source: h.win.parent,
+        data: { jsonrpc: "2.0", id: resCall!.id, result: { structuredContent: { ok: true, connected: true, paused: false, pauseEpoch: 3 } } },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(h.els.get("vn")!.hidden, false);
+
+      // Host tool-result with connected:true + paused:true + standby:true transitions back to Standby Ready
+      h.msgHandler({
+        source: h.win.parent,
+        data: {
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-result",
+          params: { structuredContent: { connected: true, paused: true, standby: true, pauseEpoch: 4, activeTargetId: "t1", tabsHash: "h" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(h.els.get("vo")!.hidden, false);
+      assert.equal(h.els.get("op")!.textContent, I18N.en.sbb);
+
+      // #n4 button sends explicit mode:revoke
+      h.els.get("n4")!.listeners.get("click")![0]();
+      await new Promise((r) => setTimeout(r, 10));
+      const n4Call = h.posted.filter((m) => m.params?.name === "chrome_stream_disconnect").pop();
+      assert.equal(n4Call?.params?.arguments?.mode, "revoke");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("keeps Settings drawer open across standby probeOff ticks and suppresses forced frame polls on quality change", async () => {
+    const h = bootPanel({
+      connected: true,
+      paused: true,
+      standby: true,
+      pauseEpoch: 2,
+      settings: { lang: "en", defaultQuality: "auto", defaultConnectMode: "auto", bgPollIntervalSec: 0, idlePauseSec: 12 },
+      settingsGen: 1,
+      tabs: [{ targetId: "t1", title: "Home", url: "https://a.test" }],
+      activeTargetId: "t1",
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      // Open Settings drawer in Standby Ready
+      h.els.get("bg0")!.listeners.get("click")![0]({ stopPropagation() {} });
+      assert.equal(h.els.get("sw")!.hidden, false, "Settings drawer must open in Standby Ready");
+
+      // Trigger standby probe via pointerenter reveal (simulates probeOff in Standby)
+      h.win.parent;
+      h.els.get("sq")!.value = "high";
+      h.els.get("sq")!.listeners.get("change")![0]();
+      await new Promise((r) => setTimeout(r, 40));
+      const cfgCall = h.posted.filter((m) => m.params?.name === "chrome_stream_config").pop();
+      assert.deepEqual(JSON.parse(JSON.stringify(cfgCall?.params?.arguments)), { action: "update", patch: { defaultQuality: "high" } });
+      h.msgHandler({
+        source: h.win.parent,
+        data: { jsonrpc: "2.0", id: cfgCall!.id, result: { structuredContent: { ok: true, settingsGen: 2, settings: { defaultQuality: "high" } } } },
+      });
+      await new Promise((r) => setTimeout(r, 40));
+
+      // Also simulate a standby probeOff response via reveal (resize/focus) and confirm Settings stays open & 0 forced polls fire
+      const frameBefore = h.posted.filter((m) => m.params?.name === "chrome_stream_frame");
+      assert.equal(frameBefore.filter((m) => m.params?.arguments?.forceRefresh === true).length, 0, "defaultQuality change in Standby must NOT trigger forceRefresh frame poll");
+
+      // Trigger probeOff via window focus while Settings drawer is open
+      h.setNow(15_000);
+      h.winListeners.get("focus")?.forEach((fn) => fn({}));
+      await new Promise((r) => setTimeout(r, 10));
+      const probeCall = h.posted.filter((m) => m.params?.name === "chrome_stream_frame").pop();
+      assert.ok(probeCall, "Standby focus reveal should run lightweight probeOff");
+      assert.equal(probeCall.params?.arguments?.waitMs, 0);
+      assert.equal(probeCall.params?.arguments?.forceRefresh, false);
+      h.msgHandler({
+        source: h.win.parent,
+        data: { jsonrpc: "2.0", id: probeCall.id, result: { structuredContent: { connected: true, paused: true, standby: true, pauseEpoch: 2 } } },
+      });
+      await new Promise((r) => setTimeout(r, 15));
+      assert.equal(h.els.get("sw")!.hidden, false, "Settings drawer must remain open across standby probeOff ticks");
     } finally {
       h.cleanup();
     }

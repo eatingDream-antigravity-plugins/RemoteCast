@@ -32,7 +32,7 @@ Remote Cast 把 Chrome 标签页实时投屏到侧边栏面板，让你边看边
 ## 为什么选择 Remote Cast
 
 - **日常 Chrome 与独立 Chrome 双模式**：可直接连接正在使用的日常 Chrome（保留账号登录和扩展），也可以一键打开独立 Chrome，使用全新配置且无需授权弹窗。
-- **顶栏清晰区分「暂停」与「断开连接」**：点击 **暂停** 可立刻降到 0 FPS 省电并保持连接（不会丢掉 Chrome 授权）；需要结束会话时直接点 **断开连接**。
+- **待机优先，独立撤销**：点击 **暂停** 或 **待机**（`mode: "standby"`）可立刻降到 0 FPS 并保留 Chrome 授权，随时一键 **恢复画面** 无需重新点允许；只有显式点击 **撤销**（`mode: "revoke"`）才会彻底断开调试连接。
 - **不抢 macOS 窗口焦点**：点击画面、切换标签页或新建标签页（`chrome://newtab`）都在后台静默完成，不会把 Chrome 窗口弹到 Antigravity 前面。
 - **弱网省流、停手即高清**：提供 **自动 · 省流 · 流畅 · 均衡 · 高清** 五档画质。滚动和输入时流畅跟手，停手后自动补发高清静帧，画面无变化时零流量消耗。
 - **面板内直接设置**：点右上角设置按钮即可调整语言、默认画质、默认连接方式、后台刷新和闲置暂停，配置写入 `settings.json` 并支持热加载。
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/rem
 
 ### 2. 连接 Chrome
 
-- **日常 Chrome**：先在 Chrome 中打开 `chrome://inspect/#remote-debugging` 开启远程调试，在 Remote Cast 中点 **连接日常 Chrome**，并在 Chrome 弹窗里点一次「允许」。暂时不用时点 **暂停** 即可保持连接。
+- **日常 Chrome**：先在 Chrome 中打开 `chrome://inspect/#remote-debugging` 开启远程调试，在 Remote Cast 中点 **连接日常 Chrome**，并在 Chrome 弹窗里点一次「允许」。暂时不用时点 **待机** 或 **暂停** 即可保留授权。
 - **独立 Chrome**：点 **打开独立 Chrome**，将在 `127.0.0.1` 启动权限为 `0700` 的隔离配置目录，无需授权弹窗，并自动避开日常 Chrome 端口。
 
 ## AI Agent 专属指引

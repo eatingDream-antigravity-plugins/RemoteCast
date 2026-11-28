@@ -48,6 +48,8 @@ export interface FramePayload {
   epoch?: number;
   connectionMode?: string;
   paused?: boolean;
+  standby?: boolean;
+  mode?: string;
   pauseEpoch?: number;
   screencastPausedIdle?: boolean;
   dialog?: DialogInfo | null;
