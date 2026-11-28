@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The project uses [Semantic Versioning](https://semver.org/) and updates this file automatically via [Release Please](https://github.com/googleapis/release-please) from Conventional Commits.
 
+## [0.7.1](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.7.0...v0.7.1) (2026-11-28)
+
+
+### Performance Improvements
+
+* add bootTs, 0ms localStorage SWR hydration, poll coalescing, and if_hash ([#42](https://github.com/eatingDream-antigravity-plugins/remote-cast/issues/42)) ([d3e3168](https://github.com/eatingDream-antigravity-plugins/remote-cast/commit/d3e31684c5350aa1e8673bd125c607c307113f53))
+
 ## [0.7.0](https://github.com/eatingDream-antigravity-plugins/remote-cast/compare/v0.6.2...v0.7.0) (2026-11-28)
 
 
