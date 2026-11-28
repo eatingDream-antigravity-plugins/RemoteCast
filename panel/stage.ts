@@ -97,7 +97,7 @@ const S: PanelState = {
   on: !!boot.connected, cm: boot.connectionMode || "", cr: !!boot.crisp, fm: boot.format || "",
   tabs: isA(boot.tabs) ? boot.tabs : [], th: boot.tabsHash || "",
   aid: boot.activeTargetId || null, ep: +(boot.epoch ?? 1) || 1, tep: +(boot.epoch ?? 1) || 1, pe: +(boot.pauseEpoch ?? 0) || 0, pg: boot.page || {},
-  seq: boot.seq || 0, fh: boot.frameHash || "", by: boot.imageBytes || 0, uc: false,
+  seq: useSwr ? 0 : boot.seq || 0, fh: useSwr ? "" : boot.frameHash || "", by: useSwr ? 0 : boot.imageBytes || 0, uc: false,
   nv: false, st: !boot.paused, pa: !!boot.paused, id: !!boot.screencastPausedIdle,
   dlg: boot.dialog || null, nt: !!(boot.connected && isNoTabsPayload(boot)),
 };
@@ -703,7 +703,11 @@ const conn = async (mode = "personal", f = 0): Promise<void> => {
 };
 const forceNow = (): void => {
   if (!ready) return;
-  const t = nowMs(); if (t - lastForceAt < 250) return;
+  const t = nowMs();
+  if (t - lastForceAt < 250) {
+    if (!hid()) S.on && !isSb ? !S.pa && !pB && !pT && liveSched() : !isCn && !isDisc && !oB && !oT && schedOffP();
+    return;
+  }
   lastForceAt = t; pErr = offErr = 0;
   S.on && !isSb ? !S.pa && ((act = t), S.id && ((S.id = false), syncPauseUi()), clrTm(1), void poll(1)) : !isCn && !isDisc && (clrTm(0), oB ? (offUrg = 1) : void probeOff());
 };

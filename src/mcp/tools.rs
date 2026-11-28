@@ -692,7 +692,8 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 && norm["popupSwitched"] != true
                 && norm["errorCode"].is_null()
                 && norm["error"].is_null()
-                && (has_if_hash || (norm.get("tabs").is_none() && target_matches));
+                && ((has_if_hash && known_tabs_hash.is_empty())
+                    || (norm.get("tabs").is_none() && target_matches));
             let sc = if can_compact {
                 json!({
                     "unchanged": true,
