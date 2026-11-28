@@ -2,8 +2,8 @@ use crate::config::home_dir;
 use crate::local_io::{create_private_directory, effective_uid};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,8 @@ use std::time::Duration;
 pub const DEFAULT_NEW_TAB_URL: &str = "chrome://newtab";
 pub const DEFAULT_IDLE_PAUSE_SEC: u64 = 12;
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
+const MAX_URL_SETTING_LEN: usize = 2048;
+const MAX_PATH_SETTING_LEN: usize = 4096;
 static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +121,11 @@ impl Settings {
             if trimmed.is_empty() {
                 self.new_tab_url = None;
             } else {
+                if trimmed.len() > MAX_URL_SETTING_LEN {
+                    return Err(format!(
+                        "newTabUrl exceeds {MAX_URL_SETTING_LEN}-byte limit"
+                    ));
+                }
                 let low = trimmed.to_ascii_lowercase();
                 let allowed = low.starts_with("chrome://")
                     || low.starts_with("about:")
@@ -130,6 +137,25 @@ impl Settings {
                     );
                 }
                 self.new_tab_url = Some(trimmed.to_string());
+            }
+        }
+        for (name, field) in [
+            ("portFile", &mut self.port_file),
+            ("userDataDir", &mut self.user_data_dir),
+        ] {
+            if let Some(ref raw_path) = *field {
+                let trimmed = raw_path.trim();
+                if trimmed.is_empty() {
+                    *field = None;
+                } else {
+                    if trimmed.len() > MAX_PATH_SETTING_LEN || trimmed.chars().any(char::is_control)
+                    {
+                        return Err(format!(
+                            "{name} must be at most {MAX_PATH_SETTING_LEN} bytes without control characters"
+                        ));
+                    }
+                    *field = Some(trimmed.to_string());
+                }
             }
         }
         if let Some(ms) = self.wheel_coalesce_ms {
@@ -148,15 +174,30 @@ struct FileFingerprint {
     ino: u64,
 }
 
+fn open_settings_file(path: &Path) -> io::Result<(File, fs::Metadata)> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "settings.json is not a regular file",
+        ));
+    }
+    if meta.uid() != effective_uid() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "settings.json must be owned by the current user",
+        ));
+    }
+    Ok((file, meta))
+}
+
 fn read_fingerprint(path: &Path) -> io::Result<Option<FileFingerprint>> {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            if !meta.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "settings.json is not a regular file",
-                ));
-            }
+    match open_settings_file(path) {
+        Ok((_, meta)) => {
             let mtime_ns = (meta.mtime() as i128) * 1_000_000_000i128 + (meta.mtime_nsec() as i128);
             Ok(Some(FileFingerprint {
                 mtime_ns,
@@ -182,14 +223,18 @@ fn parse_settings_bytes(raw: &str) -> Result<(Map<String, Value>, Settings), Str
 }
 
 fn read_settings_file(path: &Path) -> Result<(Map<String, Value>, Settings), String> {
-    let meta = fs::metadata(path).map_err(|e| format!("Failed reading settings metadata: {e}"))?;
-    if !meta.is_file() {
-        return Err("settings.json must be a regular file".to_string());
-    }
+    let (file, meta) =
+        open_settings_file(path).map_err(|e| format!("Failed opening settings.json: {e}"))?;
     if meta.len() > MAX_SETTINGS_BYTES {
         return Err("settings.json exceeds maximum size".to_string());
     }
-    let raw = fs::read_to_string(path).map_err(|e| format!("Failed reading settings.json: {e}"))?;
+    let mut raw = String::new();
+    file.take(MAX_SETTINGS_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("Failed reading settings.json: {e}"))?;
+    if raw.len() as u64 > MAX_SETTINGS_BYTES {
+        return Err("settings.json exceeds maximum size".to_string());
+    }
     parse_settings_bytes(&raw)
 }
 
@@ -399,6 +444,11 @@ impl SettingsStore {
         let mut body = serde_json::to_string_pretty(&Value::Object(merged))
             .map_err(|e| format!("Failed serializing settings: {e}"))?;
         body.push('\n');
+        if body.len() as u64 > MAX_SETTINGS_BYTES {
+            return Err(format!(
+                "settings.json exceeds {MAX_SETTINGS_BYTES}-byte limit"
+            ));
+        }
 
         let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp_path = self
@@ -507,6 +557,70 @@ mod tests {
         assert!(snap2.get("settingsError").is_none());
         assert_eq!(snap2["settings"]["lang"], "en");
         assert_eq!(snap2["settings"]["idlePauseSec"], 30);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_oversized_settings_and_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmp_dir("oversized");
+        let store = SettingsStore::new(dir.clone());
+        store.update_patch(json!({ "lang": "en" })).unwrap();
+
+        // String field caps reject oversized newTabUrl / portFile / userDataDir before writing
+        let too_long_url = format!("https://example.com/{}", "a".repeat(2048));
+        assert!(store
+            .update_patch(json!({ "newTabUrl": too_long_url }))
+            .is_err());
+        let too_long_path = format!("/tmp/{}", "b".repeat(4096));
+        assert!(store
+            .update_patch(json!({ "portFile": too_long_path }))
+            .is_err());
+        assert!(store
+            .update_patch(json!({ "userDataDir": "/tmp/bad\npath" }))
+            .is_err());
+
+        // >64 KiB serialized body is rejected BEFORE writing, preventing persistent self-DoS
+        let settings_path = dir.join("settings.json");
+        let near_limit = "x".repeat(65 * 1024);
+        fs::write(
+            &settings_path,
+            format!("{{\"lang\":\"en\",\"bigBlob\":\"{near_limit}\"}}\n"),
+        )
+        .unwrap();
+        // Verify oversized file on disk is rejected on read
+        assert!(store.reload_if_changed());
+        assert_eq!(store.snapshot()["settingsError"], "invalid_settings");
+
+        // Now write valid 63 KiB file and attempt a patch that would push serialized body >64 KiB
+        let padded = "y".repeat(64 * 1024 - 100);
+        fs::write(
+            &settings_path,
+            format!("{{\"lang\":\"en\",\"pad\":\"{padded}\"}}\n"),
+        )
+        .unwrap();
+        assert!(store.reload_if_changed());
+        assert!(store.snapshot().get("settingsError").is_none());
+        let err = store
+            .update_patch(
+                json!({ "newTabUrl": format!("https://example.com/{}", "z".repeat(500)) }),
+            )
+            .unwrap_err();
+        assert!(err.contains("exceeds"));
+        // Disk file remains valid and readable after rejected patch
+        assert!(!store.reload_if_changed());
+        assert!(store.snapshot().get("settingsError").is_none());
+
+        // Symlink settings.json is rejected via O_NOFOLLOW
+        let target = dir.join("real.json");
+        fs::write(&target, "{\"lang\":\"zh-CN\"}\n").unwrap();
+        fs::remove_file(&settings_path).unwrap();
+        symlink(&target, &settings_path).unwrap();
+        assert!(store.reload_if_changed());
+        assert_eq!(store.snapshot()["settingsError"], "invalid_settings");
+        assert_eq!(store.current().lang, "en");
 
         let _ = fs::remove_dir_all(&dir);
     }

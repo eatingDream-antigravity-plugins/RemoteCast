@@ -185,11 +185,7 @@ pub fn normalize_url(raw: &str) -> String {
     if low.starts_with("http://")
         || low.starts_with("https://")
         || low.starts_with("chrome://")
-        || low.starts_with("chrome-extension://")
         || low.starts_with("about:")
-        || low.starts_with("file://")
-        || low.starts_with("data:")
-        || low.starts_with("view-source:")
     {
         return s.to_string();
     }
@@ -389,6 +385,16 @@ mod tests {
         assert_eq!(
             normalize_url("rust cdp"),
             "https://www.google.com/search?q=rust%20cdp"
+        );
+        assert_eq!(normalize_url("about:blank"), "about:blank");
+        assert!(normalize_url("file:///etc/passwd").starts_with("https://www.google.com/search?q="));
+        assert!(normalize_url("data:text/html,hi").starts_with("https://www.google.com/search?q="));
+        assert!(normalize_url("chrome-extension://abc/page.html")
+            .starts_with("https://www.google.com/search?q="));
+        assert!(normalize_url("view-source:https://example.com")
+            .starts_with("https://www.google.com/search?q="));
+        assert!(
+            normalize_url("javascript:alert(1)").starts_with("https://www.google.com/search?q=")
         );
     }
 }

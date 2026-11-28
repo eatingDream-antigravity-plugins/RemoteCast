@@ -1,10 +1,13 @@
 use crate::cdp::client::{CdpClient, CdpError, InputBatchParams, CMD_TIMEOUT};
+use crate::cdp::targets::is_valid_target_id;
 use crate::i18n::current_lang;
 use crate::stream::dedup::{hash_tabs, normalize_url};
 use crate::stream::profiles::TabInfo;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+pub const MAX_INPUT_BATCH_EVENTS: usize = 256;
 
 /// Stateless input/navigation dispatcher operating on `CdpClient`'s orthogonal
 /// `TabStateStore` and `FramePipeline` via explicit methods.
@@ -17,6 +20,11 @@ impl InputDispatcher {
         params: InputBatchParams,
     ) -> Result<Value, CdpError> {
         let t_start = Instant::now();
+        if params.events.len() > MAX_INPUT_BATCH_EVENTS {
+            return Err(CdpError::new(format!(
+                "Input batch exceeds maximum of {MAX_INPUT_BATCH_EVENTS} events"
+            )));
+        }
         if !client.is_connected() {
             if params.events.iter().any(|ev| ev.action == "disconnect") {
                 return Ok(Self::disconnect(client, t_start));
@@ -616,7 +624,8 @@ impl InputDispatcher {
         let tid = created
             .get("targetId")
             .and_then(Value::as_str)
-            .ok_or_else(|| CdpError::new("Target.createTarget missing targetId"))?;
+            .filter(|id| is_valid_target_id(id))
+            .ok_or_else(|| CdpError::new("Target.createTarget missing valid targetId"))?;
         client.tabs.lock().unwrap().activate_new_tab(tid);
         client.capture.lock().unwrap().clear_latest_frame();
         if client.attach(tid).is_ok() {
@@ -815,5 +824,34 @@ pub fn key_def(name: &str) -> (String, String, i32, Option<String>) {
             (s.to_string(), code, vk, txt)
         }
         other => (other.into(), other.into(), 0, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cdp::client::InputEvent;
+    use std::path::PathBuf;
+
+    #[test]
+    fn dispatch_batch_rejects_oversized_event_batches() {
+        let client = CdpClient::new(PathBuf::from("/tmp/nonexistent-port"), 9222);
+        let events = vec![
+            InputEvent {
+                action: "mousemove".into(),
+                ..Default::default()
+            };
+            MAX_INPUT_BATCH_EVENTS + 1
+        ];
+        let err = InputDispatcher::dispatch_batch(
+            &client,
+            InputBatchParams {
+                target_id: None,
+                target_epoch: None,
+                events,
+            },
+        )
+        .unwrap_err();
+        assert!(err.message.contains("exceeds maximum"));
     }
 }
