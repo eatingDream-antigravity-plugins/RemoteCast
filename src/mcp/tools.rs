@@ -15,7 +15,11 @@ pub fn attach_settings_snapshot(val: &mut Value, settings: Option<&Arc<SettingsS
     let Some(store) = settings else {
         return;
     };
-    let snap = store.snapshot();
+    let mut snap = store.snapshot();
+    if let Some(settings_obj) = snap.get_mut("settings").and_then(Value::as_object_mut) {
+        settings_obj.remove("portFile");
+        settings_obj.remove("userDataDir");
+    }
     if let (Some(dst), Some(src)) = (val.as_object_mut(), snap.as_object()) {
         for (k, v) in src {
             dst.insert(k.clone(), v.clone());
@@ -32,6 +36,10 @@ pub fn redact_relay_payload(val: &mut Value) {
         if let Some(pf) = obj.get_mut("portFile").and_then(|v| v.as_object_mut()) {
             pf.remove("path");
             pf.remove("wsUrl");
+        }
+        if let Some(settings_obj) = obj.get_mut("settings").and_then(Value::as_object_mut) {
+            settings_obj.remove("portFile");
+            settings_obj.remove("userDataDir");
         }
     }
 }
@@ -108,6 +116,7 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
                     "targetEpoch": { "type": "integer", "minimum": 0 },
                     "events": {
                         "type": "array",
+                        "maxItems": 256,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -349,14 +358,16 @@ fn handle_config(settings: Option<&Arc<SettingsStore>>, args: Value) -> Value {
                     })
                 }
                 Err(err) => {
+                    let code = sanitized_config_error_code(&err);
                     let text = match lang {
                         Lang::En => "Couldn't save settings.",
                         Lang::ZhCn => "保存设置失败。",
                     };
                     let mut snap = store.snapshot();
                     snap["ok"] = json!(false);
+                    snap["errorCode"] = json!(code);
                     snap["error"] = json!(text);
-                    snap["errorDetail"] = json!(err);
+                    snap["errorDetail"] = json!(code);
                     snap["locale"] = json!(lang.as_str());
                     json!({
                         "isError": false,
@@ -871,6 +882,23 @@ fn unconfirmed_control(lang: Lang, code: &'static str) -> Value {
     })
 }
 
+fn sanitized_config_error_code(err: &str) -> &'static str {
+    if err.starts_with("Settings patch")
+        || err.starts_with("Unknown setting")
+        || err.starts_with("Invalid setting")
+        || err.starts_with("Unsupported ")
+        || err.contains("must be")
+        || err.contains("must use")
+        || err.contains("exceeds")
+    {
+        "invalid_settings"
+    } else if err.starts_with("Unsafe settings") {
+        "unsafe_settings_file"
+    } else {
+        "settings_io_error"
+    }
+}
+
 // Relay errors can contain local paths and WebSocket tokens, including on older versions.
 fn sanitized_control_code(method: &str, err: &str) -> &'static str {
     if err == format!("Relay timeout on {method}") {
@@ -980,5 +1008,73 @@ mod tests {
         assert_eq!(result["isError"], true);
         assert_eq!(result["structuredContent"]["ok"], false);
         assert_eq!(result["structuredContent"]["unconfirmed"], true);
+    }
+
+    #[test]
+    fn settings_snapshot_redacts_local_paths_and_sanitizes_config_errors() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "chrome-stream-tools-sec-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::new(dir.clone());
+        let secret_port_file = concat!("/U", "sers/example-user/Library/DevToolsActivePort");
+        let secret_user_dir = concat!("/U", "sers/example-user/chrome-profile");
+        let secret_status_path = concat!("/U", "sers/example-user/p");
+        store
+            .update_patch(json!({
+                "lang": "en",
+                "portFile": secret_port_file,
+                "userDataDir": secret_user_dir
+            }))
+            .unwrap();
+
+        let relay: Arc<dyn RelayBackend> = Arc::new(ControlRelay(
+            Ok(json!({
+                "connected": false,
+                "portFile": { "exists": false, "valid": false, "port": null, "path": secret_status_path }
+            })),
+            "status",
+        ));
+        let stage = dispatch_tool_with_context(
+            &relay,
+            None,
+            Some(&store),
+            "chrome_stream_stage",
+            json!({}),
+        );
+        let rendered = stage.to_string();
+        assert!(!rendered.contains("example-user"));
+        assert!(stage["structuredContent"]["settings"]
+            .get("portFile")
+            .is_none());
+        assert!(stage["structuredContent"]["settings"]
+            .get("userDataDir")
+            .is_none());
+        assert_eq!(stage["structuredContent"]["settings"]["lang"], "en");
+
+        let bad_cfg = handle_config(
+            Some(&store),
+            json!({ "action": "update", "patch": { "unknownKey": secret_user_dir } }),
+        );
+        assert_eq!(bad_cfg["structuredContent"]["ok"], false);
+        assert_eq!(
+            bad_cfg["structuredContent"]["errorCode"],
+            "invalid_settings"
+        );
+        assert_eq!(
+            bad_cfg["structuredContent"]["errorDetail"],
+            "invalid_settings"
+        );
+        assert!(!bad_cfg["structuredContent"]["errorDetail"]
+            .as_str()
+            .unwrap()
+            .contains("unknownKey"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

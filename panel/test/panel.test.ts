@@ -228,6 +228,8 @@ describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
     });
     assert.equal(report.ok, true);
     assert.ok(report.bytes <= HARD_MAX_BYTES);
+    assert.ok(html.includes("base-uri 'none'"), "CSP must include base-uri 'none'");
+    assert.ok(html.includes("form-action 'none'"), "CSP must include form-action 'none'");
 
     const parity = checkI18nParity(I18N.en, I18N["zh-CN"]);
     assert.equal(parity.ok, true, `i18n parity issues: ${JSON.stringify(parity)}`);
@@ -472,6 +474,28 @@ describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(op.classList.contains("ok"), true, "#op must restore .ok once standby error clears");
       assert.equal(op.classList.contains("er"), false);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("ignores attribute injection in mkTab targetId and blocks on* attributes in h()", async () => {
+    const evilTid = "t1;onload=alert(1);ONERROR=alert(2)";
+    const h = bootPanel({
+      connected: true,
+      connectionMode: "personal",
+      tabs: [{ targetId: evilTid, title: "Evil", url: "https://example.com" }],
+      activeTargetId: evilTid,
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      const tb = h.els.get("tb")!;
+      assert.equal(tb.children.length, 1);
+      const tab = tb.children[0]!;
+      assert.equal(tab.dataset.id, evilTid);
+      assert.equal(tab.getAttribute("role"), "tab");
+      assert.equal(tab.getAttribute("onload"), null);
+      assert.equal(tab.getAttribute("ONERROR"), null);
     } finally {
       h.cleanup();
     }

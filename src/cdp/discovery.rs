@@ -1,9 +1,11 @@
+use crate::local_io::effective_uid;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -51,18 +53,34 @@ pub fn is_loopback_port_alive(port: u16) -> bool {
     TcpStream::connect_timeout(&v6, Duration::from_millis(80)).is_ok()
 }
 
+fn empty_port_status(path_str: String, exists: bool, updated_at: Option<String>) -> PortFileStatus {
+    PortFileStatus {
+        exists,
+        valid: false,
+        stale: false,
+        port: None,
+        ws_url: None,
+        updated_at,
+        path: path_str,
+    }
+}
+
 pub fn read_port_file(path: &Path) -> PortFileStatus {
     let path_str = path.to_string_lossy().to_string();
-    let Ok(meta) = fs::metadata(path) else {
-        return PortFileStatus {
-            exists: false,
-            valid: false,
-            stale: false,
-            port: None,
-            ws_url: None,
-            updated_at: None,
-            path: path_str,
-        };
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return empty_port_status(path_str, false, None);
+        }
+        Err(_) => return empty_port_status(path_str, true, None),
+    };
+
+    let Ok(meta) = file.metadata() else {
+        return empty_port_status(path_str, true, None);
     };
 
     let updated_at = meta
@@ -70,32 +88,18 @@ pub fn read_port_file(path: &Path) -> PortFileStatus {
         .ok()
         .map(|t| DateTime::<Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
 
-    let Ok(file) = File::open(path) else {
-        return PortFileStatus {
-            exists: true,
-            valid: false,
-            stale: false,
-            port: None,
-            ws_url: None,
-            updated_at,
-            path: path_str,
-        };
-    };
+    if !meta.is_file() || meta.uid() != effective_uid() || (meta.mode() & 0o022 != 0) {
+        return empty_port_status(path_str, true, updated_at);
+    }
+
     let mut raw = String::new();
     if file
-        .take(MAX_PORT_FILE_BYTES)
+        .take(MAX_PORT_FILE_BYTES + 1)
         .read_to_string(&mut raw)
         .is_err()
+        || raw.len() as u64 > MAX_PORT_FILE_BYTES
     {
-        return PortFileStatus {
-            exists: true,
-            valid: false,
-            stale: false,
-            port: None,
-            ws_url: None,
-            updated_at,
-            path: path_str,
-        };
+        return empty_port_status(path_str, true, updated_at);
     }
 
     let lines: Vec<&str> = raw
@@ -259,7 +263,9 @@ fn probe_debug_address(addr: SocketAddr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::net::TcpListener;
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::thread;
 
     #[test]
@@ -300,6 +306,7 @@ mod tests {
             format!("{live_port}\n/devtools/browser/test-id\n"),
         )
         .unwrap();
+        fs::set_permissions(&live_pf, fs::Permissions::from_mode(0o600)).unwrap();
 
         let st = read_port_file(&live_pf);
         assert!(st.exists && st.valid && !st.stale);
@@ -361,11 +368,62 @@ mod tests {
             format!("{live2_port}\n/devtools/browser/snap-id\n"),
         )
         .unwrap();
+        fs::set_permissions(&snap_pf, fs::Permissions::from_mode(0o600)).unwrap();
         let multi = discover_port_file(&[live_pf.clone(), snap_pf]);
         assert!(multi.valid && !multi.stale);
         assert_eq!(multi.port, Some(live2_port));
         drop(live2_listener);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_port_file_rejects_symlinks_unsafe_modes_and_oversized_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-stream-port-sec-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let real_pf = dir.join("RealPort");
+        fs::write(&real_pf, format!("{port}\n/devtools/browser/real-id\n")).unwrap();
+        fs::set_permissions(&real_pf, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Symlink must be rejected by O_NOFOLLOW
+        let link_pf = dir.join("LinkPort");
+        symlink(&real_pf, &link_pf).unwrap();
+        let link_st = read_port_file(&link_pf);
+        assert!(link_st.exists);
+        assert!(!link_st.valid);
+        assert!(link_st.ws_url.is_none());
+
+        // Group/world-writable mode must be rejected (mode & 0o022 != 0)
+        let writable_pf = dir.join("WritablePort");
+        fs::write(
+            &writable_pf,
+            format!("{port}\n/devtools/browser/bad-mode\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&writable_pf, fs::Permissions::from_mode(0o666)).unwrap();
+        let mode_st = read_port_file(&writable_pf);
+        assert!(mode_st.exists);
+        assert!(!mode_st.valid);
+        assert!(mode_st.ws_url.is_none());
+
+        // Files exceeding 4096 bytes must be rejected
+        let big_pf = dir.join("BigPort");
+        let padding = "a".repeat(5000);
+        fs::write(&big_pf, format!("{port}\n/devtools/browser/{padding}\n")).unwrap();
+        fs::set_permissions(&big_pf, fs::Permissions::from_mode(0o600)).unwrap();
+        let big_st = read_port_file(&big_pf);
+        assert!(big_st.exists);
+        assert!(!big_st.valid);
+        assert!(big_st.ws_url.is_none());
+
+        drop(listener);
         let _ = fs::remove_dir_all(&dir);
     }
 }

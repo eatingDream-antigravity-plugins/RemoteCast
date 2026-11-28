@@ -256,8 +256,24 @@ fn is_relay_command_line(cmd: &str) -> bool {
 }
 
 #[cfg(not(test))]
+fn ps_program() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "/bin/ps"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if std::path::Path::new("/bin/ps").exists() {
+            "/bin/ps"
+        } else {
+            "/usr/bin/ps"
+        }
+    }
+}
+
+#[cfg(not(test))]
 fn verify_relay_process(pid: libc::pid_t) -> bool {
-    let Ok(output) = Command::new("ps")
+    let Ok(output) = Command::new(ps_program())
         .args(["-o", "uid=,command=", "-p", &pid.to_string()])
         .output()
     else {

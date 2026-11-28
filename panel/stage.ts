@@ -56,7 +56,12 @@ const h = (sel: string, at?: string | 0, ...kids: HChild[]): HTMLElement => {
     const j = kv.indexOf("=");
     if (j > 0) {
       const k = kv.slice(0, j), v = kv.slice(j + 1);
-      k === "t" ? (n.textContent = v) : k[0] === "." ? (n.dataset[k.slice(1)] = v) : sa(n, k[0] === "@" ? `aria-${ARIA[k.slice(1)]}` : k === "R" ? "role" : k, v);
+      if (k === "t") n.textContent = v;
+      else if (k[0] === ".") n.dataset[k.slice(1)] = v;
+      else {
+        const ak = (k[0] === "@" ? `aria-${ARIA[k.slice(1)]}` : k === "R" ? "role" : k).trim();
+        if (ak && !/^on/i.test(ak)) sa(n, ak, v);
+      }
     }
   }
   for (const c of kids) c != null && c !== false && n.append(isA(c) ? h(...(c as HSpec)) : typeof c === "string" ? doc.createTextNode(c) : c as Node);
@@ -503,7 +508,8 @@ const clTab = (tid: string): void => {
   uTabs(); uSt(); toast(T.tcl); evIn("close_tab", { targetId: tid }, 1, tid, tep);
 };
 const mkTab = (tid: string): HTMLElement => {
-  const x = h("b.x", `t=×;@l=${T.ct}`), node = h(".p", `tabindex=0;R=tab;.id=${tid}`, ["s.tt"], x);
+  const x = h("b.x", `t=×;@l=${T.ct}`), node = h(".p", "tabindex=0;R=tab", ["s.tt"], x);
+  node.dataset.id = tid;
   ck(node, (e: Event) => e.target !== x && swTab(tid));
   on(node, "auxclick", (e: MouseEvent) => e.button === 1 && (pd(e), clTab(tid)));
   on(node, "keydown", (e: KeyboardEvent) => (e.key === "Enter" || e.key === " ") && (pd(e), swTab(tid)));

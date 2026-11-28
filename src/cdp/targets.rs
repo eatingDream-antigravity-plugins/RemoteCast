@@ -13,6 +13,13 @@ pub const CLOSED_TARGET_TTL: Duration = Duration::from_secs(5);
 const TAB_CACHE_TTL: Duration = Duration::from_millis(2500);
 pub const POPUP_TRIGGER_WINDOW: Duration = Duration::from_millis(2500);
 
+pub(crate) fn is_valid_target_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
+}
+
 /// Authoritative owner of Chrome target sessions, modal JS dialogs, active tab focus,
 /// monotonic `tab_epoch` and `pause_epoch`, and the dedicated popup auto-follow timer.
 pub struct TabStateStore {
@@ -279,7 +286,7 @@ impl TabStateStore {
         let opener_id = info.get("openerId").and_then(|v| v.as_str());
 
         let valid_page = is_page
-            && !new_tid.is_empty()
+            && is_valid_target_id(new_tid)
             && !url.starts_with("devtools://")
             && !(url.starts_with("chrome-extension://") && title.is_empty())
             && !self.is_recently_closed(new_tid);
@@ -332,7 +339,11 @@ impl TabStateStore {
             if item.get("type").and_then(|v| v.as_str()) != Some("page") {
                 continue;
             }
-            let Some(tid) = item.get("targetId").and_then(|v| v.as_str()) else {
+            let Some(tid) = item
+                .get("targetId")
+                .and_then(|v| v.as_str())
+                .filter(|id| is_valid_target_id(id))
+            else {
                 continue;
             };
             if self.recently_closed.contains_key(tid) {
@@ -704,4 +715,34 @@ pub(crate) fn close_tab(
         "tabsHash": t_hash,
         "seq": seq,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_id_validation_rejects_injection_and_oversized_ids() {
+        assert!(is_valid_target_id("A1B2C3_tab-1.foo:bar"));
+        assert!(!is_valid_target_id(""));
+        assert!(!is_valid_target_id("t1;onload=alert(1)"));
+        assert!(!is_valid_target_id("t1\"onclick=alert(1)"));
+        assert!(!is_valid_target_id("t1 with space"));
+        assert!(!is_valid_target_id("t1\nnewline"));
+        assert!(!is_valid_target_id(&"a".repeat(129)));
+
+        let mut store = TabStateStore::new();
+        let tabs = store.update_cached_tabs(vec![
+            json!({ "type": "page", "targetId": "t1;onload=alert(1)", "title": "Bad", "url": "https://evil.test" }),
+            json!({ "type": "page", "targetId": "valid_tab-1", "title": "Good", "url": "https://good.test" }),
+        ]);
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].target_id, "valid_tab-1");
+
+        assert!(!store.handle_target_created(Some(&json!({
+            "type": "page",
+            "targetId": "bad;id",
+            "url": "https://evil.test"
+        }))));
+    }
 }

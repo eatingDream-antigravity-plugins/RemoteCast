@@ -9,6 +9,7 @@ import {
   applyFramePayloadState,
   applyOptimisticTabClose,
   coalesceInputEvents,
+  isSafeImageUrl,
   isTargetErrorText,
   parsePanelLocaleTag,
   resolvePanelLang,
@@ -1129,5 +1130,17 @@ describe("Remote Cast panel net-policy.ts", () => {
     assert.equal(resolveStageAspect(1280, 800, 419, 520), +(419 / 520).toFixed(4));
     assert.equal(resolveStageAspect(0, 0, 960, 600), 1.6);
     assert.equal(resolveStageAspect(0, 0, 0, 0), 0);
+  });
+
+  it("isSafeImageUrl allows only base64 raster jpeg/webp/png data URLs", () => {
+    assert.equal(isSafeImageUrl("data:image/jpeg;base64,/9j/4AAQ"), true);
+    assert.equal(isSafeImageUrl("data:image/webp;base64,UklGRg=="), true);
+    assert.equal(isSafeImageUrl("data:image/png;base64,iVBORw0KGgo="), true);
+    assert.equal(isSafeImageUrl("DATA:IMAGE/PNG;BASE64,iVBORw0KGgo="), true);
+    assert.equal(isSafeImageUrl("data:image/svg+xml;base64,PHN2Zz4="), false);
+    assert.equal(isSafeImageUrl("data:image/svg+xml,<svg/>"), false);
+    assert.equal(isSafeImageUrl("data:image/png,not-base64"), false);
+    assert.equal(isSafeImageUrl("data:text/html,<script>alert(1)</script>"), false);
+    assert.equal(isSafeImageUrl("https://example.com/a.png"), false);
   });
 });

@@ -445,7 +445,8 @@ export const applyOptimisticTabClose = (
 export const isNoTabsPayload = (d: FramePayload | null | undefined): boolean =>
   !!(d?.noTabs || (Array.isArray(d?.tabs) && !d.tabs.length && !d?.activeTargetId));
 
-export const isSafeImageUrl = (u: unknown): u is string => typeof u === "string" && u.startsWith("data:image/");
+export const isSafeImageUrl = (u: unknown): u is string =>
+  typeof u === "string" && /^data:image\/(?:jpeg|webp|png);base64,/i.test(u);
 
 export const applyFramePayloadState = (
   S: PanelState,
