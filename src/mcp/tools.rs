@@ -91,6 +91,8 @@ pub fn tool_definitions(include_app_only: bool) -> Value {
                     "targetId": { "type": "string" },
                     "sinceSeq": { "type": "integer", "minimum": 0 },
                     "lastFrameHash": { "type": "string" },
+                    "if_hash": { "type": "string" },
+                    "ifHash": { "type": "string" },
                     "knownTabsHash": { "type": "string" },
                     "qualityPreset": { "type": "string", "enum": ["auto", "ultra", "low", "medium", "high"] },
                     "rttMs": { "type": "number", "minimum": 0 },
@@ -298,9 +300,12 @@ pub fn dispatch_tool_with_context(
         }),
     };
 
+    let compact_unchanged = name == "chrome_stream_frame"
+        && out.pointer("/structuredContent/unchanged") == Some(&json!(true))
+        && out.pointer("/structuredContent/connected").is_none();
     if let Some(sc) = out.get_mut("structuredContent") {
         redact_relay_payload(sc);
-        if name != "chrome_stream_config" {
+        if name != "chrome_stream_config" && !compact_unchanged {
             attach_settings_snapshot(sc, settings);
         }
     }
@@ -308,7 +313,10 @@ pub fn dispatch_tool_with_context(
     if let Some((cache, generation)) = swr_cache.zip(generation) {
         if revoking {
             cache.finish_revoke(sc.filter(|sc| sc["ok"] == true && sc["connected"] == false));
-        } else if name != "chrome_stream_stage" && name != "chrome_stream_config" {
+        } else if name != "chrome_stream_stage"
+            && name != "chrome_stream_config"
+            && !compact_unchanged
+        {
             if let Some(sc) = sc.filter(|sc| sc["unconfirmed"] != true) {
                 cache.update_from_tool_result(generation, sc);
             }
@@ -614,9 +622,18 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
         .and_then(|v| v.as_str())
         .map(String::from);
     let since_seq = args.get("sinceSeq").and_then(|v| v.as_u64()).unwrap_or(0);
-    let last_hash = args
-        .get("lastFrameHash")
-        .and_then(|v| v.as_str())
+    let has_if_hash = ["if_hash", "ifHash"].iter().any(|k| {
+        args.get(*k)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    });
+    let last_hash = ["lastFrameHash", "if_hash", "ifHash"]
+        .iter()
+        .find_map(|k| {
+            args.get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or("")
         .to_string();
     let known_tabs_hash = args
@@ -657,14 +674,43 @@ fn handle_frame(relay: &Arc<dyn RelayBackend>, args: Value) -> Value {
                 profile.name,
                 t_start.elapsed().as_millis() as u64,
             );
-            let label = if norm.get("changed").and_then(|v| v.as_bool()) == Some(true) {
-                format!("Frame #{}", norm["seq"].as_u64().unwrap_or(0))
+            let frame_hash = norm["frameHash"].as_str().unwrap_or("");
+            let target_matches = req_target_id
+                .as_deref()
+                .is_none_or(|t| norm["activeTargetId"].as_str() == Some(t));
+            let can_compact = !last_hash.is_empty()
+                && !frame_hash.is_empty()
+                && frame_hash == last_hash
+                && norm["unchanged"] == true
+                && norm["changed"] == false
+                && norm["connected"] == true
+                && norm["paused"] != true
+                && norm["screencastPausedIdle"] != true
+                && norm["noTabs"] != true
+                && norm["dialog"].is_null()
+                && norm["recovered"] != true
+                && norm["popupSwitched"] != true
+                && norm["errorCode"].is_null()
+                && norm["error"].is_null()
+                && (has_if_hash || (norm.get("tabs").is_none() && target_matches));
+            let sc = if can_compact {
+                json!({
+                    "unchanged": true,
+                    "changed": false,
+                    "frameHash": frame_hash,
+                    "serverMs": norm["serverMs"],
+                })
+            } else {
+                norm
+            };
+            let label = if sc.get("changed").and_then(|v| v.as_bool()) == Some(true) {
+                format!("Frame #{}", sc["seq"].as_u64().unwrap_or(0))
             } else {
                 "No change".to_string()
             };
             json!({
                 "content": [{ "type": "text", "text": label }],
-                "structuredContent": norm
+                "structuredContent": sc
             })
         }
         Err(err) => {
@@ -1089,6 +1135,91 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("unknownKey"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn frame_supports_if_hash_aliases_and_returns_compact_unchanged_payload() {
+        let defs = tool_definitions(true);
+        let frame_def = defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "chrome_stream_frame")
+            .unwrap();
+        let props = &frame_def["inputSchema"]["properties"];
+        assert_eq!(props["if_hash"]["type"], "string");
+        assert_eq!(props["ifHash"]["type"], "string");
+
+        struct FrameRelay;
+        impl RelayBackend for FrameRelay {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _timeout: Duration,
+            ) -> Result<Value, String> {
+                assert_eq!(method, "poll_frame");
+                let same = params["lastFrameHash"] == "abc123def4567890";
+                Ok(json!({
+                    "connected": true,
+                    "connectionMode": "personal",
+                    "activeTargetId": "t1",
+                    "tabs": [{ "targetId": "t1", "title": "Example", "url": "https://example.test" }],
+                    "tabsHash": "th1",
+                    "changed": !same,
+                    "unchanged": same,
+                    "seq": 9,
+                    "frameHash": "abc123def4567890",
+                    "imageBytes": if same { 0 } else { 12 },
+                    "imageDataUrl": if same { "" } else { "data:image/webp;base64,QUFB" },
+                    "serverMs": 4,
+                }))
+            }
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "chrome-stream-if-hash-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::new(dir.clone());
+        let relay: Arc<dyn RelayBackend> = Arc::new(FrameRelay);
+
+        for key in ["if_hash", "ifHash"] {
+            let res = dispatch_tool_with_context(
+                &relay,
+                None,
+                Some(&store),
+                "chrome_stream_frame",
+                json!({ (key): "abc123def4567890" }),
+            );
+            let sc = &res["structuredContent"];
+            assert_eq!(sc["unchanged"], true);
+            assert_eq!(sc["changed"], false);
+            assert_eq!(sc["frameHash"], "abc123def4567890");
+            assert_eq!(sc["serverMs"], 4);
+            let encoded = serde_json::to_string(sc).unwrap();
+            assert!(
+                encoded.len() < 120,
+                "compact unchanged payload for {key} exceeded 120B: {encoded}"
+            );
+        }
+
+        let changed = dispatch_tool_with_context(
+            &relay,
+            None,
+            Some(&store),
+            "chrome_stream_frame",
+            json!({ "if_hash": "different-hash" }),
+        );
+        assert_eq!(changed["structuredContent"]["changed"], true);
+        assert_eq!(changed["structuredContent"]["unchanged"], false);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -76,6 +76,7 @@ export interface FramePayload {
   settingsPath?: string;
   settingsError?: string;
   rttMs?: number;
+  bootTs?: number;
   [k: string]: unknown;
 }
 
@@ -322,31 +323,33 @@ export class AdaptiveBandwidthController {
     const bg = this.bgPollIntervalSec;
     const p = (waitMs: number, d: number): PollTimingResult => ({ waitMs, nextDelayMs: d });
     const t3 = (a: number, b: number, c: number): number => (r > 700 ? a : r > 350 ? b : c);
+    const fl = (b: number): number => (b < 0 ? b : Math.max(b, Math.min(15000, Math.round(r * 3))));
     return h
-      ? p(0, bg === -1 ? -1 : bg > 0 ? Math.min(300000, bg * 1000 * m) : Math.min(30000, tierVal(r, 12000, 8000, 4000, 2000) * m))
+      ? p(0, fl(bg === -1 ? -1 : bg > 0 ? Math.min(300000, bg * 1000 * m) : Math.min(30000, tierVal(r, 12000, 8000, 4000, 2000) * m)))
       : si && !ib
-        ? p(0, Math.min(20000, 4000 * m))
+        ? p(0, fl(Math.min(20000, 4000 * m)))
         : ib
           ? p(r > 350 ? 220 : 140, clamp(Math.round(r * 0.3), 75, 220))
           : ec > 0
-            ? p(0, Math.min(16000, (im < 3500 ? 1000 : im < 12000 ? 1500 : 2000) * m))
+            ? p(0, fl(Math.min(16000, (im < 3500 ? 1000 : im < 12000 ? 1500 : 2000) * m)))
             : st && im >= 1000
-              ? p(1400, t3(600, 350, 180))
+              ? p(1400, fl(t3(600, 350, 180)))
               : im < 3500
                 ? p(r > 350 ? 280 : 180, t3(300, 160, 50))
                 : im < 12000
-                  ? p(1350, t3(800, 450, 240))
-                  : p(1400, t3(2400, 1600, 1100));
+                  ? p(1350, fl(t3(800, 450, 240)))
+                  : p(1400, fl(t3(2400, 1600, 1100)));
   }
 
   computeOfflinePollDelay({ hidden: h = false, errCount: ec = 0 }: { hidden?: boolean; errCount?: number } = {}): number {
     const bg = this.bgPollIntervalSec;
     const m = eb(ec);
-    return h && bg === -1
+    const d = h && bg === -1
       ? -1
       : h && bg > 0
         ? Math.min(300000, bg * 1000 * m)
         : Math.min(30000, tierVal(this.ewmaRttMs, h ? 10000 : 8000, h ? 7500 : 6000, h ? 5000 : 4500, 3000) * m);
+    return d < 0 ? d : Math.max(d, Math.min(15000, Math.round(this.ewmaRttMs * 3)));
   }
 
   getWheelCoalesceMs(): number {

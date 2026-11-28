@@ -72,7 +72,22 @@ interface PostedMessage {
   };
 }
 
-function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = "" } = {}) {
+function bootPanel(
+  boot: FramePayload = {},
+  {
+    navLang = "en-US",
+    hostLocale = "",
+    storage,
+    visibilityState = "visible",
+    deferConnect = false,
+  }: {
+    navLang?: string;
+    hostLocale?: string;
+    storage?: Map<string, string>;
+    visibilityState?: "visible" | "hidden";
+    deferConnect?: boolean;
+  } = {}
+) {
   const html = fs.readFileSync(path.join(panelDir, "dist", "panel.html"), "utf8");
   const match = html.match(/<script>\/\*__CHROME_STREAM_BOOT__\*\/([\s\S]*?)<\/script>/);
   assert.ok(match, "built panel.html must contain single inline script");
@@ -148,7 +163,7 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     documentElement: rootEl,
     body: mkEl("body"),
     head: mkEl("head"),
-    visibilityState: "visible",
+    visibilityState,
     getElementById(id: string) { if (!els.has(id)) { const n = mkEl(id); n.id = id; } return els.get(id)!; },
     createElement(t: string) { return mkEl(t); },
     createElementNS(_ns: string, t: string) { return mkEl(t); },
@@ -166,8 +181,10 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
   };
   let disposed = false;
   const activeTimers = new Set<ReturnType<typeof setTimeout>>();
+  const scheduledDelays: number[] = [];
   const scheduleTimer = (fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
     if (disposed) return 0 as unknown as ReturnType<typeof setTimeout>;
+    if (typeof ms === "number") scheduledDelays.push(ms);
     const id = setTimeout(() => { activeTimers.delete(id); if (!disposed) fn(...args); }, ms);
     id.unref?.();
     activeTimers.add(id);
@@ -175,7 +192,7 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
   };
   const cancelTimer = (id: ReturnType<typeof setTimeout>) => { activeTimers.delete(id); clearTimeout(id); };
   let nowMs = 10_000;
-  const ctx = vm.createContext({
+  const ctxGlobals: Record<string, unknown> = {
     window: win,
     document: doc,
     navigator: { language: navLang, platform: "MacIntel", clipboard: { writeText: async () => {} } },
@@ -192,30 +209,43 @@ function bootPanel(boot: FramePayload = {}, { navLang = "en-US", hostLocale = ""
     __CHROME_STREAM_BOOT__: boot,
     setTimeout: scheduleTimer,
     clearTimeout: cancelTimer,
-  });
+  };
+  if (storage) {
+    ctxGlobals.localStorage = {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => { storage.set(k, String(v)); },
+    };
+  }
+  const ctx = vm.createContext(ctxGlobals);
   vm.runInContext(match[1], ctx);
 
   const initReq = posted.find((m) => m.method === "ui/initialize");
   const msgHandler = winListeners.get("message")?.[0]!;
-  msgHandler({
-    source: win.parent,
-    data: {
-      jsonrpc: "2.0",
-      id: initReq!.id,
-      result: {
-        protocolVersion: "2026-01-26",
-        hostContext: { theme: "dark", ...(hostLocale ? { locale: hostLocale } : {}) },
-        hostCapabilities: { serverTools: {} },
+  const resolveConnect = () => {
+    msgHandler({
+      source: win.parent,
+      data: {
+        jsonrpc: "2.0",
+        id: initReq!.id,
+        result: {
+          protocolVersion: "2026-01-26",
+          hostContext: { theme: "dark", ...(hostLocale ? { locale: hostLocale } : {}) },
+          hostCapabilities: { serverTools: {} },
+        },
       },
-    },
-  });
+    });
+  };
+  if (!deferConnect) resolveConnect();
 
   const cleanup = () => {
     disposed = true;
     for (const id of activeTimers) clearTimeout(id);
     activeTimers.clear();
   };
-  return { els, posted, msgHandler, win, winListeners, setNow: (v: number) => { nowMs = v; }, cleanup };
+  return {
+    els, posted, msgHandler, win, doc, winListeners, activeTimers, scheduledDelays,
+    resolveConnect, setNow: (v: number) => { nowMs = v; }, cleanup,
+  };
 }
 
 describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
@@ -656,6 +686,157 @@ describe("Remote Cast panel kit invariants & Wave 2 regressions", () => {
       assert.equal(h.els.get("sw")!.hidden, false, "Settings drawer must remain open across standby probeOff ticks");
     } finally {
       h.cleanup();
+    }
+  });
+
+  it("hydrates redacted localStorage SWR at Frame 0 on empty or older bootTs without leaking pixels/wsUrl", async () => {
+    const store = new Map<string, string>();
+    const h1 = bootPanel({ connected: false }, { storage: store });
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      h1.msgHandler({
+        source: h1.win.parent,
+        data: {
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-result",
+          params: {
+            structuredContent: {
+              connected: true,
+              connectionMode: "personal",
+              activeTargetId: "t-swr",
+              tabs: [{ targetId: "t-swr", title: "Cached Tab", url: "https://swr.test" }],
+              tabsHash: "th-swr",
+              page: { title: "Cached Tab", url: "https://swr.test", viewportWidth: 1280, viewportHeight: 800 },
+              qualityApplied: "high",
+              portFile: { valid: true, port: 9222, path: "/secret/DevToolsActivePort", wsUrl: "ws://127.0.0.1:9222/devtools/browser/secret" },
+              imageDataUrl: "data:image/webp;base64,QUFB",
+              settings: { lang: "zh-CN", defaultQuality: "high", defaultConnectMode: "personal", bgPollIntervalSec: 5, idlePauseSec: 30 },
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+    } finally {
+      h1.cleanup();
+    }
+
+    const raw = store.get("chrome_stream_swr") || "";
+    assert.ok(raw.length > 0, "must persist SWR metadata in localStorage");
+    assert.ok(!raw.includes("imageDataUrl") && !raw.includes("QUFB"), "must NEVER persist imageDataUrl");
+    assert.ok(!raw.includes("wsUrl") && !raw.includes("/secret/"), "must NEVER persist wsUrl or local paths");
+    const parsed = JSON.parse(raw) as { v: number; savedAt: number; data: Record<string, unknown> };
+    assert.equal(parsed.v, 1);
+    assert.equal(parsed.data.activeTargetId, "t-swr");
+
+    // Reopen with empty b0 -> must hydrate synchronously BEFORE app.connect() resolves
+    const h2 = bootPanel({}, { storage: store, deferConnect: true });
+    try {
+      assert.equal(h2.els.get("vn")!.hidden, false, "empty b0 must hydrate #vn at Frame 0 from localStorage");
+      assert.equal(h2.els.get("vo")!.hidden, true);
+      assert.equal(h2.els.get("ui")!.value, "https://swr.test");
+      assert.equal(h2.els.get("tb")!.children.length, 1);
+      assert.equal(h2.els.get("tb")!.children[0]!.firstChild!.textContent, "Cached Tab");
+    } finally {
+      h2.cleanup();
+    }
+
+    // Reopen with older bootTs < cached.savedAt -> localStorage wins at Frame 0
+    const h3 = bootPanel({ connected: false, bootTs: parsed.savedAt - 500 }, { storage: store, deferConnect: true });
+    try {
+      assert.equal(h3.els.get("vn")!.hidden, false, "newer localStorage must override older bootTs at Frame 0");
+      assert.equal(h3.els.get("ui")!.value, "https://swr.test");
+    } finally {
+      h3.cleanup();
+    }
+
+    // Reopen with newer bootTs >= cached.savedAt -> SSR boot wins at Frame 0
+    const h4 = bootPanel({ connected: false, bootTs: parsed.savedAt + 500 }, { storage: store, deferConnect: true });
+    try {
+      assert.equal(h4.els.get("vo")!.hidden, false, "newer SSR bootTs must win over stale localStorage");
+      assert.equal(h4.els.get("vn")!.hidden, true);
+    } finally {
+      h4.cleanup();
+    }
+  });
+
+  it("coalesces fresh-boot poll(0) when bootTs < 2500ms, pauses on document.hidden, and drops out-of-order replies", async () => {
+    // 1. Fresh-boot coalescing: bootTs = 9600 (age 400ms < 2500ms) skips immediate t=0 poll(0)
+    const fresh = bootPanel({
+      connected: true,
+      bootTs: 9600,
+      tabs: [{ targetId: "t1", title: "Home", url: "https://fresh.test" }],
+      activeTargetId: "t1",
+      seq: 1,
+      frameHash: "h1",
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 15));
+      const immediate = fresh.posted.filter((m) => m.params?.name === "chrome_stream_frame");
+      assert.equal(immediate.length, 0, "fresh SSR boot (<2500ms) must coalesce and skip immediate t=0 poll(0)");
+
+      // Emit document.hidden -> clears scheduled poll timers immediately
+      fresh.doc.visibilityState = "hidden";
+      fresh.doc.listeners.get("visibilitychange")?.forEach((fn) => fn({}));
+      assert.equal(fresh.activeTimers.size, 0, "document.hidden must clear all scheduled poll timers");
+
+      // Emit document.visible -> resumes via forceNow()
+      fresh.doc.visibilityState = "visible";
+      fresh.setNow(10_500);
+      fresh.doc.listeners.get("visibilitychange")?.forEach((fn) => fn({}));
+      await new Promise((r) => setTimeout(r, 10));
+      const afterReveal = fresh.posted.filter((m) => m.params?.name === "chrome_stream_frame");
+      assert.equal(afterReveal.length, 1, "visibilitychange visible must resume polling");
+    } finally {
+      fresh.cleanup();
+    }
+
+    // 2. Out-of-order drop via monotonic pollSeq across probeOff -> conn/onResult -> poll
+    const ooo = bootPanel({ connected: false, portFile: { valid: true, port: 9222 } });
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      // Trigger probeOff #1 (stays pending)
+      ooo.setNow(12_000);
+      ooo.winListeners.get("focus")?.forEach((fn) => fn({}));
+      await new Promise((r) => setTimeout(r, 10));
+      const staleProbe = ooo.posted.filter((m) => m.params?.name === "chrome_stream_frame").pop();
+      assert.ok(staleProbe, "expected pending probeOff call");
+
+      // Newer tool-result connects to t-new and fires poll #2
+      ooo.msgHandler({
+        source: ooo.win.parent,
+        data: {
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-result",
+          params: {
+            structuredContent: {
+              connected: true,
+              connectionMode: "personal",
+              activeTargetId: "t-new",
+              tabs: [{ targetId: "t-new", title: "New Tab", url: "https://new.test" }],
+              tabsHash: "th-new",
+              page: { title: "New Tab", url: "https://new.test" },
+            },
+          },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(ooo.els.get("vn")!.hidden, false);
+      assert.equal(ooo.els.get("ui")!.value, "https://new.test");
+
+      // Now stale probeOff #1 arrives late with connected:false -> MUST be dropped!
+      ooo.msgHandler({
+        source: ooo.win.parent,
+        data: {
+          jsonrpc: "2.0",
+          id: staleProbe.id,
+          result: { structuredContent: { connected: false, errorCode: "not_detected" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 15));
+      assert.equal(ooo.els.get("vn")!.hidden, false, "late out-of-order probeOff reply must be dropped");
+      assert.equal(ooo.els.get("ui")!.value, "https://new.test");
+    } finally {
+      ooo.cleanup();
     }
   });
 });

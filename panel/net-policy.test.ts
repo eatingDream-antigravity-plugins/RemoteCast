@@ -520,6 +520,19 @@ describe("Remote Cast panel net-policy.ts", () => {
     assert.deepEqual(netUltra.computePollTiming({ hidden: true, errCount: 3 }), { waitMs: 0, nextDelayMs: 30000 });
     assert.equal(netUltra.computeOfflinePollDelay({ hidden: true }), 10000);
     assert.equal(netUltra.computeOfflinePollDelay({ hidden: true, errCount: 2 }), 30000);
+
+    // Weak-net idle/offline RTT floor: >= max(baseMs, min(15_000, round(ewmaRttMs * 3)))
+    const net300 = new AdaptiveBandwidthController("auto");
+    net300.recordSample({ totalMs: 300, serverMs: 0, imageBytes: 5000, now: 1000 });
+    assert.ok(net300.computePollTiming({ idleMs: 1500, settled: true }).nextDelayMs >= 900);
+    assert.ok(net300.computePollTiming({ idleMs: 4000 }).nextDelayMs >= 900);
+    assert.ok(net300.computePollTiming({ idleMs: 15000 }).nextDelayMs >= 900);
+    assert.ok(net300.computeOfflinePollDelay({ hidden: false }) >= 900);
+
+    const netExtreme = new AdaptiveBandwidthController("auto");
+    netExtreme.recordSample({ totalMs: 6000, serverMs: 0, imageBytes: 5000, now: 1000 });
+    assert.equal(netExtreme.computePollTiming({ idleMs: 4000 }).nextDelayMs, 15000);
+    assert.equal(netExtreme.computeOfflinePollDelay({ hidden: false }), 15000);
   });
 
   it("wires reveal observers (ResizeObserver, IntersectionObserver, hostContext, pointerenter), throttles, and tears down cleanly", () => {
