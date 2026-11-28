@@ -32,7 +32,7 @@ Remote Cast streams a Chrome tab into the side panel so you can watch and steer 
 ## Why Remote Cast
 
 - **My Chrome or Separate Chrome**: Attach to your everyday Chrome with logins intact, or open a separate Chrome with a clean profile and no permission prompt.
-- **Pause vs. Disconnect in the header**: Click **Pause** to stop streaming at 0 FPS while keeping Chrome connected (so Chrome doesn't ask you to Allow again); click **Disconnect** when you want to end the session.
+- **Standby-first Disconnect in the header**: Click **Pause** or **Standby** (`mode: "standby"`) to stop streaming at 0 FPS while keeping Chrome's Allow permission warm for instant 1-click **Resume Stream**; click **Revoke** (`mode: "revoke"`) when you explicitly want to sever the debugging session.
 - **Stays in the background on macOS**: Clicking, switching tabs, and opening new tabs (`chrome://newtab`) never steal window focus away from Antigravity.
 - **Adapts to slow networks, sharpens when still**: Pick **Auto**, **Saver**, **Low**, **Balanced**, or **High**. While you scroll or type it stays responsive, then settles into a crisp still frame with zero wasted bytes when idle.
 - **Settings right in the panel**: Click **Settings** (`⚙`) to change language, default quality, default connect mode, background refresh, and idle pause — backed by a hot-reloading `settings.json`.
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/rem
 
 ### 2. Connect Chrome
 
-- **My Chrome**: Open `chrome://inspect/#remote-debugging` in Chrome and turn on remote debugging, then click **Connect my Chrome** in Remote Cast and click **Allow** once in Chrome. Use **Pause** when stepping away.
+- **My Chrome**: Open `chrome://inspect/#remote-debugging` in Chrome and turn on remote debugging, then click **Connect my Chrome** in Remote Cast and click **Allow** once in Chrome. Use **Standby** or **Pause** when stepping away.
 - **Separate Chrome**: Click **Open separate Chrome** for a fresh, isolated local profile (`0700` permissions on `127.0.0.1`) with no permission prompt. It picks a free local port automatically so it runs cleanly alongside your everyday Chrome.
 
 ## For AI Agents

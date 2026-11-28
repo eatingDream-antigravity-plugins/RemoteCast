@@ -16,13 +16,13 @@ Invoke only the public tools below (app-only tools carry `_meta.ui.visibility: [
 | --- | --- | --- |
 | `chrome_stream_stage` | Open the panel (`ui://chrome-stream-mcp/stage`) and report relay/Chrome readiness without auto-connecting. | `{}` |
 | `chrome_stream_connect` | Connect or verify the persistent local relay session and start streaming the active tab. | `{ qualityPreset?: "auto" \| "ultra" \| "low" \| "medium" \| "high", rttMs?: number, mode?: "auto" \| "personal" \| "remote" }` |
-| `chrome_stream_disconnect` | Pause capture (keeps Chrome Allow alive) or disconnect and close the Chrome debugging session. | `{ mode?: "standby" \| "revoke" }` (default `"revoke"`) |
+| `chrome_stream_disconnect` | Drop to 0 FPS standby (recommended, keeps Chrome Allow alive) or revoke and close the Chrome debugging session. | `{ mode?: "standby" \| "revoke" }` (default `"revoke"`) |
 
 ## Workflows
 
 - **Open viewer**: Call `chrome_stream_stage` to inspect `connected`, `connectionMode`, `portFile.valid`, and `noTabs`. Never assume Chrome is connected (staging never auto-dials). Call `chrome_stream_connect` only if the user asked to connect right away; otherwise let them choose **Connect my Chrome** or **Open separate Chrome** in the panel.
-- **Pause vs. Disconnect**: Prefer `chrome_stream_disconnect({ mode: "standby" })` (or panel header **Pause / Resume**) when the user wants to pause capture without losing Chrome's **Allow** permission. Use `mode: "revoke"` (or header **Disconnect**) when the user wants to end the session.
-- **Zero open tabs / closed window**: Remote Cast never auto-creates `about:blank`. If `connected: true` and `noTabs: true`, tell the user they can click **New tab** (opens `chrome://newtab` in the background) or **Disconnect** in the panel.
+- **Standby vs. Revoke**: Prefer `chrome_stream_disconnect({ mode: "standby" })` (or panel **Standby** / **Pause**) when stepping away so capture drops to 0 FPS while keeping Chrome's **Allow** permission warm for 1-click resume. Use `mode: "revoke"` (or panel **Revoke** / **Revoke Grant**) only when the user wants to sever the debugging WebSocket.
+- **Zero open tabs / closed window**: Remote Cast never auto-creates `about:blank`. If `connected: true` and `noTabs: true`, tell the user they can click **New tab** (opens `chrome://newtab` in the background) or **Standby** / **Revoke** in the panel.
 - **Weak networks**: Default to `qualityPreset: "auto"`. The 5 tiers ordered weakest to sharpest are `auto`, `ultra` (**Saver**), `low` (**Low**), `medium` (**Balanced**), and `high` (**High**).
 
 ## Configuration (`settings.json`)

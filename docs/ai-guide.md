@@ -14,7 +14,7 @@ Complete operational reference for AI agents and power users configuring **Remot
 | :--- | :--- | :--- |
 | `chrome_stream_stage` | `{}` | Opens the live viewer (`ui://chrome-stream-mcp/stage`) and reports relay/Chrome readiness without auto-connecting. |
 | `chrome_stream_connect` | `{ qualityPreset?: "auto" \| "ultra" \| "low" \| "medium" \| "high", rttMs?: number, mode?: "auto" \| "personal" \| "remote" }` | Connects to local Chrome (`auto` checks `DevToolsActivePort` then loopback debug port; `personal` uses port files only; `remote` uses Separate Chrome loopback port only) and starts streaming the active tab. |
-| `chrome_stream_disconnect` | `{ mode?: "standby" \| "revoke" }` (default `"revoke"`) | `"standby"` pauses capture (0 FPS) while keeping the authorized Chrome debugging session alive in the relay; `"revoke"` closes the session (on My Chrome, Chrome asks to Allow again next time). |
+| `chrome_stream_disconnect` | `{ mode?: "standby" \| "revoke" }` (default `"revoke"`) | `"standby"` (recommended) drops capture to 0 FPS while keeping the authorized Chrome debugging session warm in the relay; `"revoke"` closes the session (on My Chrome, Chrome asks to Allow again next time). |
 
 ### App-Only Tools (MCP Apps UI hosts)
 
@@ -25,11 +25,11 @@ Complete operational reference for AI agents and power users configuring **Remot
 | `chrome_stream_launch` | `{ qualityPreset?, rttMs? }` | Reuses a live endpoint verified against the isolated profile, or starts Separate Chrome (`0700` `<data_dir>/remote-profile`, `--remote-debugging-address=127.0.0.1`), connects in `"remote"` mode, and warms the active tab. |
 | `chrome_stream_config` | `{ action: "get" \| "update", patch?: { ... } }` | Reads or atomically updates `${PLUGIN_DATA}/settings.json` (`0600`, `flock`-locked, preserves unknown keys) and returns `{ ok, settings, settingsPath, settingsGen, settingsError }`. |
 
-## 2. Pause vs. Disconnect & Separate Chrome
+## 2. Standby vs. Revoke & Separate Chrome
 
-- **My Chrome** (`mode: "personal"`) discovers Chrome from its `DevToolsActivePort` files. Confirm **Allow** once in Chrome; the local relay keeps that authorized session across host reloads and Pause.
-- **Pause** (`mode: "standby"`) pauses streaming at 0 FPS without dropping authorization.
-- **Disconnect** (`mode: "revoke"`) closes the debugging WebSocket and clears the bootstrap page, tabs, and pixels. Chrome itself stays open.
+- **My Chrome** (`mode: "personal"`) discovers Chrome from its `DevToolsActivePort` files. Confirm **Allow** once in Chrome; the local relay keeps that authorized session across host reloads, **Pause**, and **Standby**.
+- **Standby** (`mode: "standby"` / panel **Standby**) stops streaming at 0 FPS and returns to the Standby Ready card without dropping Chrome authorization, enabling 1-click **Resume Stream** without re-prompting.
+- **Revoke** (`mode: "revoke"` / panel **Revoke** or **Revoke Grant**) closes the debugging WebSocket and clears the bootstrap page, tabs, and pixels. Chrome itself stays open.
 - **Separate Chrome** starts with `--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=<port>`, and `--user-data-dir=<data_dir>/remote-profile`. It reuses a running managed session matching the profile, or automatically picks a free loopback port starting at `debugPort + 1` (`9223..=9232`, falling back to an OS-assigned free loopback port).
 - **Focus-safe background interaction (macOS)**: Tab switches, tab closes, and new tabs (`Target.createTarget` with `background: true`) never call `Target.activateTarget`; focus emulation (`Emulation.setFocusEmulationEnabled(true)`) keeps keyboard/mouse input working on background tabs without bringing Chrome in front of Antigravity. (Note: minimizing a Chrome window on macOS throttles Chromium's compositor; keep the Chrome window un-minimized behind Antigravity or use Separate Chrome.)
 
